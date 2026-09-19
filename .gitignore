@@ -1,0 +1,211 @@
+# ============================================================
+# OS / editor
+# ============================================================
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.example.json
+
+# ============================================================
+# Secrets / environment
+# Keep safe examples tracked.
+# ============================================================
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt.local
+*.secret
+secrets/
+.local-secrets/
+
+# ============================================================
+# Python / FastAPI
+# ============================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+.venv/
+venv/
+env/
+ENV/
+
+.pytest_cache/
+.mypy_cache/
+.pyright/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+junit.xml
+
+*.egg-info/
+.eggs/
+dist/
+build/
+wheels/
+pip-wheel-metadata/
+.ipynb_checkpoints/
+
+# ============================================================
+# Node / React / Vite / TypeScript
+# ============================================================
+node_modules/
+.pnpm-store/
+.yarn/
+.npm/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+frontend/dist/
+frontend/build/
+dist/
+build/
+.vite/
+vite.config.*.timestamp-*
+*.tsbuildinfo
+
+coverage/
+.nyc_output/
+playwright-report/
+test-results/
+blob-report/
+storybook-static/
+
+# ============================================================
+# Runtime / local application state
+# ============================================================
+*.log
+logs/
+tmp/
+temp/
+.cache/
+.local/
+run/
+*.pid
+
+*.sqlite
+*.sqlite3
+*.db
+data/
+local-data/
+dev-data/
+redis-data/
+mock-data/
+provider-mock-data/
+
+# ============================================================
+# Docker / Compose local-only files
+# ============================================================
+docker-compose.override.yml
+docker-compose.override.yaml
+compose.override.yml
+compose.override.yaml
+docker-compose.local.yml
+docker-compose.local.yaml
+compose.local.yml
+compose.local.yaml
+
+.docker-data/
+docker-data/
+volumes/
+
+# ============================================================
+# Terraform / infrastructure local state (if later introduced)
+# ============================================================
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
+# Keep dependency/provider lock files tracked:
+# package-lock.json / pnpm-lock.yaml / yarn.lock
+# poetry.lock / uv.lock / requirements lock files
+# .terraform.lock.hcl
+
+# ============================================================
+# Local certificates / generated trust stores
+# ============================================================
+certs/local/
+ca/local/
+*.jks
+*.keystore
+
+# ============================================================
+# Generated artifacts
+# Adjust only if intentionally committed.
+# ============================================================
+generated/
+artifacts/
+sbom/
+reports/
+
+# ============================================================
+# AI / Codex guidance pack — LOCAL ONLY
+#
+# These exact guidance files remain available locally but are
+# intentionally excluded from the product repository.
+# Normal application source/docs remain trackable.
+# ============================================================
+/AGENTS.md
+/backend/AGENTS.md
+/frontend/AGENTS.md
+/connector/AGENTS.md
+/README-AI-GUIDANCE.md
+/PACK_MANIFEST.md
+
+/docs/ARCHITECTURE.md
+/docs/ENGINEERING.md
+/docs/SECURITY.md
+/docs/FRONTEND.md
+/docs/PROVIDERS.md
+/docs/INTERFACES.md
+/docs/AUTHORIZATION.md
+/docs/DOMAIN_INVARIANTS.md
+/docs/OPERATIONS.md
+/docs/GOVERNANCE.md
+/docs/CONTEXT_AND_DOCS.md
+/docs/QUALITY_GATE.md
+/docs/TASK_CONTEXT_MAP.md
+/docs/PROJECT_STATE.md
+/docs/LOCAL_DEVELOPMENT.md
+/docs/GIT_POLICY.md
+/docs/SECURITY_CONTROL_MAPPING_TEMPLATE.md
+
+/docs/adr/README.md
+/docs/adr/TEMPLATE.md
+/docs/features/TEMPLATE.md
+/docs/handoffs/
+
+/templates/
+
+# ============================================================
+# Local AI tool state
+# ============================================================
+.codex/
+.claude/
+.cursor/
+.aider*
+.ai/
+.ai-local/

@@ -1,0 +1,8 @@
+* @ciesinsn
+
+/backend/src/firewall_manager/application/ @ciesinsn
+/backend/src/firewall_manager/providers/ @ciesinsn
+/backend/src/firewall_manager/worker/ @ciesinsn
+/connector/ @ciesinsn
+/.github/ @ciesinsn
+/compose.yaml @ciesinsn

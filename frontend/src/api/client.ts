@@ -1,0 +1,213 @@
+import type { components } from './schema';
+
+export type Session = components['schemas']['SessionResponse'];
+export type ProviderSummary = components['schemas']['ProviderSummary'];
+export type Overview = components['schemas']['OverviewResponse'];
+export type Manager = components['schemas']['ManagerResponse'];
+export type Policy = components['schemas']['PolicyResponse'];
+export type Rule = components['schemas']['RuleResponse'];
+export type FirewallObject = components['schemas']['ObjectResponse'];
+export type ProviderStatus = components['schemas']['ProviderStatusResponse'];
+export type ActiveGroup = components['schemas']['ActiveGroupResponse'];
+export type DelegatedPolicy = components['schemas']['DelegatedPolicySummary'];
+export type DelegatedContext = components['schemas']['DelegatedContextResponse'];
+export type AdministrationSnapshot = components['schemas']['AdministrationSnapshotResponse'];
+export type ChangeSet = components['schemas']['ChangeSetResponse'];
+type ErrorEnvelope = components['schemas']['ErrorEnvelope'];
+
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly code: string,
+    readonly correlationId: string,
+  ) {
+    super(message);
+  }
+}
+
+const developmentUser = import.meta.env.VITE_DEV_AUTH_USER ?? 'viewer@example.test';
+
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(path, {
+    ...init,
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      'X-Dev-User': developmentUser,
+      ...init?.headers,
+    },
+    credentials: 'same-origin',
+  });
+  if (!response.ok) {
+    const payload = (await response.json()) as ErrorEnvelope;
+    throw new ApiError(payload.error.message, payload.error.code, payload.error.correlation_id);
+  }
+  if (response.status === 204) return undefined as T;
+  return (await response.json()) as T;
+}
+
+async function get<T>(path: string): Promise<T> {
+  return request<T>(path);
+}
+
+export async function loadInitialOverview(): Promise<{ session: Session; overview: Overview }> {
+  const [session, overview] = await Promise.all([
+    get<Session>('/api/v1/session'),
+    get<Overview>('/api/v1/overview'),
+  ]);
+  return { session, overview };
+}
+
+export async function loadDelegatedPolicies(activeGroupId: string): Promise<DelegatedPolicy[]> {
+  return get<DelegatedPolicy[]>(
+    `/api/v1/delegated/policies?active_group_id=${encodeURIComponent(activeGroupId)}`,
+  );
+}
+
+export async function loadDelegatedContext(
+  activeGroupId: string,
+  policyId: string,
+): Promise<DelegatedContext> {
+  return get<DelegatedContext>(
+    `/api/v1/delegated/context?active_group_id=${encodeURIComponent(activeGroupId)}&policy_id=${encodeURIComponent(policyId)}`,
+  );
+}
+
+export async function loadAdministration(): Promise<AdministrationSnapshot> {
+  return get<AdministrationSnapshot>('/api/v1/admin/authorization');
+}
+
+export async function createAdministrativeResource(
+  resource: 'users' | 'groups',
+  values: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  return request<Record<string, unknown>>(`/api/v1/admin/${resource}`, {
+    method: 'POST',
+    body: JSON.stringify(values),
+  });
+}
+
+export async function upsertAuthorizationResource(
+  resource: string,
+  values: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  return request<Record<string, unknown>>(`/api/v1/admin/${resource}`, {
+    method: 'PUT',
+    body: JSON.stringify(values),
+  });
+}
+
+export async function updateAdministrativeEnabled(
+  resource: 'users' | 'groups',
+  resourceId: string,
+  enabled: boolean,
+  expectedRevision: number,
+): Promise<Record<string, unknown>> {
+  return request<Record<string, unknown>>(
+    `/api/v1/admin/${resource}/${encodeURIComponent(resourceId)}`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify({ enabled, expected_revision: expectedRevision }),
+    },
+  );
+}
+
+export async function revokeAuthorizationResource(
+  resource: string,
+  resourceId: string,
+  expectedRevision: number,
+): Promise<void> {
+  await request<void>(
+    `/api/v1/admin/${encodeURIComponent(resource)}/${encodeURIComponent(resourceId)}?expected_revision=${expectedRevision}`,
+    { method: 'DELETE' },
+  );
+}
+
+export async function loadChangeSets(activeGroupId: string): Promise<ChangeSet[]> {
+  return get<ChangeSet[]>(
+    `/api/v1/changesets?active_group_id=${encodeURIComponent(activeGroupId)}`,
+  );
+}
+
+export async function createChangeSet(
+  activeGroupId: string,
+  policyId: string,
+  title: string,
+  description: string,
+): Promise<ChangeSet> {
+  return request<ChangeSet>('/api/v1/changesets', {
+    method: 'POST',
+    body: JSON.stringify({
+      active_group_id: activeGroupId,
+      policy_id: policyId,
+      title,
+      description,
+    }),
+  });
+}
+
+export async function addDraftRule(
+  changeSetId: string,
+  activeGroupId: string,
+  rule: Record<string, unknown>,
+): Promise<ChangeSet> {
+  return request<ChangeSet>(
+    `/api/v1/changesets/${encodeURIComponent(changeSetId)}/operations/rules`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ active_group_id: activeGroupId, kind: 'CREATE_RULE', rule }),
+    },
+  );
+}
+
+export async function addDraftObject(
+  changeSetId: string,
+  activeGroupId: string,
+  object: Record<string, unknown>,
+): Promise<ChangeSet> {
+  return request<ChangeSet>(
+    `/api/v1/changesets/${encodeURIComponent(changeSetId)}/operations/objects`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ active_group_id: activeGroupId, object }),
+    },
+  );
+}
+
+export async function changeSetAction(
+  changeSetId: string,
+  activeGroupId: string,
+  action: 'preflight' | 'refresh' | 'execute' | 'cancel',
+): Promise<ChangeSet> {
+  return request<ChangeSet>(`/api/v1/changesets/${encodeURIComponent(changeSetId)}/${action}`, {
+    method: 'POST',
+    body: JSON.stringify({ active_group_id: activeGroupId }),
+  });
+}
+
+export interface Inventory {
+  managers: Manager[];
+  policies: Policy[];
+  rules: Rule[];
+  objects: FirewallObject[];
+  statuses: ProviderStatus[];
+}
+
+export async function loadInventory(): Promise<Inventory> {
+  const [managerPage, policyPage, rulePage, objectPage, statuses] = await Promise.all([
+    get<components['schemas']['PageResponse_ManagerResponse_']>(
+      '/api/v1/firewall-managers?limit=100',
+    ),
+    get<components['schemas']['PageResponse_PolicyResponse_']>('/api/v1/policies?limit=100'),
+    get<components['schemas']['PageResponse_RuleResponse_']>('/api/v1/rules?limit=100'),
+    get<components['schemas']['PageResponse_ObjectResponse_']>('/api/v1/objects?limit=100'),
+    get<ProviderStatus[]>('/api/v1/providers/status'),
+  ]);
+  return {
+    managers: managerPage.items,
+    policies: policyPage.items,
+    rules: rulePage.items,
+    objects: objectPage.items,
+    statuses,
+  };
+}

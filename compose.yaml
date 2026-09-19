@@ -1,0 +1,188 @@
+name: firewall-manager-local
+
+x-backend-environment: &backend-environment
+  APP_ENVIRONMENT: ${APP_ENVIRONMENT:-development}
+  APP_LOG_LEVEL: ${APP_LOG_LEVEL:-INFO}
+  DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://firewall:firewall-local-only@db:5432/firewall_manager}
+  REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+  FMC_BASE_URL: ${FMC_BASE_URL:-http://mock-fmc:9000}
+  SCC_BASE_URL: ${SCC_BASE_URL:-http://mock-scc:9000}
+  CORS_ORIGINS: ${CORS_ORIGINS:-["http://localhost:5173"]}
+  DEV_AUTH_ENABLED: ${DEV_AUTH_ENABLED:-true}
+  DEV_AUTH_DEFAULT_USER: ${DEV_AUTH_DEFAULT_USER:-viewer@example.test}
+  SCHEDULER_INTERVAL_SECONDS: ${SCHEDULER_INTERVAL_SECONDS:-15}
+
+x-backend-service: &backend-service
+  build:
+    context: ./backend
+  environment: *backend-environment
+  restart: unless-stopped
+  networks: [control-plane]
+  init: true
+  volumes:
+    - ./config:/app/config:ro
+
+services:
+  db:
+    image: postgres:17.6-alpine3.22@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-firewall_manager}
+      POSTGRES_USER: ${POSTGRES_USER:-firewall}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-firewall-local-only}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks: [control-plane]
+
+  redis:
+    image: redis:8.2.1-alpine3.22@sha256:987c376c727652f99625c7d205a1cba3cb2c53b92b0b62aade2bd48ee1593232
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - redis-data:/data
+    networks: [control-plane]
+
+  migrate:
+    <<: *backend-service
+    restart: "no"
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      db:
+        condition: service_healthy
+
+  seed:
+    <<: *backend-service
+    restart: "no"
+    command: ["python", "-m", "firewall_manager.seed"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  synchronize:
+    <<: *backend-service
+    restart: "no"
+    command: ["python", "-m", "firewall_manager.sync"]
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+      mock-fmc:
+        condition: service_healthy
+      mock-scc:
+        condition: service_healthy
+
+  mock-fmc:
+    <<: *backend-service
+    environment:
+      <<: *backend-environment
+      PROVIDER_KIND: fmc
+    command: ["uvicorn", "firewall_manager.mock_provider.main:app", "--host", "0.0.0.0", "--port", "9000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9000/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  mock-scc:
+    <<: *backend-service
+    environment:
+      <<: *backend-environment
+      PROVIDER_KIND: scc
+    command: ["uvicorn", "firewall_manager.mock_provider.main:app", "--host", "0.0.0.0", "--port", "9000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9000/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  backend:
+    <<: *backend-service
+    command: ["uvicorn", "firewall_manager.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend/src:/app/src:ro
+      - ./backend/alembic:/app/alembic:ro
+      - ./config:/app/config:ro
+    depends_on:
+      synchronize:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      mock-fmc:
+        condition: service_healthy
+      mock-scc:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health/ready', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  worker:
+    <<: *backend-service
+    command: ["dramatiq", "firewall_manager.worker.tasks", "--processes", "1", "--threads", "4"]
+    volumes:
+      - ./backend/src:/app/src:ro
+      - ./config:/app/config:ro
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-m", "firewall_manager.worker.health"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+      start_period: 15s
+
+  scheduler:
+    <<: *backend-service
+    command: ["python", "-m", "firewall_manager.scheduler"]
+    volumes:
+      - ./backend/src:/app/src:ro
+      - ./config:/app/config:ro
+    depends_on:
+      worker:
+        condition: service_started
+      redis:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+    environment:
+      VITE_API_PROXY_TARGET: ${VITE_API_PROXY_TARGET:-http://backend:8000}
+      VITE_DEV_AUTH_USER: ${VITE_DEV_AUTH_USER:-viewer@example.test}
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app
+      - frontend-node-modules:/app/node_modules
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:5173/"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [control-plane]
+    init: true
+    restart: unless-stopped
+
+networks:
+  control-plane:
+
+volumes:
+  postgres-data:
+  redis-data:
+  frontend-node-modules:

@@ -1,0 +1,39 @@
+# Starter canonical permission/action vocabulary.
+# This is a design seed, not a production authorization database.
+schema_version: 1
+
+actions:
+  read:
+    description: View an authorized resource.
+  use:
+    description: Reference/use an authorized object/resource without modifying it.
+  create:
+    description: Create a resource within an authorized scope.
+  modify:
+    description: Change an owned/delegated resource.
+  delete:
+    description: Delete an owned/delegated resource through ChangeSet workflow.
+  reorder:
+    description: Reorder a rule only within an authorized ordering scope.
+  submit:
+    description: Submit a ChangeSet for validation/approval.
+  approve:
+    description: Approve an eligible ChangeSet revision.
+  reject:
+    description: Reject an eligible ChangeSet revision.
+  deploy:
+    description: Execute an approved/eligible ChangeSet through provider transactions.
+  reconcile:
+    description: Perform authorized drift/adoption reconciliation.
+  manage_grants:
+    description: Administer application authorization/resource grants.
+
+invariants:
+  - "delegated authorization uses one explicit active Group and Access Policy"
+  - "permissions from other Group memberships do not contribute"
+  - "read does not imply use"
+  - "use does not imply modify"
+  - "modify does not imply approve"
+  - "approve does not imply deploy"
+  - "ownership does not imply cross-boundary reorder"
+  - "default deny"

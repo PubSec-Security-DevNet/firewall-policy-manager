@@ -1,0 +1,29 @@
+rules:
+  - id: no-disabled-tls-verification
+    message: TLS verification must remain enabled for provider communication.
+    severity: ERROR
+    languages: [python]
+    patterns:
+      - pattern-either:
+          - pattern: requests.$METHOD(..., verify=False, ...)
+          - pattern: httpx.$METHOD(..., verify=False, ...)
+
+  - id: no-python-dynamic-execution
+    message: Dynamic code execution is not allowed in application code.
+    severity: ERROR
+    languages: [python]
+    pattern-either:
+      - pattern: eval(...)
+      - pattern: exec(...)
+
+  - id: no-browser-provider-fetch
+    message: Browser code must call the application API rather than provider endpoints.
+    severity: ERROR
+    languages: [typescript]
+    paths:
+      include:
+        - /frontend/src
+      exclude:
+        - /frontend/src/**/*.test.ts
+        - /frontend/src/**/*.test.tsx
+    pattern-regex: 'fetch\([^\n]*(fmc|scc|provider)'
