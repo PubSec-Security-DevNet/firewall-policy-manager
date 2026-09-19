@@ -393,6 +393,79 @@ class SqlAuthorizationRepository:
             max(int(row[3]) for row in rows),
         )
 
+    def object_mutation_state(
+        self, group_id: UUID, policy_id: UUID, object_id: UUID, organization_id: UUID
+    ) -> dict[str, object] | None:
+        """Return authoritative ownership and conservative dependency scope for mutation."""
+        row = self._session.execute(
+            select(FirewallObject, AccessPolicy.manager_id)
+            .join(
+                AccessPolicy,
+                (AccessPolicy.id == policy_id)
+                & (AccessPolicy.organization_id == FirewallObject.organization_id),
+            )
+            .where(
+                FirewallObject.id == object_id,
+                FirewallObject.organization_id == organization_id,
+                FirewallObject.manager_id == AccessPolicy.manager_id,
+            )
+        ).one_or_none()
+        if row is None:
+            return None
+        item, manager_id = row
+        latest_sync_complete = self._session.scalar(
+            select(SyncRun.complete)
+            .where(
+                SyncRun.organization_id == organization_id,
+                SyncRun.manager_id == item.manager_id,
+            )
+            .order_by(SyncRun.started_at.desc())
+            .limit(1)
+        )
+        references = list(
+            self._session.scalars(
+                select(ObjectReference).where(
+                    ObjectReference.organization_id == organization_id,
+                    ObjectReference.target_object_id == object_id,
+                )
+            )
+        )
+        if latest_sync_complete is not True:
+            dependency_state = "INCOMPLETE"
+        elif not references:
+            dependency_state = "UNREFERENCED"
+        else:
+            within_scope = True
+            for reference in references:
+                if reference.source_rule_id is None:
+                    within_scope = False
+                    break
+                rule = self._session.get(AccessRule, reference.source_rule_id)
+                if (
+                    rule is None
+                    or rule.owner_group_id != group_id
+                    or rule.policy_id != policy_id
+                    or rule.management_state not in _USABLE_STATES
+                ):
+                    within_scope = False
+                    break
+            dependency_state = "WITHIN_SCOPE" if within_scope else "CROSS_SCOPE"
+        return {
+            "manager_id": manager_id,
+            "management_state": str(item.management_state),
+            "owner_group_id": item.owner_group_id,
+            "owner_policy_id": item.owner_policy_id,
+            "object_type": item.object_type,
+            "provider_name": item.name,
+            "expected_provider_name": item.expected_provider_name,
+            "provider_name_matches": bool(
+                item.expected_provider_name and item.name == item.expected_provider_name
+            ),
+            "dependency_state": dependency_state,
+            "reference_count": len(references),
+            "revision": int(item.revision),
+        }
+
     def zone_grant_state(
         self, group_id: UUID, policy_id: UUID, zone_id: UUID, organization_id: UUID
     ) -> tuple[UUID, str, set[str], int] | None:
@@ -616,7 +689,14 @@ class SqlAuthorizationRepository:
         )
         objects = list(
             self._session.execute(
-                select(FirewallObject.id, FirewallObject.name, FirewallObject.object_type)
+                select(
+                    FirewallObject.id,
+                    FirewallObject.name,
+                    FirewallObject.object_type,
+                    FirewallObject.owner_group_id,
+                    FirewallObject.owner_policy_id,
+                    FirewallObject.created_by_user_id,
+                )
                 .join(
                     ObjectUseGrant,
                     (ObjectUseGrant.object_id == FirewallObject.id)
@@ -703,7 +783,18 @@ class SqlAuthorizationRepository:
                 }
                 for row in rules
             ],
-            "objects": [{"id": row[0], "name": row[1], "object_type": row[2]} for row in objects],
+            "objects": [
+                {
+                    "id": row[0],
+                    "name": row[1],
+                    "object_type": row[2],
+                    "owner_type": "GROUP" if row[3] is not None else "PROVIDER",
+                    "owner_group_id": row[3],
+                    "owner_policy_id": row[4],
+                    "created_by_user_id": row[5],
+                }
+                for row in objects
+            ],
             "zones": [{"id": row[0], "name": row[1], "direction": row[2]} for row in zones],
             "categories": [{"id": row[0], "name": row[1]} for row in categories],
             "ip_ranges": ranges,
@@ -1159,6 +1250,12 @@ class SqlSyncRepository:
         else:
             changed = row.provider_fingerprint != item.fingerprint
             previous = row.provider_fingerprint
+            ownership_name_conflict = bool(
+                isinstance(row, FirewallObject)
+                and row.owner_group_id is not None
+                and row.expected_provider_name
+                and item.name != row.expected_provider_name
+            )
             row.name = item.name
             row.provider_version = item.native_version
             row.provider_fingerprint = item.fingerprint
@@ -1168,12 +1265,15 @@ class SqlSyncRepository:
                 # Provider observations never assign or clear application ownership/control scope.
                 if key not in {
                     "owner_group_id",
+                    "owner_policy_id",
                     "created_by_user_id",
                     "modified_by_user_id",
                 }:
                     setattr(row, key, value)
-            if changed:
-                row.management_state = ResourceState.DRIFTED
+            if changed or ownership_name_conflict:
+                row.management_state = (
+                    ResourceState.CONFLICT if ownership_name_conflict else ResourceState.DRIFTED
+                )
                 row.revision += 1
                 self._session.add(
                     DriftRecord(
@@ -1182,10 +1282,22 @@ class SqlSyncRepository:
                         sync_run_id=run_id,
                         resource_type=entity_type.__tablename__,
                         resource_id=row.id,
-                        status=ResourceState.DRIFTED,
+                        status=row.management_state,
                         previous_fingerprint=previous,
                         observed_fingerprint=item.fingerprint,
-                        details={"summary": "Provider fingerprint changed"},
+                        details={
+                            "summary": (
+                                "Application-owned provider name no longer matches its "
+                                "authoritative owner prefix"
+                                if ownership_name_conflict
+                                else "Provider fingerprint changed"
+                            ),
+                            "expected_provider_name": (
+                                getattr(row, "expected_provider_name", None)
+                                if ownership_name_conflict
+                                else None
+                            ),
+                        },
                     )
                 )
             elif row.management_state == ResourceState.MISSING:

@@ -44,6 +44,7 @@ _OPERATION_CAPABILITY = {
     ChangeOperationKind.MODIFY_RULE: ProviderCapability.ACCESS_RULE_UPDATE,
     ChangeOperationKind.DELETE_RULE: ProviderCapability.ACCESS_RULE_DELETE,
     ChangeOperationKind.MOVE_RULE: ProviderCapability.RULE_ORDERING,
+    ChangeOperationKind.ENSURE_RULE_CATEGORY: ProviderCapability.RULE_CATEGORY_MUTATION,
 }
 _OBJECT_CAPABILITY = {
     "NETWORK": ProviderCapability.NETWORK_OBJECT_CREATE,
@@ -51,6 +52,13 @@ _OBJECT_CAPABILITY = {
     "URL": ProviderCapability.URL_OBJECT_CREATE,
     "APPLICATION": ProviderCapability.APPLICATION_OBJECT_CREATE,
     "APPLICATION_FILTER": ProviderCapability.APPLICATION_OBJECT_CREATE,
+}
+_OBJECT_MUTATION_CAPABILITY = {
+    "NETWORK": ProviderCapability.NETWORK_OBJECT_MUTATION,
+    "PORT_SERVICE": ProviderCapability.PORT_SERVICE_OBJECT_MUTATION,
+    "URL": ProviderCapability.URL_OBJECT_MUTATION,
+    "APPLICATION": ProviderCapability.APPLICATION_OBJECT_MUTATION,
+    "APPLICATION_FILTER": ProviderCapability.APPLICATION_OBJECT_MUTATION,
 }
 
 
@@ -350,6 +358,13 @@ class ChangeSetService:
             outcome = await self._executor.execute(
                 targets[manager_id], change_set_id, manager_id, provider_operations
             )
+            self._repository.reconcile_successful_operations(
+                change_set,
+                principal,
+                active_group_id,
+                operations,
+                outcome.operation_results,
+            )
             transaction = self._repository.upsert_provider_transaction(
                 change_set,
                 manager_id,
@@ -365,7 +380,12 @@ class ChangeSetService:
                 principal,
                 "provider_transaction_result",
                 outcome.state.value,
-                {"manager_id": str(manager_id), "transaction_id": str(transaction["id"])},
+                {
+                    "manager_id": str(manager_id),
+                    "transaction_id": str(transaction["id"]),
+                    "owner_group_id": str(active_group_id),
+                    "actor_user_id": str(principal.user_id),
+                },
             )
         transaction_states = {str(item["state"]) for item in transactions}
         if ProviderTransactionState.RECONCILIATION_REQUIRED.value in transaction_states:
@@ -438,11 +458,12 @@ class ChangeSetService:
         checks: list[dict[str, object]] = []
 
         manager_id = UUID(str(operation["manager_id"]))
-        capability = (
-            _OBJECT_CAPABILITY.get(str(payload.get("object_type", "")))
-            if kind is ChangeOperationKind.CREATE_OBJECT
-            else _OPERATION_CAPABILITY[kind]
-        )
+        if kind is ChangeOperationKind.CREATE_OBJECT:
+            capability = _OBJECT_CAPABILITY.get(str(payload.get("object_type", "")))
+        elif kind in {ChangeOperationKind.MODIFY_OBJECT, ChangeOperationKind.DELETE_OBJECT}:
+            capability = _OBJECT_MUTATION_CAPABILITY.get(str(payload.get("object_type", "")))
+        else:
+            capability = _OPERATION_CAPABILITY[kind]
         capability_status = (
             self._repository.provider_capability_state(
                 manager_id, capability.value, principal.organization_id
@@ -491,9 +512,18 @@ class ChangeSetService:
             ChangeOperationKind.DELETE_RULE: Action.DELETE,
             ChangeOperationKind.MOVE_RULE: Action.REORDER,
             ChangeOperationKind.CREATE_OBJECT: Action.CREATE,
+            ChangeOperationKind.MODIFY_OBJECT: Action.MODIFY,
+            ChangeOperationKind.DELETE_OBJECT: Action.DELETE,
+            ChangeOperationKind.ENSURE_RULE_CATEGORY: Action.CREATE,
         }[kind]
-        if kind is ChangeOperationKind.CREATE_OBJECT:
-            resolution = self._evaluate_object(context, payload, checks)
+        if kind in {
+            ChangeOperationKind.CREATE_OBJECT,
+            ChangeOperationKind.MODIFY_OBJECT,
+            ChangeOperationKind.DELETE_OBJECT,
+        }:
+            resolution = self._evaluate_object(context, kind, payload, checks)
+        elif kind is ChangeOperationKind.ENSURE_RULE_CATEGORY:
+            resolution = self._evaluate_category(context, kind, checks)
         else:
             resolution = {}
             self._append_decision(
@@ -693,9 +723,12 @@ class ChangeSetService:
     def _evaluate_object(
         self,
         context: DelegatedPolicyContext,
+        kind: ChangeOperationKind,
         payload: dict[str, object],
         checks: list[dict[str, object]],
     ) -> dict[str, object]:
+        if kind is not ChangeOperationKind.CREATE_OBJECT:
+            return self._evaluate_object_mutation(context, kind, payload, checks)
         object_type = str(payload.get("object_type", ""))
         requested_name = str(payload.get("name", ""))
         value = str(payload.get("value", ""))
@@ -805,6 +838,185 @@ class ChangeSetService:
                 ),
             )
         return resolution_dict
+
+    def _evaluate_object_mutation(
+        self,
+        context: DelegatedPolicyContext,
+        kind: ChangeOperationKind,
+        payload: dict[str, object],
+        checks: list[dict[str, object]],
+    ) -> dict[str, object]:
+        object_id = self._required_uuid(payload, "object_id")
+        action = Action.MODIFY if kind is ChangeOperationKind.MODIFY_OBJECT else Action.DELETE
+        self._append_decision(
+            checks,
+            kind,
+            "object",
+            str(object_id),
+            self._authorization.authorize(
+                context,
+                action,
+                AuthorizationResource(AuthorizationResourceType.OBJECT, object_id),
+            ),
+        )
+        current = self._repository.object_mutation_context(
+            object_id,
+            context.access_policy_id,
+            context.principal.organization_id,
+        )
+        if current is None:
+            raise ResourceOutOfScopeError
+        object_type = str(payload.get("object_type", ""))
+        type_matches = object_type == current["object_type"] and object_type in {
+            "NETWORK",
+            "PORT_SERVICE",
+            "URL",
+            "APPLICATION",
+            "APPLICATION_FILTER",
+        }
+        checks.append(
+            {
+                "operation": kind.value,
+                "element_type": "object_type",
+                "element": object_type if type_matches else "NOT_DISCLOSED",
+                "permission": "delegated_mutable_type",
+                "allowed": type_matches,
+                "reason": "ALLOWED" if type_matches else "OBJECT_TYPE_MISMATCH",
+            }
+        )
+        resolution: dict[str, object] = {
+            "object_id": str(object_id),
+            "provider_name": current["name"],
+            "object_type": current["object_type"],
+        }
+        if kind is ChangeOperationKind.DELETE_OBJECT:
+            return resolution
+        try:
+            normalized = self._naming.normalize_value(object_type, str(payload.get("value", "")))
+        except (TypeError, ValueError):
+            checks.append(
+                {
+                    "operation": kind.value,
+                    "element_type": "object_value",
+                    "element": "NOT_DISCLOSED",
+                    "permission": "normalized_object_value",
+                    "allowed": False,
+                    "reason": "INVALID_NORMALIZED_VALUE",
+                }
+            )
+            return resolution
+        resolution["normalized_value"] = normalized
+        equivalent_id = self._repository.object_equivalent_id(
+            UUID(str(current["manager_id"])),
+            object_type,
+            normalized,
+            object_id,
+            context.principal.organization_id,
+        )
+        checks.append(
+            {
+                "operation": kind.value,
+                "element_type": "object_equivalence",
+                "element": "NONE" if equivalent_id is None else "NOT_DISCLOSED",
+                "permission": "no_duplicate_bypass",
+                "allowed": equivalent_id is None,
+                "reason": "ALLOWED" if equivalent_id is None else "EQUIVALENT_OBJECT_EXISTS",
+            }
+        )
+        if object_type == "NETWORK":
+            self._append_decision(
+                checks,
+                kind,
+                "network_value",
+                normalized,
+                self._authorization.authorize(
+                    context,
+                    Action.USE,
+                    AuthorizationResource(AuthorizationResourceType.IP_NETWORK, value=normalized),
+                ),
+            )
+        return resolution
+
+    def _evaluate_category(
+        self,
+        context: DelegatedPolicyContext,
+        kind: ChangeOperationKind,
+        checks: list[dict[str, object]],
+    ) -> dict[str, object]:
+        data = self._repository.category_ensure_context(
+            context.access_policy_id,
+            context.active_group_id,
+            context.principal.organization_id,
+        )
+        if data is None:
+            raise ResourceOutOfScopeError
+        provider_name = self._naming.category_name(
+            ProviderKind(str(data["provider"])), str(data["group_slug"])
+        )
+        if provider_name is None:
+            checks.append(
+                {
+                    "operation": kind.value,
+                    "element_type": "rule_category",
+                    "element": "NOT_DISCLOSED",
+                    "permission": "provider_naming",
+                    "allowed": False,
+                    "reason": "PROVIDER_NAME_RESTRICTION",
+                }
+            )
+            return {}
+        self._append_decision(
+            checks,
+            kind,
+            "access_policy",
+            str(context.access_policy_id),
+            self._authorization.authorize(
+                context,
+                Action.CREATE,
+                AuthorizationResource(AuthorizationResourceType.POLICY, context.access_policy_id),
+            ),
+        )
+        categories = _as_dict_list(data["categories"])
+        mapping = data.get("mapping")
+        if isinstance(mapping, dict):
+            mapped = cast("dict[str, object]", mapping)
+            category = next(
+                (item for item in categories if item["id"] == mapped["category_id"]), None
+            )
+            allowed = bool(
+                category
+                and mapped.get("expected_category_name") == provider_name
+                and category.get("name") == provider_name
+                and mapped.get("sync_state") == "SYNCED"
+                and category.get("management_state") not in {"MISSING", "CONFLICT", "DRIFTED"}
+            )
+            checks.append(
+                {
+                    "operation": kind.value,
+                    "element_type": "rule_category",
+                    "element": str(mapped["category_id"]) if allowed else "NOT_DISCLOSED",
+                    "permission": "authoritative_category_mapping",
+                    "allowed": allowed,
+                    "reason": "ALLOWED" if allowed else "CATEGORY_MAPPING_CONFLICT",
+                }
+            )
+            return {
+                "kind": "EXISTING_CATEGORY",
+                "provider_name": provider_name,
+                "category_id": str(mapped["category_id"]),
+            }
+        collision = next((item for item in categories if item.get("name") == provider_name), None)
+        checks.append(
+            {
+                "operation": kind.value,
+                "element_type": "rule_category",
+                "element": provider_name if collision is None else "NOT_DISCLOSED",
+                "permission": "create_mapped_category",
+                "allowed": collision is None,
+                "reason": "ALLOWED" if collision is None else "CATEGORY_NAME_CONFLICT",
+            }
+        )
+        return {"kind": "NEW_CATEGORY_REQUIRED", "provider_name": provider_name}
 
     def _revision_conflicts(
         self, change_set: dict[str, object], organization_id: UUID

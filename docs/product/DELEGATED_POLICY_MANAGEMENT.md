@@ -40,10 +40,11 @@ Organization
                    +-- PolicyDelegation(Group/User, capabilities)        [future]
                    +-- GroupPolicyCategoryMapping -- Provider Category
                    +-- AccessRule(owner Group, creator/modifier User)
-                   +-- ObjectUseGrant(Group/User -> FirewallObject)       [future]
-                   +-- ZoneGrant(Group/User -> SecurityZone)              [future]
-                   +-- IpRangeGrant(Group/User -> allowed network)        [future]
-                   +-- ObjectCreateGrant(Group/User -> object classes)    [future]
+                   +-- FirewallObject(owner Group+Policy, creator/modifier User)
+                   +-- ObjectUseGrant(Group -> FirewallObject)
+                   +-- ZoneGrant(Group -> SecurityZone)
+                   +-- IpRangeGrant(Group -> allowed network)
+                   +-- ObjectCreateGrant(Group -> object classes)
                    +-- ChangeSet(principal, acting Group, AccessPolicy)
 ```
 
@@ -53,13 +54,13 @@ Organization
 | Group | Primary boundary with immutable normalized provider slug and enabled/revision state | Implemented |
 | GroupMembership | Current eligibility only; never an automatic policy grant | Implemented |
 | Active Group context | Exactly one Group plus one Access Policy per delegated operation | Server-enforced and exposed in web UI |
-| PolicyDelegation | Explicit view/create/modify/delete/reorder/workflow-ready capabilities | Implemented; no provider mutation |
+| PolicyDelegation | Explicit rule/object view/create/modify/delete/reorder capabilities | Implemented with mock-only provider mutation |
 | Rule ownership | Exactly one owning Group for delegated rules, separate from creator/modifier | Enforced by delegated read/preflight and mock-only ChangeSet execution |
-| Object use grants | Explicit READ/USE/MODIFY distinction | USE foundation and preflight implemented |
+| Object ownership/use | Group+policy ownership is separate from explicit non-owned object USE | Implemented for Group-owned and provider-owned objects |
 | Zone grants | Explicit source/destination/both use | Implemented |
 | IP-range grants | Multiple canonical IPv4/IPv6 networks scoped to Group+policy | Implemented |
 | Object-create grants | Limited classes plus provider capability and equivalence gating | Authorization representation/preflight implemented |
-| Group/policy category mapping | Application-authoritative mapping to a provider category | Implemented; provider provisioning excluded |
+| Group/policy category mapping | Application-authoritative mapping to a provider category | Mock lookup/create/conflict/reconciliation implemented |
 
 ## Membership and policy delegation
 
@@ -68,8 +69,9 @@ Group; it grants no Access Policy or resource rights by itself. Policy delegatio
 each Group/User and Access Policy. Access to one policy never implies access to another policy on
 the same manager.
 
-Initial policy capabilities are `view`, `create_rule`, `modify_rule`, `delete_rule`, and
-`reorder_rule`. Workflow capabilities later include `submit`, `approve`, and `deploy`, preserving
+Initial policy capabilities are `view`, `create_rule`, `modify_rule`, `delete_rule`,
+`reorder_rule`, `modify_object`, and `delete_object`. Object delete is deliberately separate from
+object modify. Workflow capabilities later include `submit`, `approve`, and `deploy`, preserving
 the canonical distinction between read, use, modify, approval, and deployment.
 
 Direct User grants may exist, but delegated rule operations still require an active Group and
@@ -94,7 +96,10 @@ Group + Access Policy -> GroupPolicyCategoryMapping -> Provider Rule Category
 ```
 
 The category uses the Group's stable provider-facing slug/prefix. Creating a delegated rule places
-it in that mapped category.
+it in that mapped category. Mock providers can ensure the category through the ChangeSet and
+provider-transaction path: an exact authoritative mapping is retained, an absent category is
+created and mapped, and an unmanaged same-name category is a conflict. Category names never adopt
+or transfer ownership.
 
 ## Synchronized provider resources
 
@@ -108,7 +113,7 @@ Zone renames, deletion, or drift follow the same reconciliation states as other 
 Rule references retain their element role so source/destination zones and networks, services,
 applications, and URLs can be authorized independently.
 
-## Object authorization and creation
+## Object ownership, authorization, and creation
 
 Provider object existence does not grant use. Every referenced object requires server-side USE
 authorization in the current User + active Group + Access Policy context. USE never implies MODIFY.
@@ -138,11 +143,56 @@ Delegated-created objects belong to the active Group and use its immutable provi
 
 Changing the Group display name does not change the slug or existing object identity.
 
+The application persists the owning Group, owning Access Policy, original creator User, last
+modifier User, and exact expected provider name. Ownership belongs to the Group rather than the
+individual creator, so another authorized member of that Group can later modify the object. A
+different active Group receives no mutation rights even when the User belongs to both Groups.
+Ownership is also scoped to its Access Policy and cannot be carried into another policy merely
+because the same Group or User can access it.
+
+Direct User-owned firewall objects are not currently supported. Adding them requires an explicit
+product model and stable User slug; personal ownership must never become an implicit active-Group
+bypass.
+
+Objects discovered from FMC/SCC default to provider-owned/unmanaged behavior. They may be read
+when visible and used only through an explicit USE grant; delegated users cannot modify or delete
+them. A provider object named `FINANCE__...` remains provider-owned unless an administrator later
+performs a deliberate adoption workflow. Naming aids operators but is never authorization.
+
+For an application-owned object, the authoritative ownership record and expected provider prefix
+must agree. A provider rename produces conflict/drift while retaining the original owner; it never
+transfers ownership based on the new name.
+
+## Object modification and deletion
+
+The reusable server-side authorization path requires all of the following before update/delete:
+
+- the object is application-managed and owned by the active Group and Access Policy;
+- the current principal may act in that exact context;
+- the separate `modify_object` or `delete_object` capability is present;
+- the provider advertises tested mutation support for that object class;
+- normalized values and object-specific restrictions pass;
+- provider name/ownership evidence and revisions remain current;
+- dependency analysis is complete and does not cross the ownership boundary.
+
+Network edits repeat complete IP containment against current Group+policy grants. A subnet inside
+an authorized range is allowed; an outside network, overlapping network, or broader supernet is
+denied using IP arithmetic.
+
+Dependency analysis distinguishes unreferenced objects, references only from the same owning
+Group+policy, cross-Group/cross-policy/administrator references, and incomplete dependency state.
+Within-scope references may permit modification, but any outside or unknown blast radius fails
+safely. Delete requires an unreferenced object; ownership never permits deleting a referenced
+object. The mock provider independently rejects referenced deletion as defense in depth.
+
+Equivalence is rechecked for mutation. Neither creation nor modification may manufacture a
+duplicate to bypass another object's missing USE grant.
+
 ## IP-range authorization
 
 Groups/Users may receive multiple allowed IPv4 and eventually IPv6 ranges scoped to the active
 Group and Access Policy. These ranges govern manual rule values and delegated network-object
-creation. The complete requested address or network must be contained by an allowed network using
+creation or modification. The complete requested address or network must be contained by an allowed network using
 proper IP arithmetic, never string-prefix comparison. Ranges from other memberships do not
 contribute.
 
@@ -191,4 +241,9 @@ selects a broader Group, or switches Groups to make a request succeed.
 12. A ChangeSet retains its acting Group context.
 13. Switching Groups never changes an existing rule or ChangeSet context.
 14. MCP and web use identical Group-context authorization.
-15. Default deny.
+15. Object ownership is authoritative Group+policy state, not creator identity or provider name.
+16. Object mutation requires complete dependency analysis; delete requires no references.
+17. Provider rename drift never transfers ownership.
+18. Direct User-owned objects are unsupported until explicitly modeled.
+19. Mock evidence never enables real-provider writes.
+20. Default deny.

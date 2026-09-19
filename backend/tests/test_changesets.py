@@ -35,6 +35,7 @@ from firewall_manager.providers.transactions import DeterministicMockTransaction
 
 ORG = UUID("10000000-0000-0000-0000-000000000001")
 USER = UUID("30000000-0000-0000-0000-000000000001")
+OTHER_FINANCE_USER = UUID("30000000-0000-0000-0000-000000000002")
 FINANCE = UUID("20000000-0000-0000-0000-000000000001")
 ENGINEERING = UUID("20000000-0000-0000-0000-000000000002")
 POLICY = UUID("50000000-0000-0000-0000-000000000001")
@@ -43,6 +44,8 @@ CATEGORY = UUID("51000000-0000-0000-0000-000000000001")
 ZONE = UUID("70000000-0000-0000-0000-000000000001")
 FINANCE_OBJECT = UUID("60000000-0000-0000-0000-000000000001")
 ENGINEERING_OBJECT = UUID("60000000-0000-0000-0000-000000000002")
+PORT_OBJECT = UUID("60000000-0000-0000-0000-000000000003")
+URL_OBJECT = UUID("60000000-0000-0000-0000-000000000004")
 ADMIN_CATEGORY = UUID("51000000-0000-0000-0000-000000000099")
 OTHER_POLICY = UUID("50000000-0000-0000-0000-000000000099")
 
@@ -51,14 +54,27 @@ def principal(role: str = "editor") -> Principal:
     return Principal(USER, ORG, f"{role}@example.test", role)
 
 
+def other_finance_principal() -> Principal:
+    return Principal(OTHER_FINANCE_USER, ORG, "other-editor@example.test", "editor")
+
+
 class MemoryChangeSetRepository:
     """Small durable-style fake that exposes revocation/drift controls to tests."""
 
     def __init__(self) -> None:
         self.change_sets: dict[UUID, dict[str, object]] = {}
         self.user_enabled = True
+        self.users = {USER, OTHER_FINANCE_USER}
         self.memberships = {FINANCE}
-        self.capabilities = {"view", "create_rule", "modify_rule", "delete_rule", "reorder_rule"}
+        self.capabilities = {
+            "view",
+            "create_rule",
+            "modify_rule",
+            "delete_rule",
+            "reorder_rule",
+            "modify_object",
+            "delete_object",
+        }
         self.object_grants = {FINANCE_OBJECT}
         self.zone_grants = {ZONE}
         self.revision_marker = "policy-v1"
@@ -75,19 +91,80 @@ class MemoryChangeSetRepository:
             "port_service_object_create": "SUPPORTED",
             "url_object_create": "SUPPORTED",
             "application_object_create": "PARTIAL",
+            "network_object_mutation": "SUPPORTED",
+            "port_service_object_mutation": "SUPPORTED",
+            "url_object_mutation": "SUPPORTED",
+            "application_object_mutation": "NOT_STARTED",
+            "rule_category_mutation": "SUPPORTED",
         }
         self.provider = DeterministicMockProvider(self.provider_kind)
+        self.object_states: dict[UUID, dict[str, object]] = {
+            FINANCE_OBJECT: {
+                "owner_group_id": FINANCE,
+                "owner_policy_id": POLICY,
+                "object_type": "NETWORK",
+                "name": "FINANCE__APP-SUBNET",
+                "native_id": "object-finance-servers",
+                "normalized_value": "10.20.10.0/24",
+                "dependency_state": "UNREFERENCED",
+                "management_state": "MANAGED",
+                "provider_version": "1",
+                "provider_name_matches": True,
+            },
+            ENGINEERING_OBJECT: {
+                "owner_group_id": ENGINEERING,
+                "owner_policy_id": POLICY,
+                "object_type": "NETWORK",
+                "name": "ENGINEERING__BUILD-SERVERS",
+                "native_id": "object-engineering-servers",
+                "normalized_value": "172.16.10.0/24",
+                "dependency_state": "UNREFERENCED",
+                "management_state": "MANAGED",
+                "provider_version": "1",
+                "provider_name_matches": True,
+            },
+            PORT_OBJECT: {
+                "owner_group_id": FINANCE,
+                "owner_policy_id": POLICY,
+                "object_type": "PORT_SERVICE",
+                "name": "FINANCE__API-SERVICE",
+                "native_id": "object-finance-service",
+                "normalized_value": "tcp/9443",
+                "dependency_state": "UNREFERENCED",
+                "management_state": "MANAGED",
+                "provider_version": "1",
+                "provider_name_matches": True,
+            },
+            URL_OBJECT: {
+                "owner_group_id": FINANCE,
+                "owner_policy_id": POLICY,
+                "object_type": "URL",
+                "name": "FINANCE__PORTAL",
+                "native_id": "object-finance-url",
+                "normalized_value": "finance.example.test",
+                "dependency_state": "UNREFERENCED",
+                "management_state": "MANAGED",
+                "provider_version": "1",
+                "provider_name_matches": True,
+            },
+        }
+        self.reconciled_objects: list[dict[str, object]] = []
+        self.category_mapping_exists = True
+        self.category_name_collision = False
+        self.category_slug = "FINANCE"
+        self.category_revision_marker = "categories-v1"
+        self.equivalent_mutation_id: UUID | None = None
 
     # Authorization port
     def user_state(self, user_id: UUID, organization_id: UUID) -> tuple[bool, int] | None:
-        return (self.user_enabled, 1) if (user_id, organization_id) == (USER, ORG) else None
+        return (self.user_enabled, 1) if user_id in self.users and organization_id == ORG else None
 
     def membership_state(
         self, user_id: UUID, group_id: UUID, organization_id: UUID
     ) -> tuple[bool, int] | None:
         return (
             (True, 1)
-            if user_id == USER and organization_id == ORG and group_id in self.memberships
+            if user_id in self.users and organization_id == ORG and group_id in self.memberships
             else None
         )
 
@@ -97,7 +174,7 @@ class MemoryChangeSetRepository:
     def policy_capabilities(
         self, user_id: UUID, group_id: UUID, policy_id: UUID, organization_id: UUID
     ) -> tuple[set[str], int, bool]:
-        delegated = group_id == FINANCE and policy_id == POLICY and organization_id == ORG
+        delegated = group_id in self.memberships and policy_id == POLICY and organization_id == ORG
         return set(self.capabilities) if delegated else set(), 1, delegated
 
     def object_grant_state(
@@ -106,6 +183,14 @@ class MemoryChangeSetRepository:
         if group_id == FINANCE and policy_id == POLICY and object_id in self.object_grants:
             return MANAGER, "OBSERVED", {"use"}, 1
         return None
+
+    def object_mutation_state(
+        self, group_id: UUID, policy_id: UUID, object_id: UUID, organization_id: UUID
+    ) -> dict[str, object] | None:
+        state = self.object_states.get(object_id)
+        if state is None or policy_id != POLICY or organization_id != ORG:
+            return None
+        return {"manager_id": MANAGER, "revision": 1, **state}
 
     def zone_grant_state(
         self, group_id: UUID, policy_id: UUID, zone_id: UUID, organization_id: UUID
@@ -303,6 +388,8 @@ class MemoryChangeSetRepository:
         result = {"policy": self.revision_marker}
         if operation["kind"] == "MOVE_RULE":
             result["rule_ordering"] = self.ordering_marker
+        if operation["kind"] == "ENSURE_RULE_CATEGORY":
+            result["category_inventory"] = self.category_revision_marker
         return result
 
     def naming_context(self, *args: object) -> dict[str, object]:
@@ -313,6 +400,62 @@ class MemoryChangeSetRepository:
             "group_slug": "FINANCE",
             "objects": [],
             "policy_revision": self.revision_marker,
+        }
+
+    def object_mutation_context(
+        self, object_id: UUID, policy_id: UUID, organization_id: UUID
+    ) -> dict[str, object] | None:
+        state = self.object_states.get(object_id)
+        return (
+            {"manager_id": MANAGER, **deepcopy(state)}
+            if state and policy_id == POLICY and organization_id == ORG
+            else None
+        )
+
+    def object_equivalent_id(self, *args: object) -> UUID | None:
+        return self.equivalent_mutation_id
+
+    def category_ensure_context(self, *args: object) -> dict[str, object]:
+        group_id = UUID(str(args[1]))
+        slug = self.category_slug if group_id == FINANCE else "ENGINEERING"
+        categories: list[dict[str, object]] = [
+            {
+                "id": CATEGORY,
+                "native_id": f"{self.provider_kind.value}-category-finance",
+                "name": "FINANCE__RULES",
+                "provider_version": "2",
+                "management_state": "OBSERVED",
+                "position": 10,
+            }
+        ]
+        if self.category_name_collision and not self.category_mapping_exists:
+            categories.append(
+                {
+                    "id": uuid4(),
+                    "native_id": f"{self.provider_kind.value}-category-collision",
+                    "name": f"{slug}__RULES",
+                    "provider_version": "1",
+                    "management_state": "OBSERVED",
+                    "position": 40,
+                }
+            )
+        return {
+            "provider": self.provider_kind.value,
+            "group_slug": slug,
+            "mapping": (
+                {
+                    "id": uuid4(),
+                    "category_id": CATEGORY,
+                    "expected_category_name": f"{slug}__RULES",
+                    "sync_state": "SYNCED",
+                    "revision": 1,
+                }
+                if self.category_mapping_exists and group_id == FINANCE
+                else None
+            ),
+            "categories": (
+                categories if self.category_mapping_exists or self.category_name_collision else []
+            ),
         }
 
     def set_execution_state(
@@ -392,6 +535,11 @@ class MemoryChangeSetRepository:
             if payload.get("rule_id"):
                 payload["rule_native_id"] = f"{prefix}-rule-web"
                 payload["expected_rule_version"] = "4"
+            if payload.get("object_id"):
+                state = self.object_states[UUID(str(payload["object_id"]))]
+                payload["object_native_id"] = f"{prefix}-{state['native_id']}"
+                payload["expected_object_version"] = state["provider_version"]
+                payload["expected_provider_name"] = state["name"]
             payload["source_zone_native_ids"] = [f"{prefix}-zone-inside"]
             payload["source_object_native_ids"] = [f"{prefix}-object-app"]
             if operation["kind"] == "CREATE_OBJECT":
@@ -399,6 +547,14 @@ class MemoryChangeSetRepository:
                 payload["provider_name"] = resolution.get("provider_name")
                 payload["normalized_value"] = resolution.get("normalized_value")
                 payload["resolution"] = resolution
+            elif operation["kind"] == "MODIFY_OBJECT":
+                payload["normalized_value"] = operation["resolution"]["normalized_value"]
+            elif operation["kind"] == "ENSURE_RULE_CATEGORY":
+                resolution = cast("dict[str, object]", deepcopy(operation["resolution"]))
+                payload["provider_name"] = resolution["provider_name"]
+                if resolution.get("category_id"):
+                    payload["category_native_id"] = f"{prefix}-category-finance"
+                    payload["expected_category_version"] = "2"
             prepared.append(
                 {
                     "id": str(operation["id"]),
@@ -407,6 +563,33 @@ class MemoryChangeSetRepository:
                 }
             )
         return prepared
+
+    def reconcile_successful_operations(
+        self,
+        change_set: dict[str, object],
+        actor: Principal,
+        group_id: UUID,
+        operations: list[dict[str, object]],
+        operation_results: list[dict[str, object]],
+    ) -> None:
+        del change_set
+        succeeded = {
+            str(item["operation_id"]): item
+            for item in operation_results
+            if item["status"] == "SUCCEEDED"
+        }
+        for operation in operations:
+            result = succeeded.get(str(operation["id"]))
+            if result is None:
+                continue
+            if operation["kind"] == "CREATE_OBJECT" and result["mutated"] is True:
+                self.reconciled_objects.append(
+                    {
+                        "owner_group_id": group_id,
+                        "created_by_user_id": actor.user_id,
+                        "expected_provider_name": operation["resolution"]["provider_name"],
+                    }
+                )
 
     def group_provider_slug(self, *args: object) -> str:
         return "FINANCE"
@@ -707,6 +890,366 @@ async def test_supported_object_create_follows_changeset_to_provider_path(
     assert result["state"] == "SUCCEEDED"
     objects = await repository.provider.objects(f"{provider_kind.value}-domain-main", PageRequest())
     assert any(item.name == f"FINANCE__created-{object_type.lower()}" for item in objects.items)
+    assert repository.reconciled_objects == [
+        {
+            "owner_group_id": FINANCE,
+            "created_by_user_id": USER,
+            "expected_provider_name": f"FINANCE__created-{object_type.lower()}",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider_kind", list(ProviderKind))
+@pytest.mark.parametrize(
+    ("object_id", "object_type", "value", "native_suffix"),
+    [
+        (FINANCE_OBJECT, "NETWORK", "10.20.30.0/24", "object-finance-servers"),
+        (PORT_OBJECT, "PORT_SERVICE", "tcp/9444", "object-finance-service"),
+        (URL_OBJECT, "URL", "updated.finance.example.test", "object-finance-url"),
+    ],
+)
+async def test_owned_object_modify_follows_changeset_to_stateful_provider(
+    provider_kind: ProviderKind,
+    object_id: UUID,
+    object_type: str,
+    value: str,
+    native_suffix: str,
+) -> None:
+    repository, service, change_set = service_and_change(provider_kind)
+    ready = service.add_operation(
+        principal(),
+        FINANCE,
+        UUID(str(change_set["id"])),
+        ChangeOperationKind.MODIFY_OBJECT,
+        {"object_id": str(object_id), "object_type": object_type, "value": value},
+    )
+    assert ready["state"] == "READY"
+    result = await service.execute(principal(), FINANCE, UUID(str(change_set["id"])))
+    assert result["state"] == "SUCCEEDED"
+    objects = await repository.provider.objects(f"{provider_kind.value}-domain-main", PageRequest())
+    changed = next(
+        item for item in objects.items if item.native_id == f"{provider_kind.value}-{native_suffix}"
+    )
+    assert changed.normalized_value == value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider_kind", list(ProviderKind))
+async def test_unreferenced_owned_object_delete_follows_provider_path(
+    provider_kind: ProviderKind,
+) -> None:
+    repository, service, change_set = service_and_change(provider_kind)
+    ready = service.add_operation(
+        principal(),
+        FINANCE,
+        UUID(str(change_set["id"])),
+        ChangeOperationKind.DELETE_OBJECT,
+        {"object_id": str(FINANCE_OBJECT), "object_type": "NETWORK"},
+    )
+    assert ready["state"] == "READY"
+    result = await service.execute(principal(), FINANCE, UUID(str(change_set["id"])))
+    assert result["state"] == "SUCCEEDED"
+    objects = await repository.provider.objects(f"{provider_kind.value}-domain-main", PageRequest())
+    assert all(
+        item.native_id != f"{provider_kind.value}-object-finance-servers" for item in objects.items
+    )
+
+
+@pytest.mark.asyncio
+async def test_another_authorized_finance_member_can_modify_group_owned_object() -> None:
+    repository = MemoryChangeSetRepository()
+    service = ChangeSetService(
+        repository,
+        repository,
+        DeterministicMockTransactionExecutor(repository.provider),
+    )
+    actor = other_finance_principal()
+    change_set = service.create(actor, FINANCE, POLICY, "Finance maintenance", "")
+    ready = service.add_operation(
+        actor,
+        FINANCE,
+        UUID(str(change_set["id"])),
+        ChangeOperationKind.MODIFY_OBJECT,
+        {
+            "object_id": str(FINANCE_OBJECT),
+            "object_type": "NETWORK",
+            "value": "10.20.40.0/24",
+        },
+    )
+    assert ready["state"] == "READY"
+    result = await service.execute(actor, FINANCE, UUID(str(change_set["id"])))
+    assert result["state"] == "SUCCEEDED"
+
+
+@pytest.mark.parametrize(
+    ("dependency_state", "kind", "expected_reason"),
+    [
+        ("CROSS_SCOPE", ChangeOperationKind.MODIFY_OBJECT, "OBJECT_DEPENDENCY_CONFLICT"),
+        ("INCOMPLETE", ChangeOperationKind.MODIFY_OBJECT, "DEPENDENCY_STATE_INCOMPLETE"),
+        ("WITHIN_SCOPE", ChangeOperationKind.DELETE_OBJECT, "OBJECT_DEPENDENCY_CONFLICT"),
+    ],
+)
+def test_object_dependency_and_delete_safety_fail_closed(
+    dependency_state: str, kind: ChangeOperationKind, expected_reason: str
+) -> None:
+    repository, service, change_set = service_and_change()
+    repository.object_states[FINANCE_OBJECT]["dependency_state"] = dependency_state
+    payload: dict[str, object] = {
+        "object_id": str(FINANCE_OBJECT),
+        "object_type": "NETWORK",
+    }
+    if kind is ChangeOperationKind.MODIFY_OBJECT:
+        payload["value"] = "10.20.30.0/24"
+    result = service.add_operation(principal(), FINANCE, UUID(str(change_set["id"])), kind, payload)
+    assert result["state"] == "VALIDATION_FAILED"
+    assert any(
+        item["reason"] == expected_reason for item in result["operations"][0]["validation_results"]
+    )
+
+
+def test_object_mutation_uses_only_active_group_and_authoritative_owner() -> None:
+    repository, service, _change_set = service_and_change()
+    repository.memberships.add(ENGINEERING)
+    engineering_change = service.create(principal(), ENGINEERING, POLICY, "Engineering", "")
+    denied = service.add_operation(
+        principal(),
+        ENGINEERING,
+        UUID(str(engineering_change["id"])),
+        ChangeOperationKind.MODIFY_OBJECT,
+        {
+            "object_id": str(FINANCE_OBJECT),
+            "object_type": "NETWORK",
+            "value": "10.20.30.0/24",
+        },
+    )
+    assert denied["state"] == "VALIDATION_FAILED"
+    assert any(
+        item["reason"] == "NOT_OWNER" for item in denied["operations"][0]["validation_results"]
+    )
+
+
+@pytest.mark.parametrize("value", ["10.21.0.0/16", "10.20.0.0/15"])
+def test_network_object_modify_requires_complete_range_containment(value: str) -> None:
+    _repository, service, change_set = service_and_change()
+    result = service.add_operation(
+        principal(),
+        FINANCE,
+        UUID(str(change_set["id"])),
+        ChangeOperationKind.MODIFY_OBJECT,
+        {"object_id": str(FINANCE_OBJECT), "object_type": "NETWORK", "value": value},
+    )
+    assert result["state"] == "VALIDATION_FAILED"
+    assert any(
+        item["reason"] == "IP_RANGE_NOT_GRANTED"
+        for item in result["operations"][0]["validation_results"]
+    )
+
+
+def test_object_modify_cannot_create_an_equivalent_duplicate() -> None:
+    repository, service, change_set = service_and_change()
+    repository.equivalent_mutation_id = ENGINEERING_OBJECT
+    result = service.add_operation(
+        principal(),
+        FINANCE,
+        UUID(str(change_set["id"])),
+        ChangeOperationKind.MODIFY_OBJECT,
+        {
+            "object_id": str(FINANCE_OBJECT),
+            "object_type": "NETWORK",
+            "value": "10.20.30.0/24",
+        },
+    )
+    assert result["state"] == "VALIDATION_FAILED"
+    assert any(
+        item["reason"] == "EQUIVALENT_OBJECT_EXISTS"
+        for item in result["operations"][0]["validation_results"]
+    )
+
+
+def test_provider_prefix_does_not_establish_ownership_and_drift_denies_mutation() -> None:
+    lookalike = uuid4()
+    repository, service, change_set = service_and_change()
+    repository.object_states[lookalike] = {
+        "owner_group_id": None,
+        "owner_policy_id": None,
+        "object_type": "NETWORK",
+        "name": "FINANCE__SPOOFED",
+        "native_id": "object-finance-name-conflict",
+        "normalized_value": "10.20.99.0/24",
+        "dependency_state": "UNREFERENCED",
+        "management_state": "OBSERVED",
+        "provider_version": "1",
+        "provider_name_matches": False,
+    }
+    denied = service.add_operation(
+        principal(),
+        FINANCE,
+        UUID(str(change_set["id"])),
+        ChangeOperationKind.MODIFY_OBJECT,
+        {"object_id": str(lookalike), "object_type": "NETWORK", "value": "10.20.30.0/24"},
+    )
+    assert denied["state"] == "VALIDATION_FAILED"
+    assert any(
+        item["reason"] == "NOT_OWNER" for item in denied["operations"][0]["validation_results"]
+    )
+
+    repository, service, change_set = service_and_change()
+    repository.object_states[FINANCE_OBJECT]["provider_name_matches"] = False
+    drifted = service.add_operation(
+        principal(),
+        FINANCE,
+        UUID(str(change_set["id"])),
+        ChangeOperationKind.MODIFY_OBJECT,
+        {
+            "object_id": str(FINANCE_OBJECT),
+            "object_type": "NETWORK",
+            "value": "10.20.30.0/24",
+        },
+    )
+    assert drifted["state"] == "VALIDATION_FAILED"
+    assert any(
+        item["reason"] == "OWNERSHIP_DRIFT"
+        for item in drifted["operations"][0]["validation_results"]
+    )
+
+
+def test_object_ownership_does_not_bypass_policy_context() -> None:
+    repository, service, change_set = service_and_change()
+    repository.object_states[FINANCE_OBJECT]["owner_policy_id"] = OTHER_POLICY
+    result = service.add_operation(
+        principal(),
+        FINANCE,
+        UUID(str(change_set["id"])),
+        ChangeOperationKind.MODIFY_OBJECT,
+        {
+            "object_id": str(FINANCE_OBJECT),
+            "object_type": "NETWORK",
+            "value": "10.20.30.0/24",
+        },
+    )
+    assert result["state"] == "VALIDATION_FAILED"
+    assert any(
+        item["reason"] == "RESOURCE_OUT_OF_SCOPE"
+        for item in result["operations"][0]["validation_results"]
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider_kind", list(ProviderKind))
+async def test_rule_category_ensure_uses_authoritative_mapping(
+    provider_kind: ProviderKind,
+) -> None:
+    _repository, service, change_set = service_and_change(provider_kind)
+    ready = service.add_operation(
+        principal(),
+        FINANCE,
+        UUID(str(change_set["id"])),
+        ChangeOperationKind.ENSURE_RULE_CATEGORY,
+        {},
+    )
+    assert ready["state"] == "READY"
+    result = await service.execute(principal(), FINANCE, UUID(str(change_set["id"])))
+    assert result["state"] == "SUCCEEDED"
+    assert result["transactions"][0]["operation_results"][0]["mutated"] is False
+
+
+def test_rule_category_ensure_requires_create_permission_even_when_mapping_exists() -> None:
+    repository, service, change_set = service_and_change()
+    repository.capabilities = {"view"}
+    denied = service.add_operation(
+        principal(),
+        FINANCE,
+        UUID(str(change_set["id"])),
+        ChangeOperationKind.ENSURE_RULE_CATEGORY,
+        {},
+    )
+    assert denied["state"] == "VALIDATION_FAILED"
+    assert any(
+        item["reason"] == "ACTION_NOT_GRANTED"
+        for item in denied["operations"][0]["validation_results"]
+    )
+
+
+def test_rule_category_context_is_group_specific_and_cannot_cross_active_group() -> None:
+    repository, service, finance_change = service_and_change()
+    repository.memberships.add(ENGINEERING)
+    with pytest.raises(ResourceOutOfScopeError):
+        service.add_operation(
+            principal(),
+            ENGINEERING,
+            UUID(str(finance_change["id"])),
+            ChangeOperationKind.ENSURE_RULE_CATEGORY,
+            {},
+        )
+
+    repository.category_mapping_exists = False
+    engineering_change = service.create(principal(), ENGINEERING, POLICY, "Engineering", "")
+    ready = service.add_operation(
+        principal(),
+        ENGINEERING,
+        UUID(str(engineering_change["id"])),
+        ChangeOperationKind.ENSURE_RULE_CATEGORY,
+        {},
+    )
+    assert ready["state"] == "READY"
+    assert ready["operations"][0]["resolution"]["provider_name"] == "ENGINEERING__RULES"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider_kind", list(ProviderKind))
+async def test_rule_category_create_if_absent_is_stateful(provider_kind: ProviderKind) -> None:
+    repository, service, change_set = service_and_change(provider_kind)
+    repository.category_mapping_exists = False
+    repository.category_slug = "TREASURY"
+    ready = service.add_operation(
+        principal(),
+        FINANCE,
+        UUID(str(change_set["id"])),
+        ChangeOperationKind.ENSURE_RULE_CATEGORY,
+        {},
+    )
+    assert ready["state"] == "READY"
+    result = await service.execute(principal(), FINANCE, UUID(str(change_set["id"])))
+    assert result["state"] == "SUCCEEDED"
+    categories = await repository.provider.categories(
+        f"{provider_kind.value}-policy-edge", PageRequest()
+    )
+    assert any(item.name == "TREASURY__RULES" for item in categories.items)
+
+
+def test_rule_category_name_collision_fails_safely() -> None:
+    repository, service, change_set = service_and_change()
+    repository.category_mapping_exists = False
+    repository.category_name_collision = True
+    collision = service.add_operation(
+        principal(),
+        FINANCE,
+        UUID(str(change_set["id"])),
+        ChangeOperationKind.ENSURE_RULE_CATEGORY,
+        {},
+    )
+    assert collision["state"] == "VALIDATION_FAILED"
+    assert any(
+        item["reason"] == "CATEGORY_NAME_CONFLICT"
+        for item in collision["operations"][0]["validation_results"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_stale_rule_category_inventory_is_rejected_before_provider_mutation() -> None:
+    repository, service, change_set = service_and_change()
+    ready = service.add_operation(
+        principal(),
+        FINANCE,
+        UUID(str(change_set["id"])),
+        ChangeOperationKind.ENSURE_RULE_CATEGORY,
+        {},
+    )
+    assert ready["state"] == "READY"
+    repository.category_revision_marker = "categories-v2"
+    with pytest.raises(ChangeSetConflictError):
+        await service.execute(principal(), FINANCE, UUID(str(change_set["id"])))
 
 
 def test_partial_application_object_capability_is_not_treated_as_supported() -> None:

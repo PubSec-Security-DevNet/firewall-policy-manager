@@ -49,6 +49,10 @@ class AuthorizationRepository(Protocol):
         self, group_id: UUID, policy_id: UUID, object_id: UUID, organization_id: UUID
     ) -> tuple[UUID, str, set[str], int] | None: ...
 
+    def object_mutation_state(
+        self, group_id: UUID, policy_id: UUID, object_id: UUID, organization_id: UUID
+    ) -> dict[str, object] | None: ...
+
     def zone_grant_state(
         self, group_id: UUID, policy_id: UUID, zone_id: UUID, organization_id: UUID
     ) -> tuple[UUID, str, set[str], int] | None: ...
@@ -206,6 +210,23 @@ class ChangeSetRepository(Protocol):
         self, policy_id: UUID, group_id: UUID, organization_id: UUID
     ) -> dict[str, object] | None: ...
 
+    def object_mutation_context(
+        self, object_id: UUID, policy_id: UUID, organization_id: UUID
+    ) -> dict[str, object] | None: ...
+
+    def object_equivalent_id(
+        self,
+        manager_id: UUID,
+        object_type: str,
+        normalized_value: str,
+        excluded_object_id: UUID,
+        organization_id: UUID,
+    ) -> UUID | None: ...
+
+    def category_ensure_context(
+        self, policy_id: UUID, group_id: UUID, organization_id: UUID
+    ) -> dict[str, object] | None: ...
+
     def set_execution_state(
         self,
         principal: Principal,
@@ -246,6 +267,15 @@ class ChangeSetRepository(Protocol):
     def prepare_provider_operations(
         self, operations: list[dict[str, object]], organization_id: UUID
     ) -> list[dict[str, object]]: ...
+
+    def reconcile_successful_operations(
+        self,
+        change_set: dict[str, object],
+        principal: Principal,
+        group_id: UUID,
+        operations: list[dict[str, object]],
+        operation_results: list[dict[str, object]],
+    ) -> None: ...
 
     def group_provider_slug(self, group_id: UUID, organization_id: UUID) -> str | None: ...
 

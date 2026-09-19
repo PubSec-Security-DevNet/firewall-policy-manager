@@ -15,9 +15,12 @@ Every capability has separate `mock` and `real` FMC/SCC evidence. `SUPPORTED` mu
 without successful provider-contract and application-path tests. Mock evidence can never promote
 the real-provider profile; synchronization rejects a manager/evidence-profile mismatch.
 
-The validated vocabulary includes category and security-zone reads, rule ordering, and the
-initial provider-gated object-creation classes. A `NOT_STARTED` or `PARTIAL` mutation capability
-remains unavailable to delegated execution; only `SUPPORTED` enables the operation.
+The validated vocabulary includes category and security-zone reads, rule ordering, category
+mutation, and class-specific object creation/mutation capabilities for network, port-service, URL,
+and application objects. A `NOT_STARTED` or `PARTIAL` mutation capability remains unavailable to
+delegated execution; only `SUPPORTED` enables the operation. Category ensure and network,
+port-service, and URL mutation are `SUPPORTED` only for the deterministic mock profiles. All real
+write declarations and mock application-object mutation remain `NOT_STARTED`.
 
 ## permissions.yaml
 

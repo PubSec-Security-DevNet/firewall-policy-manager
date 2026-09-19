@@ -129,9 +129,17 @@ def test_group_policy_rule_and_changeset_contexts_are_structurally_distinct() ->
         policy_id=shared_policy_id,
         category_id=UUID("30000000-0000-0000-0000-000000000002"),
     )
+    other_policy_mapping = GroupPolicyCategoryMapping(
+        group_id=first_mapping.group_id,
+        policy_id=UUID("10000000-0000-0000-0000-000000000002"),
+        category_id=UUID("30000000-0000-0000-0000-000000000003"),
+    )
     assert first_mapping.policy_id == second_mapping.policy_id
     assert first_mapping.group_id != second_mapping.group_id
     assert first_mapping.category_id != second_mapping.category_id
+    assert first_mapping.group_id == other_policy_mapping.group_id
+    assert first_mapping.policy_id != other_policy_mapping.policy_id
+    assert first_mapping.category_id != other_policy_mapping.category_id
     assert AccessRule.__table__.c.owner_group_id.foreign_keys
     assert AccessRule.__table__.c.created_by_user_id.foreign_keys
     assert AccessRule.__table__.c.modified_by_user_id.foreign_keys
@@ -144,6 +152,15 @@ def test_objects_and_zones_retain_authorizable_normalized_structure() -> None:
     assert "normalized_value" in FirewallObject.__table__.c
     assert "value" not in FirewallObject.__table__.c
     assert FirewallObject.__table__.c.owner_group_id.foreign_keys
+    assert FirewallObject.__table__.c.owner_policy_id.foreign_keys
+    assert "expected_provider_name" in FirewallObject.__table__.c
+    object_table = cast(Table, FirewallObject.__table__)
+    checks = {
+        constraint.name
+        for constraint in object_table.constraints
+        if isinstance(constraint, CheckConstraint)
+    }
+    assert "ck_firewall_objects_authoritative_owner" in checks
     assert {"manager_id", "native_id", "zone_type"} <= set(SecurityZone.__table__.c.keys())
 
 

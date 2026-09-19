@@ -347,14 +347,21 @@ def seed_authorization_scenarios(session: Session) -> None:
                 organization_id=IDS["org"],
                 group_id=IDS["group_finance"],
                 policy_id=policy.id,
-                capabilities=["view", "create_rule", "modify_rule", "delete_rule"],
+                capabilities=[
+                    "view",
+                    "create_rule",
+                    "modify_rule",
+                    "delete_rule",
+                    "modify_object",
+                    "delete_object",
+                ],
             ),
             PolicyDelegation(
                 id=_seed_id(f"engineering-delegation-{policy.id}"),
                 organization_id=IDS["org"],
                 group_id=IDS["group_engineering"],
                 policy_id=policy.id,
-                capabilities=["view", "create_rule", "modify_rule"],
+                capabilities=["view", "create_rule", "modify_rule", "modify_object"],
             ),
             PolicyDelegation(
                 id=_seed_id(f"datacenter-delegation-{policy.id}"),
@@ -380,12 +387,28 @@ def seed_authorization_scenarios(session: Session) -> None:
                 permission="use",
             ),
             ObjectUseGrant(
+                id=_seed_id(f"finance-object-read-{policy.id}"),
+                organization_id=IDS["org"],
+                group_id=IDS["group_finance"],
+                policy_id=policy.id,
+                object_id=finance_object.id,
+                permission="read",
+            ),
+            ObjectUseGrant(
                 id=_seed_id(f"datacenter-shared-object-{policy.id}"),
                 organization_id=IDS["org"],
                 group_id=IDS["group_datacenter"],
                 policy_id=policy.id,
                 object_id=shared_object.id,
                 permission="use",
+            ),
+            ObjectUseGrant(
+                id=_seed_id(f"engineering-object-read-{policy.id}"),
+                organization_id=IDS["org"],
+                group_id=IDS["group_engineering"],
+                policy_id=policy.id,
+                object_id=engineering_object.id,
+                permission="read",
             ),
             ObjectUseGrant(
                 id=_seed_id(f"engineering-object-{policy.id}"),
@@ -463,6 +486,18 @@ def seed_authorization_scenarios(session: Session) -> None:
             )
         for row in rows:
             upsert_authorization_seed_row(session, row)
+        finance_object.owner_group_id = IDS["group_finance"]
+        finance_object.owner_policy_id = policy.id
+        finance_object.created_by_user_id = IDS["viewer"]
+        finance_object.modified_by_user_id = IDS["viewer"]
+        finance_object.expected_provider_name = "FINANCE__APP-SUBNET"
+        finance_object.management_state = "MANAGED"
+        engineering_object.owner_group_id = IDS["group_engineering"]
+        engineering_object.owner_policy_id = policy.id
+        engineering_object.created_by_user_id = IDS["viewer"]
+        engineering_object.modified_by_user_id = IDS["viewer"]
+        engineering_object.expected_provider_name = "ENGINEERING__BUILD-SERVERS"
+        engineering_object.management_state = "MANAGED"
         rules = list(session.scalars(select(AccessRule).where(AccessRule.policy_id == policy.id)))
         for rule in rules:
             if rule.category_id == finance_category.id:

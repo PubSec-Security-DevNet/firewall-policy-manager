@@ -58,6 +58,9 @@ class ProviderCapability(StrEnum):
     PORT_SERVICE_OBJECT_CREATE = "port_service_object_create"
     URL_OBJECT_CREATE = "url_object_create"
     APPLICATION_OBJECT_CREATE = "application_object_create"
+    PORT_SERVICE_OBJECT_MUTATION = "port_service_object_mutation"
+    URL_OBJECT_MUTATION = "url_object_mutation"
+    APPLICATION_OBJECT_MUTATION = "application_object_mutation"
     PENDING_CHANGE_INSPECTION = "pending_change_inspection"
     DEPLOYMENT_START = "deployment_start"
     DEPLOYMENT_STATUS = "deployment_status"
@@ -140,6 +143,8 @@ class PolicyCapability(StrEnum):
     MODIFY_RULE = "modify_rule"
     DELETE_RULE = "delete_rule"
     REORDER_RULE = "reorder_rule"
+    MODIFY_OBJECT = "modify_object"
+    DELETE_OBJECT = "delete_object"
     SUBMIT = "submit"
     APPROVE = "approve"
     DEPLOY = "deploy"
@@ -162,6 +167,9 @@ class AuthorizationReason(StrEnum):
     PROVIDER_CAPABILITY_UNAVAILABLE = "PROVIDER_CAPABILITY_UNAVAILABLE"
     EQUIVALENT_OBJECT_EXISTS = "EQUIVALENT_OBJECT_EXISTS"
     NOT_OWNER = "NOT_OWNER"
+    OWNERSHIP_DRIFT = "OWNERSHIP_DRIFT"
+    OBJECT_DEPENDENCY_CONFLICT = "OBJECT_DEPENDENCY_CONFLICT"
+    DEPENDENCY_STATE_INCOMPLETE = "DEPENDENCY_STATE_INCOMPLETE"
     STALE_AUTHORIZATION_CONTEXT = "STALE_AUTHORIZATION_CONTEXT"
 
 
@@ -201,6 +209,9 @@ class ChangeOperationKind(StrEnum):
     DELETE_RULE = "DELETE_RULE"
     MOVE_RULE = "MOVE_RULE"
     CREATE_OBJECT = "CREATE_OBJECT"
+    MODIFY_OBJECT = "MODIFY_OBJECT"
+    DELETE_OBJECT = "DELETE_OBJECT"
+    ENSURE_RULE_CATEGORY = "ENSURE_RULE_CATEGORY"
 
 
 class OperationStatus(StrEnum):

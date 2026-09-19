@@ -166,7 +166,7 @@ async def test_initial_discovery_is_observed_and_complete_for_both_providers(
         repo.manager_id, DeterministicMockProvider(kind)
     )
     assert result.status is SyncStatus.COMPLETED
-    assert result.resources_seen == 24
+    assert result.resources_seen == 26
     assert {item["state"] for item in repo.resources.values()} == {ResourceState.OBSERVED}
     assert all("owner" not in item for item in repo.resources.values())
     assert len([key for key in repo.resources if key[0] == "zone"]) == 4

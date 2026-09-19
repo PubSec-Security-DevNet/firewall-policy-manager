@@ -141,6 +141,10 @@ class DelegatedObjectResponse(BaseModel):
     id: UUID
     name: str
     object_type: str
+    owner_type: Literal["GROUP", "PROVIDER"] = "PROVIDER"
+    owner_group_id: UUID | None = None
+    owner_policy_id: UUID | None = None
+    created_by_user_id: UUID | None = None
 
 
 class DelegatedZoneResponse(BaseModel):
@@ -275,9 +279,10 @@ class DraftRuleOperationRequest(BaseModel):
 
 class DraftObjectRequest(BaseModel):
     policy_id: UUID | None = None
-    name: str = Field(min_length=1, max_length=200)
+    object_id: UUID | None = None
+    name: str | None = Field(default=None, min_length=1, max_length=200)
     object_type: Literal["NETWORK", "PORT_SERVICE", "URL", "APPLICATION", "APPLICATION_FILTER"]
-    value: str = Field(min_length=1, max_length=500)
+    value: str | None = Field(default=None, min_length=1, max_length=500)
     mock_behavior: Literal[
         "success",
         "provider_failure",
@@ -290,7 +295,13 @@ class DraftObjectRequest(BaseModel):
 
 class DraftObjectOperationRequest(BaseModel):
     active_group_id: UUID
+    kind: Literal["CREATE_OBJECT", "MODIFY_OBJECT", "DELETE_OBJECT"] = "CREATE_OBJECT"
     object: DraftObjectRequest
+
+
+class DraftCategoryOperationRequest(BaseModel):
+    active_group_id: UUID
+    policy_id: UUID | None = None
 
 
 class DraftOperationUpdateRequest(BaseModel):

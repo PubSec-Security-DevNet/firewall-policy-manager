@@ -111,6 +111,23 @@ class FakeAuthorizationRepository:
             self.objects.get((group_id, policy_id, object_id)) if organization_id == ORG else None
         )
 
+    def object_mutation_state(
+        self, group_id: UUID, policy_id: UUID, object_id: UUID, organization_id: UUID
+    ) -> dict[str, object] | None:
+        if organization_id != ORG or object_id not in {FINANCE_OBJECT, ENGINEERING_OBJECT}:
+            return None
+        owner = FINANCE if object_id == FINANCE_OBJECT else ENGINEERING
+        return {
+            "manager_id": MANAGER,
+            "management_state": "MANAGED",
+            "owner_group_id": owner,
+            "owner_policy_id": POLICY_A,
+            "object_type": "NETWORK",
+            "provider_name_matches": True,
+            "dependency_state": "UNREFERENCED",
+            "revision": 4,
+        }
+
     def zone_grant_state(
         self, group_id: UUID, policy_id: UUID, zone_id: UUID, organization_id: UUID
     ) -> tuple[UUID, str, set[str], int] | None:

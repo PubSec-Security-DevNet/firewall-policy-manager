@@ -304,6 +304,13 @@ class FirewallObject(SyncedResourceMixin, Base):
             "'APPLICATION','APPLICATION_FILTER')",
             name="ck_firewall_objects_type",
         ),
+        CheckConstraint(
+            "(owner_group_id IS NULL AND owner_policy_id IS NULL "
+            "AND expected_provider_name IS NULL) OR "
+            "(owner_group_id IS NOT NULL AND owner_policy_id IS NOT NULL "
+            "AND expected_provider_name IS NOT NULL)",
+            name="ck_firewall_objects_authoritative_owner",
+        ),
         Index("ix_firewall_objects_org_manager", "organization_id", "manager_id"),
         Index(
             "ix_firewall_objects_equivalence",
@@ -318,8 +325,12 @@ class FirewallObject(SyncedResourceMixin, Base):
     owner_group_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("application_groups.id"), index=True
     )
+    owner_policy_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("access_policies.id"), index=True
+    )
     created_by_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"), index=True)
     modified_by_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"), index=True)
+    expected_provider_name: Mapped[str | None] = mapped_column(String(200))
     object_type: Mapped[str] = mapped_column(String(50))
     normalized_value: Mapped[str | None] = mapped_column(String(500))
     sharing_mode: Mapped[str] = mapped_column(String(30), default="private")

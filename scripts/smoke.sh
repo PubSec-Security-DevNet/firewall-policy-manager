@@ -63,23 +63,30 @@ printf '%s' "$provider_status" | grep -q 'COMPLETED'
 test "$(printf '%s' "$provider_status" | grep -o '"evidence_profile":"mock"' | wc -l | tr -d ' ')" = "2"
 test "$(printf '%s' "$provider_status" | grep -o '"access_rule_create":"SUPPORTED"' | wc -l | tr -d ' ')" = "2"
 test "$(printf '%s' "$provider_status" | grep -o '"rule_ordering":"SUPPORTED"' | wc -l | tr -d ' ')" = "2"
+test "$(printf '%s' "$provider_status" | grep -o '"rule_category_mutation":"SUPPORTED"' | wc -l | tr -d ' ')" = "2"
+test "$(printf '%s' "$provider_status" | grep -o '"network_object_mutation":"SUPPORTED"' | wc -l | tr -d ' ')" = "2"
+test "$(printf '%s' "$provider_status" | grep -o '"port_service_object_mutation":"SUPPORTED"' | wc -l | tr -d ' ')" = "2"
+test "$(printf '%s' "$provider_status" | grep -o '"url_object_mutation":"SUPPORTED"' | wc -l | tr -d ' ')" = "2"
+test "$(printf '%s' "$provider_status" | grep -o '"application_object_mutation":"NOT_STARTED"' | wc -l | tr -d ' ')" = "2"
 test "$(printf '%s' "$provider_status" | grep -o '"application_object_create":"PARTIAL"' | wc -l | tr -d ' ')" = "2"
 printf '%s' "$isolated_managers" | grep -q 'Isolated FMC Mock'
 if printf '%s' "$isolated_managers" | grep -q 'Local SCC Mock'; then
   echo "Cross-organization manager data leaked into the isolated scope." >&2
   exit 1
 fi
-printf '%s' "$finance_context" | grep -q 'FINANCE-SERVERS'
+printf '%s' "$finance_context" | grep -q 'FINANCE__APP-SUBNET'
+printf '%s' "$finance_context" | grep -q '"owner_type":"GROUP"'
+printf '%s' "$finance_context" | grep -q '"owner_group_id":"20000000-0000-0000-0000-000000000001"'
 printf '%s' "$finance_context" | grep -q 'Inside-Finance'
 printf '%s' "$finance_context" | grep -q '10.20.0.0/16'
-if printf '%s' "$finance_context" | grep -q 'ENG-SERVERS'; then
+if printf '%s' "$finance_context" | grep -q 'ENGINEERING__BUILD-SERVERS'; then
   echo "Engineering entitlement leaked into the Finance context." >&2
   exit 1
 fi
-printf '%s' "$engineering_context" | grep -q 'ENG-SERVERS'
+printf '%s' "$engineering_context" | grep -q 'ENGINEERING__BUILD-SERVERS'
 printf '%s' "$engineering_context" | grep -q 'Inside-Engineering'
 printf '%s' "$engineering_context" | grep -q '172.16.0.0/12'
-if printf '%s' "$engineering_context" | grep -q 'FINANCE-SERVERS'; then
+if printf '%s' "$engineering_context" | grep -q 'FINANCE__APP-SUBNET'; then
   echo "Finance entitlement leaked into the Engineering context." >&2
   exit 1
 fi

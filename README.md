@@ -2,8 +2,9 @@
 
 Firewall Manager is an early delegated control plane for Cisco Secure Firewall Management Center
 (FMC) and Security Cloud Control (SCC). Milestone 3 adds Group-owned ChangeSet rule/object drafts,
-element-level authorization, naming/equivalence resolution, stale-provider protection, mock-only
-transaction execution, and audit evidence on top of delegated policy/resource authorization.
+authoritative Group+policy object ownership, safe category/object mutation, element-level
+authorization, naming/equivalence resolution, stale-provider protection, mock-only transaction
+execution, and audit evidence on top of delegated policy/resource authorization.
 
 No production provider writes, approvals, deployments, MCP tools, or real-provider credentials are
 implemented. The transaction path fails closed unless its target is explicitly a deterministic

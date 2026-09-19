@@ -25,12 +25,14 @@ production deployment state.
 
 ## Operations and authorization
 
-Supported mock operations are create/modify/delete/move rule and create object. Rule payloads use the
+Supported mock operations are create/modify/delete/move rule, ensure Group rule category, and
+create/modify/delete object. Rule payloads use the
 normalized model: zones, network/service/application/URL object references, manual networks and
 ports, action, category, position, logging, and settings. Object drafts support network, port
 service, URL, application, and application-filter types. Network, port-service, and URL creation
-are fully enabled by mock capability evidence. Application/application-filter creation is
-`PARTIAL`: normalization and conflict detection exist, but provider mutation remains blocked.
+and mutation are fully enabled by class-specific mock capability evidence.
+Application/application-filter creation is `PARTIAL`: normalization and conflict detection exist,
+but provider creation and mutation remain blocked.
 
 `ChangeSetService` calls the Milestone 2 `AuthorizationService` independently for the target
 policy, target rule, mapped category, every zone, every referenced object, every manual network,
@@ -40,6 +42,18 @@ before execution; current grants are never cached as permanent authority.
 
 Every lookup is scoped by organization plus the explicit active Group. The stored ChangeSet Group
 must equal the request Group, so membership or grants from another Group cannot contribute.
+
+Created objects are reconciled as application-managed with authoritative owning Group+policy,
+creator/modifier Users, and exact expected provider name. Modification and deletion require that
+ownership plus separate policy capabilities. Another authorized member of the Group may modify;
+creator identity does not create personal ownership. Direct User-owned objects are unsupported.
+Provider-owned and prefix-looking unmanaged objects cannot be mutated. Name drift, cross-policy
+access, cross-scope/incomplete dependencies, broader or outside-range networks, and equivalent
+duplicates fail closed. Delete additionally requires zero references.
+
+Category ensure reuses an exact authoritative mapping, creates and persists a mapping when truly
+absent, and conflicts on unmanaged same-name or stale category state. It requires the active
+Group's rule-create permission even when the mapped category already exists.
 
 ## Naming and equivalence
 
@@ -54,6 +68,8 @@ is rejected. Equivalent reuse still requires explicit object `USE` authorization
 Preflight snapshots provider versions, fingerprints, application revisions, and management state
 for the policy, target rule, category, referenced objects, and zones. Object creation also snapshots
 a digest of provider object inventory so a newly appearing equivalent/name conflict is stale state.
+Object mutation snapshots the target provider revision and identity; category ensure snapshots
+category inventory and the mapped provider resource.
 Refresh and execution compare current synchronized provider evidence to this snapshot and return
 structured conflicts without rewriting the proposal.
 
@@ -77,6 +93,7 @@ deployment endpoint exists.
 - `GET/PATCH/DELETE /api/v1/changesets/{id}`
 - `POST /api/v1/changesets/{id}/operations/rules`
 - `POST /api/v1/changesets/{id}/operations/objects`
+- `POST /api/v1/changesets/{id}/operations/categories`
 - `PUT/DELETE /api/v1/changesets/{id}/operations/{operation_id}`
 - `POST /api/v1/changesets/{id}/preflight`
 - `POST /api/v1/changesets/{id}/refresh`
@@ -107,7 +124,8 @@ edits, stale revisions, naming/equivalence outcomes, production-write blocking, 
 success/failure/rate-limit/timeout/partial/ambiguous transactions, backend types/lint/tests,
 frontend lint/types/tests/build, migration upgrade, Compose synchronization, and live REST mock
 execution. Provider-contract tests independently cover FMC and SCC rule CRUD/order, stateful
-network/port/URL creation, unsupported application creation, idempotency, and reconciliation.
+category ensure, network/port/URL creation and mutation, referenced-delete refusal, unsupported
+application creation/mutation, idempotency, and reconciliation.
 Ordering tests cover within-category success, cross-Group/category and administrator-category
 denial, cross-policy denial, and stale ordering evidence.
 

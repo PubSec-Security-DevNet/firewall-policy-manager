@@ -24,6 +24,11 @@ from firewall_manager.providers.mock import DeterministicMockProvider, MockScena
 from firewall_manager.providers.scc import SccProviderReader
 
 
+def as_dict(value: object) -> dict[str, object]:
+    assert isinstance(value, dict)
+    return value
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", list(ProviderKind))
 async def test_mock_provider_contract_supports_paginated_normalized_discovery(
@@ -38,6 +43,11 @@ async def test_mock_provider_contract_supports_paginated_normalized_discovery(
     assert info.capabilities["rule_category_read"] is CapabilityStatus.READ_ONLY
     assert info.capabilities["security_zone_read"] is CapabilityStatus.READ_ONLY
     assert info.capabilities["rule_ordering"] is CapabilityStatus.SUPPORTED
+    assert info.capabilities["rule_category_mutation"] is CapabilityStatus.SUPPORTED
+    assert info.capabilities["network_object_mutation"] is CapabilityStatus.SUPPORTED
+    assert info.capabilities["port_service_object_mutation"] is CapabilityStatus.SUPPORTED
+    assert info.capabilities["url_object_mutation"] is CapabilityStatus.SUPPORTED
+    assert info.capabilities["application_object_mutation"] is CapabilityStatus.NOT_STARTED
 
     first = await provider.domains(PageRequest(limit=1))
     assert len(first.items) == 1
@@ -287,6 +297,212 @@ async def test_supported_mock_object_create_capabilities_match_behavior(
         "code": "PROVIDER_CAPABILITY_UNAVAILABLE",
         "retry_safe": False,
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", list(ProviderKind))
+@pytest.mark.parametrize(
+    ("object_type", "native_suffix", "provider_name", "old_value", "new_value"),
+    [
+        (
+            FirewallObjectType.NETWORK,
+            "object-finance-servers",
+            "FINANCE__APP-SUBNET",
+            "10.20.10.0/24",
+            "10.20.30.0/24",
+        ),
+        (
+            FirewallObjectType.PORT_SERVICE,
+            "object-finance-service",
+            "FINANCE__API-SERVICE",
+            "tcp/9443",
+            "tcp/9444",
+        ),
+        (
+            FirewallObjectType.URL,
+            "object-finance-url",
+            "FINANCE__PORTAL",
+            "finance.example.test",
+            "updated.finance.example.test",
+        ),
+    ],
+)
+async def test_supported_mock_object_mutation_capabilities_match_behavior(  # noqa: PLR0913, PLR0917
+    kind: ProviderKind,
+    object_type: FirewallObjectType,
+    native_suffix: str,
+    provider_name: str,
+    old_value: str,
+    new_value: str,
+) -> None:
+    provider = DeterministicMockProvider(kind)
+    manager_id = uuid4()
+    prefix = kind.value
+    native_id = f"{prefix}-{native_suffix}"
+    update = await provider.execute_transaction(
+        uuid4(),
+        manager_id,
+        [
+            {
+                "id": str(uuid4()),
+                "kind": "MODIFY_OBJECT",
+                "provider_payload": {
+                    "policy_native_id": f"{prefix}-policy-edge",
+                    "expected_policy_version": "3",
+                    "object_native_id": native_id,
+                    "expected_object_version": "1",
+                    "expected_provider_name": provider_name,
+                    "object_type": object_type.value,
+                    "normalized_value": new_value,
+                },
+            }
+        ],
+    )
+    assert update.state.value == "SUCCEEDED"
+    provider_resource = as_dict(update.operation_results[0]["provider_resource"])
+    assert provider_resource["normalized_value"] == new_value
+    objects = await provider.objects(f"{prefix}-domain-main", PageRequest())
+    changed = next(item for item in objects.items if item.native_id == native_id)
+    assert changed.normalized_value != old_value
+    assert changed.normalized_value == new_value
+
+    delete = await provider.execute_transaction(
+        uuid4(),
+        manager_id,
+        [
+            {
+                "id": str(uuid4()),
+                "kind": "DELETE_OBJECT",
+                "provider_payload": {
+                    "policy_native_id": f"{prefix}-policy-edge",
+                    "expected_policy_version": "4",
+                    "object_native_id": native_id,
+                    "expected_object_version": "2",
+                    "expected_provider_name": provider_name,
+                    "object_type": object_type.value,
+                },
+            }
+        ],
+    )
+    assert delete.state.value == "SUCCEEDED"
+    assert all(
+        item.native_id != native_id
+        for item in (await provider.objects(f"{prefix}-domain-main", PageRequest())).items
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", list(ProviderKind))
+async def test_mock_provider_rejects_delete_of_referenced_object(kind: ProviderKind) -> None:
+    provider = DeterministicMockProvider(kind)
+    prefix = kind.value
+    result = await provider.execute_transaction(
+        uuid4(),
+        uuid4(),
+        [
+            {
+                "id": str(uuid4()),
+                "kind": "DELETE_OBJECT",
+                "provider_payload": {
+                    "policy_native_id": f"{prefix}-policy-edge",
+                    "expected_policy_version": "3",
+                    "object_native_id": f"{prefix}-object-app",
+                    "expected_object_version": "5",
+                    "expected_provider_name": "application-subnet",
+                    "object_type": FirewallObjectType.NETWORK.value,
+                },
+            }
+        ],
+    )
+    assert result.state.value == "CONFLICT"
+    assert as_dict(result.operation_results[0]["failure"])["code"] == "PROVIDER_OBJECT_IN_USE"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", list(ProviderKind))
+async def test_mock_rule_category_lifecycle_is_stateful_and_conflict_safe(
+    kind: ProviderKind,
+) -> None:
+    provider = DeterministicMockProvider(kind)
+    prefix = kind.value
+    policy_id = f"{prefix}-policy-edge"
+    existing = await provider.execute_transaction(
+        uuid4(),
+        uuid4(),
+        [
+            {
+                "id": str(uuid4()),
+                "kind": "ENSURE_RULE_CATEGORY",
+                "provider_payload": {
+                    "policy_native_id": policy_id,
+                    "expected_policy_version": "3",
+                    "provider_name": "FINANCE__RULES",
+                    "category_native_id": f"{prefix}-category-finance",
+                    "expected_category_version": "2",
+                },
+            }
+        ],
+    )
+    assert existing.state.value == "SUCCEEDED"
+    assert existing.operation_results[0]["mutated"] is False
+
+    created = await provider.execute_transaction(
+        uuid4(),
+        uuid4(),
+        [
+            {
+                "id": str(uuid4()),
+                "kind": "ENSURE_RULE_CATEGORY",
+                "provider_payload": {
+                    "policy_native_id": policy_id,
+                    "expected_policy_version": "3",
+                    "provider_name": "TREASURY__RULES",
+                },
+            }
+        ],
+    )
+    assert created.state.value == "SUCCEEDED"
+    assert as_dict(created.operation_results[0]["provider_resource"])["name"] == ("TREASURY__RULES")
+
+    collision = await provider.execute_transaction(
+        uuid4(),
+        uuid4(),
+        [
+            {
+                "id": str(uuid4()),
+                "kind": "ENSURE_RULE_CATEGORY",
+                "provider_payload": {
+                    "policy_native_id": policy_id,
+                    "expected_policy_version": "4",
+                    "provider_name": "FINANCE__RULES",
+                },
+            }
+        ],
+    )
+    assert collision.state.value == "CONFLICT"
+    assert as_dict(collision.operation_results[0]["failure"])["code"] == (
+        "PROVIDER_CATEGORY_NAME_CONFLICT"
+    )
+
+    stale = await provider.execute_transaction(
+        uuid4(),
+        uuid4(),
+        [
+            {
+                "id": str(uuid4()),
+                "kind": "ENSURE_RULE_CATEGORY",
+                "provider_payload": {
+                    "policy_native_id": policy_id,
+                    "expected_policy_version": "4",
+                    "provider_name": "FINANCE__RULES",
+                    "category_native_id": f"{prefix}-category-finance",
+                    "expected_category_version": "1",
+                },
+            }
+        ],
+    )
+    assert stale.state.value == "CONFLICT"
+    assert as_dict(stale.operation_results[0]["failure"])["code"] == "STALE_PROVIDER_REVISION"
 
 
 @pytest.mark.asyncio

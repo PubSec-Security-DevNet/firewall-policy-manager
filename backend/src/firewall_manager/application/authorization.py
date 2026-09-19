@@ -52,6 +52,11 @@ _OBJECT_CREATE_CAPABILITY: Mapping[str, ProviderCapability] = {
     FirewallObjectType.APPLICATION_FILTER: ProviderCapability.APPLICATION_OBJECT_CREATE,
 }
 
+_OBJECT_POLICY_CAPABILITY: Mapping[Action, PolicyCapability] = {
+    Action.MODIFY: PolicyCapability.MODIFY_OBJECT,
+    Action.DELETE: PolicyCapability.DELETE_OBJECT,
+}
+
 _USABLE_RESOURCE_STATES = frozenset({"OBSERVED", "UNMANAGED", "MANAGED"})
 
 
@@ -153,12 +158,15 @@ class AuthorizationService:
                 interface,
                 correlation_id,
             )
-        required = (
-            _POLICY_ACTION_CAPABILITY.get(action)
-            if resource.resource_type
-            in {AuthorizationResourceType.POLICY, AuthorizationResourceType.RULE}
-            else PolicyCapability.VIEW
-        )
+        if resource.resource_type in {
+            AuthorizationResourceType.POLICY,
+            AuthorizationResourceType.RULE,
+        }:
+            required = _POLICY_ACTION_CAPABILITY.get(action)
+        elif resource.resource_type is AuthorizationResourceType.OBJECT:
+            required = _OBJECT_POLICY_CAPABILITY.get(action, PolicyCapability.VIEW)
+        else:
+            required = PolicyCapability.VIEW
         if required is not None and required not in capabilities:
             return self._decision(
                 context,
@@ -242,6 +250,35 @@ class AuthorizationService:
                 return AuthorizationReason.RESOURCE_OUT_OF_SCOPE, 0
             return AuthorizationReason.ALLOWED, 0
         if resource.resource_type is AuthorizationResourceType.OBJECT and resource.resource_id:
+            if action in {Action.MODIFY, Action.DELETE}:
+                state = self._repository.object_mutation_state(
+                    context.active_group_id,
+                    context.access_policy_id,
+                    resource.resource_id,
+                    organization_id,
+                )
+                if state is None or state.get("manager_id") != manager_id:
+                    return AuthorizationReason.RESOURCE_OUT_OF_SCOPE, 0
+                revision = int(str(state.get("revision", 0)))
+                if state.get("owner_group_id") != context.active_group_id:
+                    return AuthorizationReason.NOT_OWNER, revision
+                if state.get("owner_policy_id") != context.access_policy_id:
+                    return AuthorizationReason.RESOURCE_OUT_OF_SCOPE, revision
+                if state.get("management_state") != "MANAGED":
+                    return AuthorizationReason.STALE_AUTHORIZATION_CONTEXT, revision
+                if state.get("provider_name_matches") is not True:
+                    return AuthorizationReason.OWNERSHIP_DRIFT, revision
+                dependency_state = state.get("dependency_state")
+                if dependency_state == "INCOMPLETE":
+                    return AuthorizationReason.DEPENDENCY_STATE_INCOMPLETE, revision
+                if action is Action.DELETE and dependency_state != "UNREFERENCED":
+                    return AuthorizationReason.OBJECT_DEPENDENCY_CONFLICT, revision
+                if action is Action.MODIFY and dependency_state not in {
+                    "UNREFERENCED",
+                    "WITHIN_SCOPE",
+                }:
+                    return AuthorizationReason.OBJECT_DEPENDENCY_CONFLICT, revision
+                return AuthorizationReason.ALLOWED, revision
             state = self._repository.object_grant_state(
                 context.active_group_id,
                 context.access_policy_id,

@@ -24,6 +24,7 @@ from firewall_manager.api.schemas import (
     ChangeSetResponse,
     DelegatedContextResponse,
     DelegatedPolicySummary,
+    DraftCategoryOperationRequest,
     DraftObjectOperationRequest,
     DraftOperationUpdateRequest,
     DraftRuleOperationRequest,
@@ -224,8 +225,26 @@ async def add_object_operation(
         principal,
         body.active_group_id,
         change_set_id,
-        ChangeOperationKind.CREATE_OBJECT,
+        ChangeOperationKind(body.kind),
         body.object.model_dump(mode="json", exclude_none=True),
+    )
+    return ChangeSetResponse.model_validate(result)
+
+
+@router.post("/changesets/{change_set_id}/operations/categories", tags=["change-sets"])
+async def add_category_operation(
+    change_set_id: UUID,
+    body: DraftCategoryOperationRequest,
+    principal: PrincipalDependency,
+    authorization_repository: AuthorizationRepositoryDependency,
+    change_set_repository: ChangeSetRepositoryDependency,
+) -> ChangeSetResponse:
+    result = _change_set_service(authorization_repository, change_set_repository).add_operation(
+        principal,
+        body.active_group_id,
+        change_set_id,
+        ChangeOperationKind.ENSURE_RULE_CATEGORY,
+        {"policy_id": str(body.policy_id)} if body.policy_id else {},
     )
     return ChangeSetResponse.model_validate(result)
 

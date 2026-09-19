@@ -50,7 +50,7 @@ class MockScenario(StrEnum):
 
 
 class DeterministicMockProvider:
-    """Representative FMC/SCC data with deterministic read-only fault controls."""
+    """Representative FMC/SCC data with deterministic read and transaction controls."""
 
     def __init__(self, kind: ProviderKind, scenario: MockScenario = MockScenario.NORMAL) -> None:
         self.kind = kind
@@ -179,12 +179,15 @@ class DeterministicMockProvider:
                 category_native_id=engineering_category,
                 action="BLOCK",
                 position=20,
+                object_references=(
+                    DiscoveredObjectReference(shared_object, RuleObjectElement.DESTINATION_NETWORK),
+                ),
             ),
         ]
         self._objects = [
             DiscoveredObject(
                 f"{prefix}-object-finance-servers",
-                "FINANCE-SERVERS",
+                "FINANCE__APP-SUBNET",
                 "1",
                 f"{prefix}-finance-servers-fp-1",
                 domain_native_id=domain,
@@ -193,7 +196,7 @@ class DeterministicMockProvider:
             ),
             DiscoveredObject(
                 f"{prefix}-object-engineering-servers",
-                "ENG-SERVERS",
+                "ENGINEERING__BUILD-SERVERS",
                 "1",
                 f"{prefix}-engineering-servers-fp-1",
                 domain_native_id=domain,
@@ -257,6 +260,15 @@ class DeterministicMockProvider:
                 sharing_mode="shared_use",
             ),
             DiscoveredObject(
+                f"{prefix}-object-finance-service",
+                "FINANCE__API-SERVICE",
+                "1",
+                f"{prefix}-finance-service-fp-1",
+                domain_native_id=domain,
+                object_type=FirewallObjectType.PORT_SERVICE,
+                normalized_value="tcp/9443",
+            ),
+            DiscoveredObject(
                 f"{prefix}-object-url",
                 "Corporate portal URL",
                 "1",
@@ -264,6 +276,15 @@ class DeterministicMockProvider:
                 domain_native_id=domain,
                 object_type=FirewallObjectType.URL,
                 normalized_value="portal.example.test",
+            ),
+            DiscoveredObject(
+                f"{prefix}-object-finance-url",
+                "FINANCE__PORTAL",
+                "1",
+                f"{prefix}-finance-url-fp-1",
+                domain_native_id=domain,
+                object_type=FirewallObjectType.URL,
+                normalized_value="finance.example.test",
             ),
             DiscoveredObject(
                 application_object,
@@ -405,7 +426,8 @@ class DeterministicMockProvider:
         mutation_seen = False
         ambiguous = False
         baseline_versions = {
-            item.native_id: item.native_version for item in [*self._policies, *self._rules]
+            item.native_id: item.native_version
+            for item in [*self._policies, *self._categories, *self._rules, *self._objects]
         }
         for index, operation in enumerate(operations):
             operation_id = str(operation.get("id", ""))
@@ -469,6 +491,7 @@ class DeterministicMockProvider:
                         OperationStatus.AMBIGUOUS,
                         "unknown",
                         provider_resource_id=provider_resource_id,
+                        provider_resource=self._provider_resource(provider_resource_id),
                         failure={
                             "code": "TIMEOUT_AFTER_MUTATION",
                             "retry_safe": False,
@@ -483,6 +506,7 @@ class DeterministicMockProvider:
                         OperationStatus.SUCCEEDED,
                         mutated,
                         provider_resource_id=provider_resource_id,
+                        provider_resource=self._provider_resource(provider_resource_id),
                     )
                 )
         statuses = {str(item["status"]) for item in results}
@@ -525,15 +549,29 @@ class DeterministicMockProvider:
             ChangeOperationKind.MODIFY_RULE: "access_rule_update",
             ChangeOperationKind.DELETE_RULE: "access_rule_delete",
             ChangeOperationKind.MOVE_RULE: "rule_ordering",
+            ChangeOperationKind.ENSURE_RULE_CATEGORY: "rule_category_mutation",
         }.get(kind)
-        if kind is ChangeOperationKind.CREATE_OBJECT:
+        if kind in {
+            ChangeOperationKind.CREATE_OBJECT,
+            ChangeOperationKind.MODIFY_OBJECT,
+            ChangeOperationKind.DELETE_OBJECT,
+        }:
+            object_type = FirewallObjectType(str(payload["object_type"]))
             required = {
                 FirewallObjectType.NETWORK: "network_object_create",
                 FirewallObjectType.PORT_SERVICE: "port_service_object_create",
                 FirewallObjectType.URL: "url_object_create",
                 FirewallObjectType.APPLICATION: "application_object_create",
                 FirewallObjectType.APPLICATION_FILTER: "application_object_create",
-            }[FirewallObjectType(str(payload["object_type"]))]
+            }[object_type]
+            if kind is not ChangeOperationKind.CREATE_OBJECT:
+                required = {
+                    FirewallObjectType.NETWORK: "network_object_mutation",
+                    FirewallObjectType.PORT_SERVICE: "port_service_object_mutation",
+                    FirewallObjectType.URL: "url_object_mutation",
+                    FirewallObjectType.APPLICATION: "application_object_mutation",
+                    FirewallObjectType.APPLICATION_FILTER: "application_object_mutation",
+                }[object_type]
         if required is None or self._capabilities.get(required) is not CapabilityStatus.SUPPORTED:
             raise ValueError("PROVIDER_CAPABILITY_UNAVAILABLE")
         if (
@@ -551,8 +589,12 @@ class DeterministicMockProvider:
         resource_id = str(
             uuid5(NAMESPACE_URL, f"{self.kind}:{transaction_id}:{index}:{operation['id']}")
         )
+        if kind is ChangeOperationKind.ENSURE_RULE_CATEGORY:
+            return self._ensure_category(policy, payload, resource_id, baseline_versions)
         if kind is ChangeOperationKind.CREATE_OBJECT:
             return self._create_object(policy, payload, resource_id)
+        if kind in {ChangeOperationKind.MODIFY_OBJECT, ChangeOperationKind.DELETE_OBJECT}:
+            return self._mutate_object(kind, policy, payload, baseline_versions)
         if kind is ChangeOperationKind.CREATE_RULE:
             return self._create_rule(policy, payload, resource_id)
         rule = self._rule(str(payload["rule_native_id"]), policy.native_id)
@@ -686,6 +728,103 @@ class DeterministicMockProvider:
         self._bump_policy(policy)
         return resource_id, True
 
+    def _mutate_object(
+        self,
+        kind: ChangeOperationKind,
+        policy: DiscoveredPolicy,
+        payload: dict[str, object],
+        baseline_versions: dict[str, str | None],
+    ) -> tuple[str, bool]:
+        item = self._object(str(payload["object_native_id"]), policy.domain_native_id)
+        expected_version = payload.get("expected_object_version")
+        if expected_version is not None and str(expected_version) != str(
+            baseline_versions.get(item.native_id)
+        ):
+            raise ValueError("STALE_PROVIDER_REVISION")
+        if payload.get("expected_provider_name") != item.name:
+            raise ValueError("PROVIDER_OWNERSHIP_NAME_CONFLICT")
+        if kind is ChangeOperationKind.DELETE_OBJECT:
+            referenced_by_rule = any(
+                reference.object_native_id == item.native_id
+                for rule in self._rules
+                for reference in rule.object_references
+            )
+            referenced_by_object = any(
+                item.native_id in candidate.referenced_object_native_ids
+                for candidate in self._objects
+            )
+            if referenced_by_rule or referenced_by_object:
+                raise ValueError("PROVIDER_OBJECT_IN_USE")
+            self._objects.remove(item)
+            self._bump_policy(policy)
+            return item.native_id, True
+        normalized_value = str(payload["normalized_value"])
+        if any(
+            candidate.native_id != item.native_id
+            and candidate.object_type is item.object_type
+            and candidate.normalized_value == normalized_value
+            for candidate in self._objects
+        ):
+            raise ValueError("PROVIDER_EQUIVALENT_OBJECT_CONFLICT")
+        version = str(int(item.native_version or "0") + 1)
+        updated = replace(
+            item,
+            native_version=version,
+            fingerprint=f"{self.kind}-object-{item.native_id}-{version}",
+            normalized_value=normalized_value,
+        )
+        self._objects[self._objects.index(item)] = updated
+        self._bump_policy(policy)
+        return item.native_id, True
+
+    def _ensure_category(
+        self,
+        policy: DiscoveredPolicy,
+        payload: dict[str, object],
+        resource_id: str,
+        baseline_versions: dict[str, str | None],
+    ) -> tuple[str, bool]:
+        provider_name = str(payload["provider_name"])
+        native_id = payload.get("category_native_id")
+        if native_id is not None:
+            category = self._category(str(native_id), policy.native_id)
+            expected_version = payload.get("expected_category_version")
+            if expected_version is not None and str(expected_version) != str(
+                baseline_versions.get(category.native_id)
+            ):
+                raise ValueError("STALE_PROVIDER_REVISION")
+            if category.name != provider_name:
+                raise ValueError("PROVIDER_CATEGORY_MAPPING_CONFLICT")
+            return category.native_id, False
+        if any(
+            item.policy_native_id == policy.native_id and item.name == provider_name
+            for item in self._categories
+        ):
+            raise ValueError("PROVIDER_CATEGORY_NAME_CONFLICT")
+        position = (
+            max(
+                (
+                    item.position
+                    for item in self._categories
+                    if item.policy_native_id == policy.native_id
+                ),
+                default=0,
+            )
+            + 10
+        )
+        self._categories.append(
+            DiscoveredCategory(
+                native_id=resource_id,
+                name=provider_name,
+                native_version="1",
+                fingerprint=f"{self.kind}-category-{resource_id}-1",
+                policy_native_id=policy.native_id,
+                position=position,
+            )
+        )
+        self._bump_policy(policy)
+        return resource_id, True
+
     def _validated_position(self, category: DiscoveredCategory, position: int) -> int:
         ordered = sorted(self._categories, key=lambda item: item.position)
         index = ordered.index(category)
@@ -728,6 +867,38 @@ class DeterministicMockProvider:
         except StopIteration as exc:
             raise ValueError("PROVIDER_RULE_NOT_FOUND") from exc
 
+    def _object(self, native_id: str, domain_native_id: str) -> DiscoveredObject:
+        try:
+            return next(
+                item
+                for item in self._objects
+                if item.native_id == native_id and item.domain_native_id == domain_native_id
+            )
+        except StopIteration as exc:
+            raise ValueError("PROVIDER_OBJECT_NOT_FOUND") from exc
+
+    def _provider_resource(self, native_id: str) -> dict[str, object]:
+        for item in [*self._objects, *self._categories, *self._rules]:
+            if item.native_id != native_id:
+                continue
+            result: dict[str, object] = {
+                "native_id": item.native_id,
+                "name": item.name,
+                "native_version": item.native_version,
+                "fingerprint": item.fingerprint,
+            }
+            if isinstance(item, DiscoveredObject):
+                result.update(
+                    {
+                        "object_type": item.object_type.value,
+                        "normalized_value": item.normalized_value,
+                    }
+                )
+            elif isinstance(item, DiscoveredCategory):
+                result["position"] = item.position
+            return result
+        return {}
+
     @staticmethod
     def _operation_payload(operation: dict[str, object]) -> dict[str, object]:
         value = operation.get("provider_payload", operation.get("payload", {}))
@@ -742,6 +913,7 @@ class DeterministicMockProvider:
         mutated: bool | str,
         *,
         provider_resource_id: str | None = None,
+        provider_resource: dict[str, object] | None = None,
         failure: dict[str, object] | None = None,
     ) -> dict[str, object]:
         result: dict[str, object] = {
@@ -751,6 +923,8 @@ class DeterministicMockProvider:
         }
         if provider_resource_id is not None:
             result["provider_resource_id"] = provider_resource_id
+        if provider_resource:
+            result["provider_resource"] = provider_resource
         if failure:
             result["failure"] = failure
         return result

@@ -78,6 +78,12 @@ class ProviderObjectNamingService:
         name = f"{group_slug}__{component}"
         return name if len(name) <= maximum else None
 
+    def category_name(self, provider: ProviderKind, group_slug: str) -> str | None:
+        """Return the stable provider-visible rule category for one immutable Group slug."""
+        maximum = 64 if provider is ProviderKind.FMC else 80
+        name = f"{group_slug}__RULES"
+        return name if len(name) <= maximum else None
+
     def resolve(  # noqa: PLR0913 -- all resolution inputs are security-relevant
         self,
         *,
