@@ -17,6 +17,7 @@ from firewall_manager.application.errors import (
 )
 from firewall_manager.domain.models import (
     AuthorizationDecision,
+    CapabilityStatus,
     DiscoveredCategory,
     DiscoveredDevice,
     DiscoveredDomain,
@@ -124,6 +125,25 @@ class SqlOverviewRepository:
         return self._session.scalar(
             select(Organization.name).where(Organization.id == organization_id)
         )
+
+    def development_identities(self) -> list[dict[str, object]]:
+        """List deterministic identities only for the conditionally mounted dev-auth route."""
+        rows = list(
+            self._session.scalars(
+                select(User)
+                .where(User.identity_issuer == "urn:firewall-manager:development")
+                .order_by(User.display_name, User.id)
+            )
+        )
+        return [
+            {
+                "email": row.email,
+                "display_name": row.display_name,
+                "role": row.role,
+                "enabled": row.is_active,
+            }
+            for row in rows
+        ]
 
     def counts(self, organization_id: UUID) -> dict[str, int]:
         return {
@@ -597,7 +617,7 @@ class SqlAuthorizationRepository:
     ) -> None:
         # Denials and privileged administration are security evidence. Routine successful reads
         # remain out of the audit stream to avoid drowning meaningful activity.
-        if decision.allowed and decision.action.value != "manage_grants":
+        if decision.allowed and decision.action.value not in {"manage_grants", "manage_providers"}:
             return
         # A denied request causes the delivery transaction to roll back. Persist decision evidence
         # independently so the rollback cannot erase the event it is meant to explain.
@@ -1195,14 +1215,42 @@ class SqlSyncRepository:
         if manager is None:
             return
         try:
-            expected = verify_capability_evidence(
-                load_capabilities(default_capability_path()),
-                ProviderKind(manager.provider),
-                is_mock=manager.is_mock,
-                reported_profile=info.evidence_profile,
-                reported_capabilities=info.capabilities,
-            )
-        except CapabilityEvidenceMismatchError as exc:
+            if manager.provider_connection_id is not None:
+                expected = {
+                    name: CapabilityStatus(status) for name, status in manager.capabilities.items()
+                }
+                read_capabilities = {
+                    "authentication_session",
+                    "manager_tenant_discovery",
+                    "device_discovery",
+                    "access_policy_discovery",
+                    "rule_category_read",
+                    "access_rule_read",
+                    "network_object_read",
+                    "network_groups",
+                    "security_zone_read",
+                }
+                write_promoted = any(
+                    status is not CapabilityStatus.NOT_STARTED
+                    for name, status in expected.items()
+                    if name not in read_capabilities
+                )
+                if (
+                    info.evidence_profile is not ProviderEvidenceProfile.REAL
+                    or info.capabilities != expected
+                    or info.writable
+                    or write_promoted
+                ):
+                    raise CapabilityEvidenceMismatchError
+            else:
+                expected = verify_capability_evidence(
+                    load_capabilities(default_capability_path()),
+                    ProviderKind(manager.provider),
+                    is_mock=manager.is_mock,
+                    reported_profile=info.evidence_profile,
+                    reported_capabilities=info.capabilities,
+                )
+        except (CapabilityEvidenceMismatchError, ValueError) as exc:
             raise ProviderContractError(
                 details={"code": "CAPABILITY_EVIDENCE_PROFILE_MISMATCH"}
             ) from exc

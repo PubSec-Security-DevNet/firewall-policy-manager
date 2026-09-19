@@ -23,11 +23,15 @@ from firewall_manager.persistence.models import (
     ObjectReference,
     ObjectUseGrant,
     PolicyDelegation,
+    ProviderCapabilityEvidence,
+    ProviderConnection,
+    ProviderConnectionScope,
     ProviderDomain,
     ResourceGrant,
     ResourceOwnership,
     RuleCategory,
     RuleZoneReference,
+    SecretRecord,
     SecurityZone,
     SyncRun,
     User,
@@ -47,6 +51,40 @@ def test_internal_identity_is_distinct_from_provider_native_identity() -> None:
         if isinstance(constraint, UniqueConstraint)
     }
     assert ("organization_id", "provider", "native_id") in unique_sets
+
+
+def test_real_provider_connections_reference_secrets_and_namespace_evidence() -> None:
+    connection_table = cast(Table, ProviderConnection.__table__)
+    assert {
+        "organization_id",
+        "provider_type",
+        "lifecycle",
+        "credential_reference",
+        "provider_version",
+        "sync_status",
+        "revision",
+    } <= set(connection_table.c.keys())
+    credential_fk = next(iter(connection_table.c.credential_reference.foreign_keys))
+    assert credential_fk.target_fullname == "secret_records.id"
+    assert credential_fk.ondelete == "RESTRICT"
+    assert "password" not in connection_table.c
+    assert "token" not in connection_table.c
+    assert {"ciphertext", "nonce", "key_version", "purpose"} <= set(SecretRecord.__table__.c.keys())
+
+    manager_connection_fk = next(
+        iter(FirewallManager.__table__.c.provider_connection_id.foreign_keys)
+    )
+    assert manager_connection_fk.ondelete == "RESTRICT"
+    assert {"connection_id", "native_id", "scope_type"} <= set(
+        ProviderConnectionScope.__table__.c.keys()
+    )
+    evidence_table = cast(Table, ProviderCapabilityEvidence.__table__)
+    evidence_unique_sets = {
+        tuple(column.name for column in constraint.columns)
+        for constraint in evidence_table.constraints
+        if isinstance(constraint, UniqueConstraint)
+    }
+    assert ("connection_id", "provider_version", "capability") in evidence_unique_sets
 
 
 def test_all_provider_resources_have_structural_org_manager_and_sync_scope() -> None:

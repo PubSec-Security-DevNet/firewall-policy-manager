@@ -25,7 +25,82 @@ export class ApiError extends Error {
   }
 }
 
-const developmentUser = import.meta.env.VITE_DEV_AUTH_USER ?? 'viewer@example.test';
+const developmentUserKey = 'firewall-manager.dev-user';
+const defaultDevelopmentUser = import.meta.env.VITE_DEV_AUTH_USER ?? 'viewer@example.test';
+
+export interface DevelopmentIdentity {
+  email: string;
+  display_name: string;
+  role: string;
+  enabled: boolean;
+}
+
+export interface ProviderConnectionScope {
+  id: string;
+  native_id: string;
+  name: string;
+  scope_type: string;
+  last_seen_at: string;
+}
+
+export interface ProviderCapabilityEvidence {
+  capability: string;
+  status: string;
+  evidence_level: string;
+  provider_version: string;
+  tested_at: string | null;
+}
+
+export interface ProviderConnection {
+  id: string;
+  provider_type: 'fmc' | 'scc';
+  display_name: string;
+  lifecycle: 'ACTIVE' | 'DISABLED' | 'RETIRED';
+  enabled: boolean;
+  connection_mode: string;
+  evidence_profile: 'real';
+  base_endpoint: string | null;
+  region: string | null;
+  tls_mode: 'SYSTEM' | 'CUSTOM_CA';
+  credential_present: boolean;
+  credential_type: string;
+  credential_username: string | null;
+  credential_updated_at: string;
+  provider_version: string | null;
+  connection_status: string;
+  sync_status: string | null;
+  last_connection_test: string | null;
+  last_successful_connection: string | null;
+  last_sync: string | null;
+  last_successful_sync: string | null;
+  last_error_code: string | null;
+  last_error_message: string | null;
+  last_error_correlation_id: string | null;
+  certificate_info: Record<string, string>;
+  sync_interval_minutes: number;
+  scopes: ProviderConnectionScope[];
+  capability_evidence: ProviderCapabilityEvidence[];
+  revision: number;
+}
+
+export interface ProviderGuidance {
+  title: string;
+  capability_target: string;
+  steps: string[];
+  permission_note: string;
+  operations: Array<{ operation: string; method: string; permission: string }>;
+  official_references: Array<{ label: string; url: string }>;
+}
+
+export function getDevelopmentUser(): string {
+  return window.sessionStorage.getItem(developmentUserKey) ?? defaultDevelopmentUser;
+}
+
+export function switchDevelopmentUser(email: string): void {
+  window.sessionStorage.setItem(developmentUserKey, email);
+  // A navigation is the cache boundary: Group selection and all user-specific React state die here.
+  window.location.reload();
+}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
@@ -33,7 +108,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     headers: {
       Accept: 'application/json',
       'Content-Type': 'application/json',
-      'X-Dev-User': developmentUser,
+      'X-Dev-User': getDevelopmentUser(),
       ...init?.headers,
     },
     credentials: 'same-origin',
@@ -56,6 +131,85 @@ export async function loadInitialOverview(): Promise<{ session: Session; overvie
     get<Overview>('/api/v1/overview'),
   ]);
   return { session, overview };
+}
+
+export async function loadDevelopmentIdentities(): Promise<DevelopmentIdentity[]> {
+  return get<DevelopmentIdentity[]>('/api/v1/dev/users');
+}
+
+export async function loadProviderConnections(): Promise<ProviderConnection[]> {
+  const page = await get<{ items: ProviderConnection[]; total: number }>(
+    '/api/v1/admin/provider-connections?limit=100',
+  );
+  return page.items;
+}
+
+export async function loadProviderGuidance(provider: 'fmc' | 'scc'): Promise<ProviderGuidance> {
+  return get<ProviderGuidance>(`/api/v1/admin/provider-connections/guidance/${provider}`);
+}
+
+export async function createProviderConnection(
+  values: Record<string, unknown>,
+): Promise<ProviderConnection> {
+  return request<ProviderConnection>('/api/v1/admin/provider-connections', {
+    method: 'POST',
+    body: JSON.stringify(values),
+  });
+}
+
+export async function testProviderConnection(
+  connectionId: string,
+): Promise<{ status: string; connection: ProviderConnection }> {
+  return request<{ status: string; connection: ProviderConnection }>(
+    `/api/v1/admin/provider-connections/${encodeURIComponent(connectionId)}/test`,
+    { method: 'POST', body: '{}' },
+  );
+}
+
+export async function setProviderConnectionLifecycle(
+  connection: ProviderConnection,
+  lifecycle: 'ACTIVE' | 'DISABLED' | 'RETIRED',
+): Promise<ProviderConnection> {
+  return request<ProviderConnection>(
+    `/api/v1/admin/provider-connections/${encodeURIComponent(connection.id)}/lifecycle`,
+    {
+      method: 'PUT',
+      body: JSON.stringify({ expected_revision: connection.revision, lifecycle }),
+    },
+  );
+}
+
+export async function requestProviderSync(connectionId: string): Promise<void> {
+  await request(`/api/v1/admin/provider-connections/${encodeURIComponent(connectionId)}/sync`, {
+    method: 'POST',
+    body: '{}',
+  });
+}
+
+export async function rotateProviderCredential(
+  connection: ProviderConnection,
+  values: Record<string, unknown>,
+): Promise<ProviderConnection> {
+  return request<ProviderConnection>(
+    `/api/v1/admin/provider-connections/${encodeURIComponent(connection.id)}/credentials`,
+    {
+      method: 'PUT',
+      body: JSON.stringify({ expected_revision: connection.revision, ...values }),
+    },
+  );
+}
+
+export async function updateProviderConnection(
+  connection: ProviderConnection,
+  values: Record<string, unknown>,
+): Promise<ProviderConnection> {
+  return request<ProviderConnection>(
+    `/api/v1/admin/provider-connections/${encodeURIComponent(connection.id)}/configuration`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify({ expected_revision: connection.revision, ...values }),
+    },
+  );
 }
 
 export async function loadDelegatedPolicies(activeGroupId: string): Promise<DelegatedPolicy[]> {

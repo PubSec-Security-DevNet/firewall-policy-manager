@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Literal, TypeVar
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr, model_validator
 
 
 class ErrorBody(BaseModel):
@@ -28,6 +28,13 @@ class SessionResponse(BaseModel):
     email: str
     role: str
     groups: list["ActiveGroupResponse"]
+
+
+class DevelopmentIdentityResponse(BaseModel):
+    email: str
+    display_name: str
+    role: str
+    enabled: bool
 
 
 class ActiveGroupResponse(BaseModel):
@@ -226,6 +233,124 @@ class AdministrationSnapshotResponse(BaseModel):
     ip_range_grants: list[dict[str, object]]
     object_create_grants: list[dict[str, object]]
     category_mappings: list[dict[str, object]]
+
+
+class ProviderConnectionScopeResponse(BaseModel):
+    id: UUID
+    native_id: str
+    name: str
+    scope_type: str
+    last_seen_at: datetime
+
+
+class ProviderCapabilityEvidenceResponse(BaseModel):
+    capability: str
+    status: str
+    evidence_level: str
+    provider_version: str
+    tested_at: datetime | None
+
+
+class ProviderConnectionResponse(BaseModel):
+    id: UUID
+    provider_type: Literal["fmc", "scc"]
+    display_name: str
+    lifecycle: Literal["ACTIVE", "DISABLED", "RETIRED"]
+    enabled: bool
+    connection_mode: str
+    evidence_profile: Literal["real"]
+    base_endpoint: str | None
+    region: str | None
+    tls_mode: Literal["SYSTEM", "CUSTOM_CA"]
+    credential_present: bool
+    credential_type: str
+    credential_username: str | None
+    credential_updated_at: datetime
+    provider_version: str | None
+    connection_status: str
+    sync_status: str | None
+    last_connection_test: datetime | None
+    last_successful_connection: datetime | None
+    last_sync: datetime | None
+    last_successful_sync: datetime | None
+    last_error_code: str | None
+    last_error_message: str | None
+    last_error_correlation_id: str | None
+    certificate_info: dict[str, str]
+    sync_interval_minutes: int
+    scopes: list[ProviderConnectionScopeResponse]
+    capability_evidence: list[ProviderCapabilityEvidenceResponse]
+    created_at: datetime
+    updated_at: datetime
+    revision: int
+
+
+class ProviderConnectionPageResponse(BaseModel):
+    items: list[ProviderConnectionResponse]
+    total: int
+
+
+class ProviderConnectionCreateRequest(BaseModel):
+    provider_type: Literal["fmc", "scc"]
+    display_name: str = Field(min_length=1, max_length=200)
+    base_endpoint: str | None = Field(default=None, max_length=500)
+    region: Literal["us", "eu", "apj", "au", "in", "uae", "fedramp", "il5"] | None = None
+    tls_mode: Literal["SYSTEM", "CUSTOM_CA"] = "SYSTEM"
+    username: str | None = Field(default=None, max_length=320)
+    password: SecretStr | None = Field(default=None, repr=False)
+    token: SecretStr | None = Field(default=None, repr=False)
+    ca_certificate: SecretStr | None = Field(default=None, repr=False)
+    sync_interval_minutes: int = Field(default=60, ge=5, le=10080)
+
+    @model_validator(mode="after")
+    def validate_provider_fields(self) -> "ProviderConnectionCreateRequest":
+        if self.provider_type == "fmc" and (
+            not self.base_endpoint
+            or not self.username
+            or self.password is None
+            or (self.tls_mode == "CUSTOM_CA" and self.ca_certificate is None)
+        ):
+            raise ValueError(
+                "FMC endpoint, username, password, and selected TLS trust are required"
+            )
+        if self.provider_type == "scc" and (not self.region or self.token is None):
+            raise ValueError("SCC region and API token are required")
+        return self
+
+
+class ProviderConnectionUpdateRequest(BaseModel):
+    expected_revision: int = Field(ge=1)
+    display_name: str | None = Field(default=None, min_length=1, max_length=200)
+    base_endpoint: str | None = Field(default=None, max_length=500)
+    region: Literal["us", "eu", "apj", "au", "in", "uae", "fedramp", "il5"] | None = None
+    tls_mode: Literal["SYSTEM", "CUSTOM_CA"] | None = None
+    sync_interval_minutes: int | None = Field(default=None, ge=5, le=10080)
+
+
+class ProviderCredentialUpdateRequest(BaseModel):
+    expected_revision: int = Field(ge=1)
+    username: str | None = Field(default=None, max_length=320)
+    password: SecretStr | None = Field(default=None, repr=False)
+    token: SecretStr | None = Field(default=None, repr=False)
+    ca_certificate: SecretStr | None = Field(default=None, repr=False)
+
+
+class ProviderLifecycleRequest(BaseModel):
+    expected_revision: int = Field(ge=1)
+    lifecycle: Literal["ACTIVE", "DISABLED", "RETIRED"]
+
+
+class ProviderConnectionTestResponse(BaseModel):
+    status: str
+    provider_version: str | None = None
+    certificate_info: dict[str, str] = Field(default_factory=dict)
+    tested_capabilities: list[str] = Field(default_factory=list)
+    unverified_capabilities: list[str] = Field(default_factory=list)
+    error_code: str | None = None
+    safe_message: str | None = None
+    missing_capability: str | None = None
+    correlation_id: str | None = None
+    connection: ProviderConnectionResponse
 
 
 class ChangeSetCreateRequest(BaseModel):

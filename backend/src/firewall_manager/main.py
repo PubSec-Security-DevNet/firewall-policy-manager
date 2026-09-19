@@ -1,7 +1,7 @@
 """FastAPI process composition root."""
 
 import logging
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -12,17 +12,27 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import RequestResponseEndpoint
 from starlette.responses import Response
 
-from firewall_manager.api.routes import get_provider_readers, router
+from firewall_manager.api.dependencies import get_provider_factory, get_provider_sync_dispatcher
+from firewall_manager.api.routes import dev_router, get_provider_readers, router
 from firewall_manager.api.schemas import ErrorEnvelope
 from firewall_manager.application.errors import ApplicationError
 from firewall_manager.config import get_settings
+from firewall_manager.providers.factory import build_real_provider
 from firewall_manager.providers.fmc import FmcProviderReader
 from firewall_manager.providers.scc import SccProviderReader
+from firewall_manager.security.redaction import SecretRedactionFilter
+from firewall_manager.worker.tasks import synchronize_provider_connection
+
+
+def dispatch_provider_sync(connection_id: UUID) -> object:
+    """Publish one connection UUID after the repository has committed its queue state."""
+    return synchronize_provider_connection.send(str(connection_id))
 
 
 def configure_logging() -> None:
     """Emit parseable logs without provider payloads or secrets."""
     handler = logging.StreamHandler()
+    handler.addFilter(SecretRedactionFilter())
     handler.setFormatter(JsonFormatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
     logging.basicConfig(level=get_settings().app_log_level, handlers=[handler], force=True)
 
@@ -49,6 +59,8 @@ def create_app() -> FastAPI:
         SccProviderReader(str(settings.scc_base_url)),
     )
     application.dependency_overrides[get_provider_readers] = lambda: providers
+    application.dependency_overrides[get_provider_factory] = lambda: build_real_provider
+    application.dependency_overrides[get_provider_sync_dispatcher] = lambda: dispatch_provider_sync
 
     @application.middleware("http")
     async def correlation_id(request: Request, call_next: RequestResponseEndpoint) -> Response:
@@ -128,6 +140,8 @@ def create_app() -> FastAPI:
         )
 
     application.include_router(router)
+    if settings.dev_auth_enabled:
+        application.include_router(dev_router)
     return application
 
 

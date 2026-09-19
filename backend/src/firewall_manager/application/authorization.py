@@ -23,6 +23,12 @@ _ROLE_ACTIONS: dict[str, frozenset[Action]] = {
     "viewer": frozenset({Action.READ}),
     "editor": frozenset({Action.READ, Action.USE, Action.MODIFY}),
     "approver": frozenset({Action.READ, Action.APPROVE}),
+    "group_admin": frozenset(
+        {Action.READ, Action.USE, Action.CREATE, Action.MODIFY, Action.DELETE, Action.REORDER}
+    ),
+    "firewall_admin": frozenset(
+        action for action in Action if action not in {Action.MANAGE_GRANTS, Action.MANAGE_PROVIDERS}
+    ),
     "admin": frozenset(Action),
 }
 
@@ -211,6 +217,34 @@ class AuthorizationService:
             active_group_id=None,
             access_policy_id=None,
             resource_type=resource.resource_type,
+            authorization_revision=user[1] if user else 0,
+        )
+        self._repository.record_authorization_decision(
+            decision, interface=interface, correlation_id=correlation_id
+        )
+        return decision
+
+    def authorize_provider_administration(
+        self,
+        principal: Principal,
+        *,
+        interface: str = "application",
+        correlation_id: str | None = None,
+    ) -> AuthorizationDecision:
+        """Authorize the distinct provider-connection administration boundary."""
+        user = self._repository.user_state(principal.user_id, principal.organization_id)
+        allowed = user is not None and user[0] and principal.role == "admin"
+        decision = AuthorizationDecision(
+            allowed=allowed,
+            reason=AuthorizationReason.ALLOWED
+            if allowed
+            else AuthorizationReason.ACTION_NOT_GRANTED,
+            action=Action.MANAGE_PROVIDERS,
+            principal_id=principal.user_id,
+            organization_id=principal.organization_id,
+            active_group_id=None,
+            access_policy_id=None,
+            resource_type=AuthorizationResourceType.PROVIDER_CONNECTION,
             authorization_revision=user[1] if user else 0,
         )
         self._repository.record_authorization_decision(

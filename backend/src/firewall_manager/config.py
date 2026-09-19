@@ -1,9 +1,11 @@
 """Centralized and validated runtime configuration."""
 
+import base64
+import binascii
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import AnyHttpUrl, Field, model_validator
+from pydantic import AnyHttpUrl, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -21,7 +23,15 @@ class Settings(BaseSettings):
     cors_origins: list[str] = Field(default_factory=list)
     dev_auth_enabled: bool = False
     dev_auth_default_user: str = "viewer@example.test"
+    secret_store_master_key: SecretStr | None = Field(default=None, alias="APP_SECRET_KEY")
+    secret_store_key_version: int = Field(default=1, ge=1)
     scheduler_interval_seconds: int = Field(default=30, ge=5, le=3600)
+
+    @field_validator("secret_store_master_key", mode="before")
+    @classmethod
+    def empty_secret_key_is_unconfigured(cls, value: object) -> object:
+        """Allow the mock-only local stack to start without configuring a real-provider key."""
+        return None if value == "" else value
 
     @model_validator(mode="after")
     def protect_development_auth(self) -> "Settings":
@@ -29,6 +39,20 @@ class Settings(BaseSettings):
         if self.dev_auth_enabled and self.app_environment not in {"development", "test"}:
             msg = "DEV_AUTH_ENABLED is permitted only in development or test"
             raise ValueError(msg)
+        if self.app_environment == "production" and self.secret_store_master_key is None:
+            msg = "APP_SECRET_KEY is required in production"
+            raise ValueError(msg)
+        if self.secret_store_master_key is not None:
+            try:
+                decoded = base64.b64decode(
+                    self.secret_store_master_key.get_secret_value(), validate=True
+                )
+            except (binascii.Error, ValueError) as exc:
+                msg = "APP_SECRET_KEY must be a base64-encoded 32-byte key"
+                raise ValueError(msg) from exc
+            if len(decoded) != 32:
+                msg = "APP_SECRET_KEY must be a base64-encoded 32-byte key"
+                raise ValueError(msg)
         return self
 
 

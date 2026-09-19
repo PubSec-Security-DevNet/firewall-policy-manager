@@ -8,6 +8,8 @@ import {
 } from '../../ui';
 import { DelegatedWorkspace } from '../delegated/DelegatedWorkspace';
 import { AdministrationPanel } from '../admin/AdministrationPanel';
+import { ProviderConnectionsPanel } from '../provider-connections/ProviderConnectionsPanel';
+import { Tabs } from '../../ui/tabs';
 import { useOverview } from './useOverview';
 
 export function OverviewPage() {
@@ -36,7 +38,18 @@ export function OverviewPage() {
       <AppMetricGrid values={state.overview.counts} />
       <AppProviderGrid providers={state.overview.providers} />
       {state.session.role === 'admin' ? (
-        <AdministrationPanel />
+        <Tabs defaultValue="provider-connections">
+          <Tabs.List aria-label="Administration area">
+            <Tabs.Tab value="provider-connections">Provider connections</Tabs.Tab>
+            <Tabs.Tab value="authorization">Authorization</Tabs.Tab>
+          </Tabs.List>
+          <Tabs.Panel value="provider-connections" pt="md">
+            <ProviderConnectionsPanel />
+          </Tabs.Panel>
+          <Tabs.Panel value="authorization" pt="md">
+            <AdministrationPanel />
+          </Tabs.Panel>
+        </Tabs>
       ) : (
         <DelegatedWorkspace groups={state.session.groups} />
       )}

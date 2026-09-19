@@ -136,6 +136,81 @@ class AdministrationRepository(Protocol):
     ) -> None: ...
 
 
+class SecretStore(Protocol):
+    """Write-only-at-interface credential storage with organization-bound retrieval."""
+
+    def create(self, organization_id: UUID, purpose: str, value: dict[str, str]) -> UUID: ...
+
+    def retrieve(self, organization_id: UUID, secret_id: UUID, purpose: str) -> dict[str, str]: ...
+
+    def replace(
+        self, organization_id: UUID, secret_id: UUID, purpose: str, value: dict[str, str]
+    ) -> None: ...
+
+
+class ProviderConnectionRepository(Protocol):
+    """Organization-scoped persistence for provider connection administration."""
+
+    def list_connections(
+        self, organization_id: UUID, offset: int, limit: int
+    ) -> tuple[list[dict[str, object]], int]: ...
+
+    def connection_context(
+        self, organization_id: UUID, connection_id: UUID
+    ) -> dict[str, object] | None: ...
+
+    def create_connection(
+        self,
+        organization_id: UUID,
+        actor_user_id: UUID,
+        connection_id: UUID,
+        credential_reference: UUID,
+        values: dict[str, object],
+        capabilities: dict[str, str],
+    ) -> dict[str, object]: ...
+
+    def update_connection(
+        self,
+        organization_id: UUID,
+        actor_user_id: UUID,
+        connection_id: UUID,
+        expected_revision: int,
+        values: dict[str, object],
+    ) -> dict[str, object]: ...
+
+    def record_credential_rotation(
+        self,
+        organization_id: UUID,
+        actor_user_id: UUID,
+        connection_id: UUID,
+        expected_revision: int,
+        username: str | None,
+    ) -> dict[str, object]: ...
+
+    def record_connection_test(
+        self,
+        organization_id: UUID,
+        actor_user_id: UUID,
+        connection_id: UUID,
+        result: dict[str, object],
+        capabilities: dict[str, str],
+        scopes: list[dict[str, str]],
+    ) -> dict[str, object]: ...
+
+    def set_lifecycle(
+        self,
+        organization_id: UUID,
+        actor_user_id: UUID,
+        connection_id: UUID,
+        expected_revision: int,
+        lifecycle: str,
+    ) -> dict[str, object]: ...
+
+    def request_sync(
+        self, organization_id: UUID, actor_user_id: UUID, connection_id: UUID
+    ) -> None: ...
+
+
 class ChangeSetRepository(Protocol):
     """Durable ChangeSet, revision, transaction, and audit persistence boundary."""
 
@@ -309,6 +384,12 @@ class OverviewRepository(Protocol):
     def counts(self, organization_id: UUID) -> dict[str, int]: ...
 
 
+class DevelopmentIdentityRepository(Protocol):
+    """Read model exposed only by the conditionally mounted development-auth route."""
+
+    def development_identities(self) -> list[dict[str, object]]: ...
+
+
 class HealthProbe(Protocol):
     """Infrastructure readiness checks exposed without leaking implementation details."""
 
@@ -353,6 +434,33 @@ class FirewallProvider(ProviderReader, Protocol):
     async def zones(
         self, domain_native_id: str, page: PageRequest
     ) -> ProviderPage[DiscoveredZone]: ...
+
+
+class ConnectionTestProvider(FirewallProvider, Protocol):
+    """Read provider plus safe compatibility metadata used by connection validation."""
+
+    certificate_info: dict[str, str]
+
+    def compatibility_scopes(
+        self, domains: tuple[DiscoveredDomain, ...]
+    ) -> list[dict[str, str]]: ...
+
+
+class ProviderFactory(Protocol):
+    """Infrastructure factory injected into application connection testing."""
+
+    def __call__(
+        self,
+        context: dict[str, object],
+        credential: dict[str, str],
+        capabilities: dict[str, str],
+    ) -> ConnectionTestProvider: ...
+
+
+class ProviderSyncDispatcher(Protocol):
+    """Queue publisher injected at the delivery composition boundary."""
+
+    def __call__(self, connection_id: UUID) -> object: ...
 
 
 class SyncRepository(Protocol):

@@ -11,6 +11,7 @@ from sqlalchemy import (
     ForeignKeyConstraint,
     Index,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -82,6 +83,85 @@ class User(TimestampMixin, Base):
     revision: Mapped[int] = mapped_column(Integer, default=1)
 
 
+class SecretRecord(TimestampMixin, Base):
+    """Authenticated ciphertext; the root key is deliberately external to PostgreSQL."""
+
+    __tablename__ = "secret_records"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "id"),
+        CheckConstraint("key_version >= 1", name="ck_secret_records_key_version"),
+        Index("ix_secret_records_org_purpose", "organization_id", "purpose"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(ForeignKey("organizations.id"), index=True)
+    purpose: Mapped[str] = mapped_column(String(100))
+    ciphertext: Mapped[bytes] = mapped_column(LargeBinary)
+    nonce: Mapped[bytes] = mapped_column(LargeBinary)
+    key_version: Mapped[int] = mapped_column(Integer)
+    rotated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class ProviderConnection(TimestampMixin, Base):
+    """Administrative connection and health state; never contains plaintext credentials."""
+
+    __tablename__ = "provider_connections"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "display_name"),
+        UniqueConstraint("organization_id", "id"),
+        CheckConstraint("provider_type IN ('fmc','scc')", name="ck_provider_connections_type"),
+        CheckConstraint(
+            "lifecycle IN ('ACTIVE','DISABLED','RETIRED')",
+            name="ck_provider_connections_lifecycle",
+        ),
+        CheckConstraint("evidence_profile = 'real'", name="ck_provider_connections_real_evidence"),
+        CheckConstraint(
+            "tls_mode IN ('SYSTEM','CUSTOM_CA')", name="ck_provider_connections_tls_mode"
+        ),
+        CheckConstraint("revision >= 1", name="ck_provider_connections_revision"),
+        CheckConstraint(
+            "sync_interval_minutes >= 5 AND sync_interval_minutes <= 10080",
+            name="ck_provider_connections_sync_interval",
+        ),
+        Index("ix_provider_connections_org_lifecycle", "organization_id", "lifecycle"),
+        Index("ix_provider_connections_sync_due", "lifecycle", "next_sync_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(ForeignKey("organizations.id"), index=True)
+    provider_type: Mapped[str] = mapped_column(String(20))
+    display_name: Mapped[str] = mapped_column(String(200))
+    lifecycle: Mapped[str] = mapped_column(String(20), default="DISABLED")
+    connection_mode: Mapped[str] = mapped_column(String(30))
+    evidence_profile: Mapped[str] = mapped_column(String(20), default="real")
+    base_endpoint: Mapped[str | None] = mapped_column(String(500))
+    region: Mapped[str | None] = mapped_column(String(30))
+    tls_mode: Mapped[str] = mapped_column(String(20), default="SYSTEM")
+    credential_reference: Mapped[UUID] = mapped_column(
+        ForeignKey("secret_records.id", ondelete="RESTRICT"), unique=True, index=True
+    )
+    credential_type: Mapped[str] = mapped_column(String(30))
+    credential_username: Mapped[str | None] = mapped_column(String(320))
+    credential_updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    provider_version: Mapped[str | None] = mapped_column(String(100))
+    connection_status: Mapped[str] = mapped_column(String(50), default="NEVER_TESTED")
+    sync_status: Mapped[str | None] = mapped_column(String(30))
+    last_connection_test: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_successful_connection: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_sync: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_successful_sync: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error_code: Mapped[str | None] = mapped_column(String(100))
+    last_error_message: Mapped[str | None] = mapped_column(String(500))
+    last_error_correlation_id: Mapped[str | None] = mapped_column(String(100))
+    certificate_info: Mapped[dict[str, str]] = mapped_column(JSONB, default=dict)
+    sync_interval_minutes: Mapped[int] = mapped_column(Integer, default=60)
+    next_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+
+
 class GroupMembership(TimestampMixin, Base):
     __tablename__ = "group_memberships"
     __table_args__ = (
@@ -115,6 +195,9 @@ class FirewallManager(TimestampMixin, Base):
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     organization_id: Mapped[UUID] = mapped_column(ForeignKey("organizations.id"), index=True)
+    provider_connection_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("provider_connections.id", ondelete="RESTRICT"), unique=True, index=True
+    )
     provider: Mapped[str] = mapped_column(String(20))
     native_id: Mapped[str] = mapped_column(String(200))
     display_name: Mapped[str] = mapped_column(String(200))
@@ -127,6 +210,57 @@ class FirewallManager(TimestampMixin, Base):
     capabilities: Mapped[dict[str, str]] = mapped_column(JSONB, default=dict)
     native_metadata: Mapped[dict[str, str]] = mapped_column(JSONB, default=dict)
     revision: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class ProviderConnectionScope(TimestampMixin, Base):
+    """Domain, tenant, or organization discovered through one configured credential."""
+
+    __tablename__ = "provider_connection_scopes"
+    __table_args__ = (
+        UniqueConstraint("connection_id", "native_id"),
+        Index("ix_provider_connection_scopes_org_connection", "organization_id", "connection_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(ForeignKey("organizations.id"), index=True)
+    connection_id: Mapped[UUID] = mapped_column(
+        ForeignKey("provider_connections.id", ondelete="RESTRICT"), index=True
+    )
+    native_id: Mapped[str] = mapped_column(String(200))
+    name: Mapped[str] = mapped_column(String(200))
+    scope_type: Mapped[str] = mapped_column(String(30))
+    native_metadata: Mapped[dict[str, str]] = mapped_column(JSONB, default=dict)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class ProviderCapabilityEvidence(TimestampMixin, Base):
+    """Version-specific compatibility evidence isolated to one real connection."""
+
+    __tablename__ = "provider_capability_evidence"
+    __table_args__ = (
+        UniqueConstraint("connection_id", "provider_version", "capability"),
+        CheckConstraint(
+            "evidence_level IN ('TESTED','EXPECTED_COMPATIBLE','NOT_STARTED')",
+            name="ck_provider_capability_evidence_level",
+        ),
+        Index(
+            "ix_provider_capability_evidence_connection_version",
+            "connection_id",
+            "provider_version",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(ForeignKey("organizations.id"), index=True)
+    connection_id: Mapped[UUID] = mapped_column(
+        ForeignKey("provider_connections.id", ondelete="RESTRICT"), index=True
+    )
+    provider_version: Mapped[str] = mapped_column(String(100))
+    capability: Mapped[str] = mapped_column(String(100))
+    status: Mapped[str] = mapped_column(String(30))
+    evidence_level: Mapped[str] = mapped_column(String(30), default="NOT_STARTED")
+    evidence_summary: Mapped[str] = mapped_column(String(500), default="")
+    tested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class SyncRun(Base):

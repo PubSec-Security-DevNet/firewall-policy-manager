@@ -133,6 +133,49 @@ class Action(StrEnum):
     DEPLOY = "deploy"
     RECONCILE = "reconcile"
     MANAGE_GRANTS = "manage_grants"
+    MANAGE_PROVIDERS = "manage_providers"
+
+
+class ProviderConnectionLifecycle(StrEnum):
+    """Administrative lifecycle independent of transient provider health."""
+
+    ACTIVE = "ACTIVE"
+    DISABLED = "DISABLED"
+    RETIRED = "RETIRED"
+
+
+class ProviderConnectionStatus(StrEnum):
+    """Safe stable outcomes for connection tests and health reporting."""
+
+    NEVER_TESTED = "NEVER_TESTED"
+    CONNECTED = "CONNECTED"
+    AUTHENTICATION_FAILED = "AUTHENTICATION_FAILED"
+    TLS_VALIDATION_FAILED = "TLS_VALIDATION_FAILED"
+    INSUFFICIENT_PRIVILEGES = "INSUFFICIENT_PRIVILEGES"
+    UNSUPPORTED_VERSION = "UNSUPPORTED_VERSION"
+    PROVIDER_UNAVAILABLE = "PROVIDER_UNAVAILABLE"
+    RATE_LIMITED = "RATE_LIMITED"
+    CONFIGURATION_INVALID = "CONFIGURATION_INVALID"
+
+
+class TlsTrustMode(StrEnum):
+    """Permitted verified TLS trust sources for direct FMC connections."""
+
+    SYSTEM = "SYSTEM"
+    CUSTOM_CA = "CUSTOM_CA"
+
+
+class SccRegion(StrEnum):
+    """Cisco-documented SCC production regions."""
+
+    US = "us"
+    EU = "eu"
+    APJ = "apj"
+    AU = "au"
+    IN = "in"
+    UAE = "uae"
+    FEDRAMP = "fedramp"
+    IL5 = "il5"
 
 
 class PolicyCapability(StrEnum):
@@ -177,6 +220,7 @@ class AuthorizationResourceType(StrEnum):
     """Resources understood by the interface-independent authorization engine."""
 
     ADMINISTRATION = "administration"
+    PROVIDER_CONNECTION = "provider_connection"
     POLICY = "policy"
     RULE = "rule"
     OBJECT = "object"

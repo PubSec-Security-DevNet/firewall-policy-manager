@@ -1,0 +1,402 @@
+"""Provider-connection authorization, isolation, lifecycle, and persistence regressions."""
+
+import base64
+import json
+import os
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any, cast
+from uuid import UUID, uuid4
+
+import pytest
+from sqlalchemy import Table, create_engine, select
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.ext.compiler import compiles
+from sqlalchemy.orm import Session
+
+from firewall_manager.application.errors import (
+    InvalidChangeSetStateError,
+    ResourceOutOfScopeError,
+    StaleWriteError,
+)
+from firewall_manager.application.provider_connections import ProviderConnectionService
+from firewall_manager.domain.models import Principal
+from firewall_manager.persistence.models import (
+    AuditEvent,
+    Base,
+    FirewallManager,
+    Organization,
+    ProviderCapabilityEvidence,
+    ProviderConnection,
+    ProviderConnectionScope,
+    ProviderDomain,
+    SecretRecord,
+    User,
+)
+from firewall_manager.persistence.provider_connections import SqlProviderConnectionRepository
+from firewall_manager.persistence.repositories import SqlAuthorizationRepository
+from firewall_manager.persistence.secrets import EncryptedDatabaseSecretStore
+
+
+@compiles(JSONB, "sqlite")
+def _compile_jsonb_for_sqlite(_element: JSONB, _compiler: Any, **_kwargs: object) -> str:
+    return "JSON"
+
+
+ORG = UUID("10000000-0000-0000-0000-000000000001")
+OTHER_ORG = UUID("10000000-0000-0000-0000-000000000002")
+ADMIN = UUID("30000000-0000-0000-0000-000000000001")
+OTHER_ADMIN = UUID("30000000-0000-0000-0000-000000000002")
+NORMAL_USER = UUID("30000000-0000-0000-0000-000000000003")
+GROUP_ADMIN = UUID("30000000-0000-0000-0000-000000000004")
+
+
+def _principal(user_id: UUID, organization_id: UUID, role: str) -> Principal:
+    return Principal(user_id, organization_id, f"{user_id}@example.test", role)
+
+
+def _session(path: Path) -> Session:
+    engine = create_engine(f"sqlite+pysqlite:///{path}")
+    tables = [
+        Organization.__table__,
+        User.__table__,
+        SecretRecord.__table__,
+        ProviderConnection.__table__,
+        FirewallManager.__table__,
+        ProviderConnectionScope.__table__,
+        ProviderCapabilityEvidence.__table__,
+        ProviderDomain.__table__,
+        AuditEvent.__table__,
+    ]
+    Base.metadata.create_all(engine, tables=[cast(Table, table) for table in tables])
+    session = Session(engine)
+    session.add_all(
+        [
+            Organization(id=ORG, name="Primary"),
+            Organization(id=OTHER_ORG, name="Other"),
+            User(
+                id=ADMIN,
+                organization_id=ORG,
+                identity_issuer="test",
+                identity_subject="admin",
+                email="admin@example.test",
+                display_name="Admin",
+                role="admin",
+            ),
+            User(
+                id=OTHER_ADMIN,
+                organization_id=OTHER_ORG,
+                identity_issuer="test",
+                identity_subject="other-admin",
+                email="other-admin@example.test",
+                display_name="Other Admin",
+                role="admin",
+            ),
+            User(
+                id=NORMAL_USER,
+                organization_id=ORG,
+                identity_issuer="test",
+                identity_subject="normal",
+                email="normal@example.test",
+                display_name="Normal User",
+                role="viewer",
+            ),
+            User(
+                id=GROUP_ADMIN,
+                organization_id=ORG,
+                identity_issuer="test",
+                identity_subject="group-admin",
+                email="group-admin@example.test",
+                display_name="Group Admin",
+                role="group_admin",
+            ),
+        ]
+    )
+    session.commit()
+    return session
+
+
+def _service(session: Session) -> ProviderConnectionService:
+    key = base64.b64encode(os.urandom(32)).decode()
+    return ProviderConnectionService(
+        SqlAuthorizationRepository(session),
+        SqlProviderConnectionRepository(session),
+        EncryptedDatabaseSecretStore(session, key, 1),
+    )
+
+
+def _connections(
+    service: ProviderConnectionService, principal: Principal, session: Session
+) -> list[dict[str, object]]:
+    values: list[dict[str, object]] = [
+        {
+            "provider_type": "fmc",
+            "display_name": "FMC A",
+            "base_endpoint": "https://fmc-a.example.test",
+            "username": "api-a",
+            "password": "password-a",
+        },
+        {
+            "provider_type": "fmc",
+            "display_name": "FMC B",
+            "base_endpoint": "https://fmc-b.example.test",
+            "username": "api-b",
+            "password": "password-b",
+        },
+        {
+            "provider_type": "scc",
+            "display_name": "SCC A",
+            "region": "us",
+            "token": "token-a",
+        },
+        {
+            "provider_type": "scc",
+            "display_name": "SCC B",
+            "region": "eu",
+            "token": "token-b",
+        },
+    ]
+    created: list[dict[str, object]] = []
+    for value in values:
+        created.append(service.create(principal, value))
+        # Each creation represents its own request transaction in production.
+        session.commit()
+    return created
+
+
+def test_two_fmc_and_two_scc_connections_are_fully_isolated(tmp_path: Path) -> None:
+    session = _session(tmp_path / "connections.sqlite")
+    service = _service(session)
+    admin = _principal(ADMIN, ORG, "admin")
+    connections = _connections(service, admin, session)
+
+    assert len(connections) == 4
+    assert {item["display_name"] for item in connections} == {"FMC A", "FMC B", "SCC A", "SCC B"}
+    assert all("credential_reference" not in item for item in connections)
+    public_json = json.dumps(connections, default=str)
+    for secret in ("password-a", "password-b", "token-a", "token-b"):
+        assert secret not in public_json
+
+    stored_connections = list(session.scalars(select(ProviderConnection)))
+    assert len({row.credential_reference for row in stored_connections}) == 4
+    ciphertext = b"".join(session.scalars(select(SecretRecord.ciphertext)))
+    assert all(
+        secret.encode() not in ciphertext
+        for secret in ("password-a", "password-b", "token-a", "token-b")
+    )
+
+    managers = list(session.scalars(select(FirewallManager).order_by(FirewallManager.display_name)))
+    assert len({manager.id for manager in managers}) == 4
+    assert len({manager.native_id for manager in managers}) == 4
+    session.add_all(
+        ProviderDomain(
+            organization_id=ORG,
+            manager_id=manager.id,
+            native_id="same-provider-native-domain-id",
+            name=f"Domain for {manager.display_name}",
+            provider_fingerprint=f"fingerprint-{manager.id}",
+        )
+        for manager in managers
+    )
+    session.commit()
+    assert session.scalar(select(ProviderDomain).where(ProviderDomain.manager_id == managers[0].id))
+    assert session.scalar(select(ProviderDomain).where(ProviderDomain.manager_id == managers[1].id))
+
+    repository = SqlProviderConnectionRepository(session)
+    for index, connection in enumerate(connections):
+        connection_id = UUID(str(connection["id"]))
+        repository.record_connection_test(
+            ORG,
+            ADMIN,
+            connection_id,
+            {"status": "CONNECTED", "provider_version": f"version-{index}"},
+            {"authentication_session": "READ_ONLY", "access_rule_create": "NOT_STARTED"},
+            [{"native_id": "same-scope", "name": f"Scope {index}", "scope_type": "DOMAIN"}],
+        )
+    session.commit()
+    evidence = list(session.scalars(select(ProviderCapabilityEvidence)))
+    assert {(item.connection_id, item.provider_version) for item in evidence} == {
+        (UUID(str(connection["id"])), f"version-{index}")
+        for index, connection in enumerate(connections)
+    }
+    assert all(item.status != "SUPPORTED" for item in evidence)
+
+    first_id = UUID(str(connections[0]["id"]))
+    second_id = UUID(str(connections[1]["id"]))
+    repository.record_connection_test(
+        ORG,
+        ADMIN,
+        first_id,
+        {
+            "status": "AUTHENTICATION_FAILED",
+            "error_code": "AUTHENTICATION_FAILED",
+            "safe_message": "The provider rejected the configured credential.",
+        },
+        {},
+        [],
+    )
+    session.commit()
+    assert service.get(admin, first_id)["connection_status"] == "AUTHENTICATION_FAILED"
+    assert service.get(admin, second_id)["connection_status"] == "CONNECTED"
+    first_manager = session.scalar(
+        select(FirewallManager).where(FirewallManager.provider_connection_id == first_id)
+    )
+    second_manager = session.scalar(
+        select(FirewallManager).where(FirewallManager.provider_connection_id == second_id)
+    )
+    assert first_manager is not None
+    assert second_manager is not None
+    assert first_manager.provider_version is None
+    assert set(first_manager.capabilities.values()) == {"NOT_STARTED"}
+    assert second_manager.provider_version == "version-1"
+    assert second_manager.capabilities["authentication_session"] == "READ_ONLY"
+
+
+@pytest.mark.asyncio
+async def test_provider_admin_boundary_bola_rotation_and_stale_updates(tmp_path: Path) -> None:
+    session = _session(tmp_path / "authorization.sqlite")
+    service = _service(session)
+    admin = _principal(ADMIN, ORG, "admin")
+    connection = _connections(service, admin, session)[0]
+    connection_id = UUID(str(connection["id"]))
+
+    normal = _principal(NORMAL_USER, ORG, "viewer")
+    group_admin = _principal(GROUP_ADMIN, ORG, "group_admin")
+    for denied in (normal, group_admin):
+        with pytest.raises(ResourceOutOfScopeError):
+            service.list(denied)
+        with pytest.raises(ResourceOutOfScopeError):
+            service.create(
+                denied,
+                {
+                    "provider_type": "scc",
+                    "display_name": "Denied",
+                    "region": "us",
+                    "token": "must-not-store",
+                },
+            )
+        with pytest.raises(ResourceOutOfScopeError):
+            await service.test(denied, connection_id, "denied-test")
+        with pytest.raises(ResourceOutOfScopeError):
+            service.rotate_credentials(
+                denied, connection_id, int(str(connection["revision"])), {"password": "denied"}
+            )
+
+    other_admin = _principal(OTHER_ADMIN, OTHER_ORG, "admin")
+    with pytest.raises(ResourceOutOfScopeError):
+        service.get(other_admin, connection_id)
+    with pytest.raises(ResourceOutOfScopeError):
+        service.get(admin, uuid4())
+    with pytest.raises(ResourceOutOfScopeError):
+        service.rotate_credentials(other_admin, connection_id, 1, {"password": "denied"})
+    with pytest.raises(StaleWriteError):
+        service.update(admin, connection_id, 999, {"display_name": "Stale"})
+
+
+def test_lifecycle_queue_and_credential_rotation_are_connection_scoped(  # noqa: PLR0915
+    tmp_path: Path,
+) -> None:
+    session = _session(tmp_path / "lifecycle.sqlite")
+    key = base64.b64encode(os.urandom(32)).decode()
+    repository = SqlProviderConnectionRepository(session)
+    store = EncryptedDatabaseSecretStore(session, key, 1)
+    service = ProviderConnectionService(SqlAuthorizationRepository(session), repository, store)
+    admin = _principal(ADMIN, ORG, "admin")
+    first, second, *_ = _connections(service, admin, session)
+    first_id = UUID(str(first["id"]))
+    second_id = UUID(str(second["id"]))
+
+    first_context = repository.connection_context(ORG, first_id)
+    second_context = repository.connection_context(ORG, second_id)
+    assert first_context is not None
+    assert second_context is not None
+    with pytest.raises(ResourceOutOfScopeError):
+        store.retrieve(
+            ORG,
+            UUID(str(second_context["credential_reference"])),
+            f"provider-connection:{first_id}",
+        )
+    second_before = store.retrieve(
+        ORG,
+        UUID(str(second_context["credential_reference"])),
+        f"provider-connection:{second_id}",
+    )
+    rotated = service.rotate_credentials(
+        admin,
+        first_id,
+        int(str(first["revision"])),
+        {"username": "api-a", "password": "replacement-a"},
+    )
+    session.commit()
+    rotated_manager = session.scalar(
+        select(FirewallManager).where(FirewallManager.provider_connection_id == first_id)
+    )
+    assert rotated_manager is not None
+    assert rotated_manager.provider_version is None
+    assert set(rotated_manager.capabilities.values()) == {"NOT_STARTED"}
+    assert (
+        store.retrieve(
+            ORG,
+            UUID(str(second_context["credential_reference"])),
+            f"provider-connection:{second_id}",
+        )
+        == second_before
+    )
+
+    with pytest.raises(InvalidChangeSetStateError):
+        service.request_sync(admin, first_id, lambda _value: None)
+    tested = repository.record_connection_test(
+        ORG,
+        ADMIN,
+        first_id,
+        {"status": "CONNECTED", "provider_version": "7.7.0"},
+        {"authentication_session": "READ_ONLY", "access_rule_create": "NOT_STARTED"},
+        [],
+    )
+    session.commit()
+    service.set_lifecycle(admin, first_id, int(str(tested["revision"])), "ACTIVE")
+    session.commit()
+    due = repository.due_connection_ids(datetime.now(UTC))
+    assert first_id in due
+    assert second_id not in due
+    dispatched: list[UUID] = []
+    service.request_sync(admin, first_id, dispatched.append)
+    assert dispatched == [first_id]
+    queued = service.get(admin, first_id)
+    assert queued["sync_status"] == "QUEUED"
+    disabled = service.set_lifecycle(admin, first_id, int(str(queued["revision"])), "DISABLED")
+    session.commit()
+    with pytest.raises(InvalidChangeSetStateError):
+        service.request_sync(admin, first_id, dispatched.append)
+    assert disabled["lifecycle"] == "DISABLED"
+
+    retired = service.set_lifecycle(admin, first_id, int(str(disabled["revision"])), "RETIRED")
+    session.commit()
+    with pytest.raises(InvalidChangeSetStateError):
+        service.rotate_credentials(
+            admin,
+            first_id,
+            int(str(retired["revision"])),
+            {"username": "api-a", "password": "cannot-unretire"},
+        )
+    with pytest.raises(InvalidChangeSetStateError):
+        service.update(
+            admin, first_id, int(str(retired["revision"])), {"display_name": "Cannot unretire"}
+        )
+    with pytest.raises(InvalidChangeSetStateError):
+        repository.record_connection_test(
+            ORG,
+            ADMIN,
+            first_id,
+            {"status": "AUTHENTICATION_FAILED"},
+            {},
+            [],
+        )
+
+    audit_payload = json.dumps(
+        [event.details for event in session.scalars(select(AuditEvent))], default=str
+    )
+    assert "replacement-a" not in audit_payload
+    assert "password-a" not in audit_payload
+    assert '"provider": "fmc"' in audit_payload
+    assert rotated["connection_status"] == "NEVER_TESTED"

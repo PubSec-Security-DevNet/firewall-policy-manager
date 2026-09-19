@@ -10,6 +10,8 @@ x-backend-environment: &backend-environment
   CORS_ORIGINS: ${CORS_ORIGINS:-["http://localhost:5173"]}
   DEV_AUTH_ENABLED: ${DEV_AUTH_ENABLED:-true}
   DEV_AUTH_DEFAULT_USER: ${DEV_AUTH_DEFAULT_USER:-viewer@example.test}
+  APP_SECRET_KEY: ${APP_SECRET_KEY:-}
+  SECRET_STORE_KEY_VERSION: ${SECRET_STORE_KEY_VERSION:-1}
   SCHEDULER_INTERVAL_SECONDS: ${SCHEDULER_INTERVAL_SECONDS:-15}
 
 x-backend-service: &backend-service

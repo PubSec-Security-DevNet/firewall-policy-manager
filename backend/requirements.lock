@@ -18,8 +18,12 @@ certifi==2026.7.22
     # via
     #   httpcore
     #   httpx
+cffi==2.1.1
+    # via cryptography
 click==8.5.0
     # via uvicorn
+cryptography==50.0.1
+    # via firewall-manager (pyproject.toml)
 dramatiq==2.2.1
     # via firewall-manager (pyproject.toml)
 fastapi==0.141.1
@@ -44,6 +48,8 @@ markupsafe==3.0.3
     # via mako
 psycopg==3.3.6
     # via firewall-manager (pyproject.toml)
+pycparser==3.0
+    # via cffi
 pydantic==2.13.5
     # via
     #   fastapi

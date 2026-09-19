@@ -38,6 +38,143 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/provider-connections": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Provider Connections */
+        get: operations["list_provider_connections_api_v1_admin_provider_connections_get"];
+        put?: never;
+        /** Create Provider Connection */
+        post: operations["create_provider_connection_api_v1_admin_provider_connections_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/provider-connections/guidance/{provider_type}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Provider Connection Guidance */
+        get: operations["provider_connection_guidance_api_v1_admin_provider_connections_guidance__provider_type__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/provider-connections/{connection_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Provider Connection */
+        get: operations["get_provider_connection_api_v1_admin_provider_connections__connection_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/provider-connections/{connection_id}/configuration": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Update Provider Connection */
+        patch: operations["update_provider_connection_api_v1_admin_provider_connections__connection_id__configuration_patch"];
+        trace?: never;
+    };
+    "/api/v1/admin/provider-connections/{connection_id}/credentials": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Rotate Provider Credentials */
+        put: operations["rotate_provider_credentials_api_v1_admin_provider_connections__connection_id__credentials_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/provider-connections/{connection_id}/lifecycle": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Set Provider Connection Lifecycle */
+        put: operations["set_provider_connection_lifecycle_api_v1_admin_provider_connections__connection_id__lifecycle_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/provider-connections/{connection_id}/sync": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Request Provider Connection Sync */
+        post: operations["request_provider_connection_sync_api_v1_admin_provider_connections__connection_id__sync_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/provider-connections/{connection_id}/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Test Provider Connection */
+        post: operations["test_provider_connection_api_v1_admin_provider_connections__connection_id__test_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/users": {
         parameters: {
             query?: never;
@@ -307,6 +444,26 @@ export interface paths {
         };
         /** Delegated Policies */
         get: operations["delegated_policies_api_v1_delegated_policies_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/dev/users": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Development Users
+         * @description Return deterministic identities; this router is never mounted in production.
+         */
+        get: operations["development_users_api_v1_dev_users_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -875,6 +1032,17 @@ export interface components {
             /** Name */
             name: string;
         };
+        /** DevelopmentIdentityResponse */
+        DevelopmentIdentityResponse: {
+            /** Display Name */
+            display_name: string;
+            /** Email */
+            email: string;
+            /** Enabled */
+            enabled: boolean;
+            /** Role */
+            role: string;
+        };
         /** DraftCategoryOperationRequest */
         DraftCategoryOperationRequest: {
             /**
@@ -1157,6 +1325,237 @@ export interface components {
             provider_version: string | null;
             /** Revision */
             revision: number;
+        };
+        /** ProviderCapabilityEvidenceResponse */
+        ProviderCapabilityEvidenceResponse: {
+            /** Capability */
+            capability: string;
+            /** Evidence Level */
+            evidence_level: string;
+            /** Provider Version */
+            provider_version: string;
+            /** Status */
+            status: string;
+            /** Tested At */
+            tested_at: string | null;
+        };
+        /** ProviderConnectionCreateRequest */
+        ProviderConnectionCreateRequest: {
+            /** Base Endpoint */
+            base_endpoint?: string | null;
+            /** Ca Certificate */
+            ca_certificate?: string | null;
+            /** Display Name */
+            display_name: string;
+            /** Password */
+            password?: string | null;
+            /**
+             * Provider Type
+             * @enum {string}
+             */
+            provider_type: "fmc" | "scc";
+            /** Region */
+            region?: ("us" | "eu" | "apj" | "au" | "in" | "uae" | "fedramp" | "il5") | null;
+            /**
+             * Sync Interval Minutes
+             * @default 60
+             */
+            sync_interval_minutes: number;
+            /**
+             * Tls Mode
+             * @default SYSTEM
+             * @enum {string}
+             */
+            tls_mode: "SYSTEM" | "CUSTOM_CA";
+            /** Token */
+            token?: string | null;
+            /** Username */
+            username?: string | null;
+        };
+        /** ProviderConnectionPageResponse */
+        ProviderConnectionPageResponse: {
+            /** Items */
+            items: components["schemas"]["ProviderConnectionResponse"][];
+            /** Total */
+            total: number;
+        };
+        /** ProviderConnectionResponse */
+        ProviderConnectionResponse: {
+            /** Base Endpoint */
+            base_endpoint: string | null;
+            /** Capability Evidence */
+            capability_evidence: components["schemas"]["ProviderCapabilityEvidenceResponse"][];
+            /** Certificate Info */
+            certificate_info: {
+                [key: string]: string;
+            };
+            /** Connection Mode */
+            connection_mode: string;
+            /** Connection Status */
+            connection_status: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Credential Present */
+            credential_present: boolean;
+            /** Credential Type */
+            credential_type: string;
+            /**
+             * Credential Updated At
+             * Format: date-time
+             */
+            credential_updated_at: string;
+            /** Credential Username */
+            credential_username: string | null;
+            /** Display Name */
+            display_name: string;
+            /** Enabled */
+            enabled: boolean;
+            /**
+             * Evidence Profile
+             * @constant
+             */
+            evidence_profile: "real";
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Last Connection Test */
+            last_connection_test: string | null;
+            /** Last Error Code */
+            last_error_code: string | null;
+            /** Last Error Correlation Id */
+            last_error_correlation_id: string | null;
+            /** Last Error Message */
+            last_error_message: string | null;
+            /** Last Successful Connection */
+            last_successful_connection: string | null;
+            /** Last Successful Sync */
+            last_successful_sync: string | null;
+            /** Last Sync */
+            last_sync: string | null;
+            /**
+             * Lifecycle
+             * @enum {string}
+             */
+            lifecycle: "ACTIVE" | "DISABLED" | "RETIRED";
+            /**
+             * Provider Type
+             * @enum {string}
+             */
+            provider_type: "fmc" | "scc";
+            /** Provider Version */
+            provider_version: string | null;
+            /** Region */
+            region: string | null;
+            /** Revision */
+            revision: number;
+            /** Scopes */
+            scopes: components["schemas"]["ProviderConnectionScopeResponse"][];
+            /** Sync Interval Minutes */
+            sync_interval_minutes: number;
+            /** Sync Status */
+            sync_status: string | null;
+            /**
+             * Tls Mode
+             * @enum {string}
+             */
+            tls_mode: "SYSTEM" | "CUSTOM_CA";
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
+        /** ProviderConnectionScopeResponse */
+        ProviderConnectionScopeResponse: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /**
+             * Last Seen At
+             * Format: date-time
+             */
+            last_seen_at: string;
+            /** Name */
+            name: string;
+            /** Native Id */
+            native_id: string;
+            /** Scope Type */
+            scope_type: string;
+        };
+        /** ProviderConnectionTestResponse */
+        ProviderConnectionTestResponse: {
+            /** Certificate Info */
+            certificate_info?: {
+                [key: string]: string;
+            };
+            connection: components["schemas"]["ProviderConnectionResponse"];
+            /** Correlation Id */
+            correlation_id?: string | null;
+            /** Error Code */
+            error_code?: string | null;
+            /** Missing Capability */
+            missing_capability?: string | null;
+            /** Provider Version */
+            provider_version?: string | null;
+            /** Safe Message */
+            safe_message?: string | null;
+            /** Status */
+            status: string;
+            /** Tested Capabilities */
+            tested_capabilities?: string[];
+            /** Unverified Capabilities */
+            unverified_capabilities?: string[];
+        };
+        /** ProviderConnectionUpdateRequest */
+        ProviderConnectionUpdateRequest: {
+            /** Base Endpoint */
+            base_endpoint?: string | null;
+            /** Display Name */
+            display_name?: string | null;
+            /** Expected Revision */
+            expected_revision: number;
+            /** Region */
+            region?: ("us" | "eu" | "apj" | "au" | "in" | "uae" | "fedramp" | "il5") | null;
+            /** Sync Interval Minutes */
+            sync_interval_minutes?: number | null;
+            /** Tls Mode */
+            tls_mode?: ("SYSTEM" | "CUSTOM_CA") | null;
+        };
+        /** ProviderCredentialUpdateRequest */
+        ProviderCredentialUpdateRequest: {
+            /** Ca Certificate */
+            ca_certificate?: string | null;
+            /** Expected Revision */
+            expected_revision: number;
+            /** Password */
+            password?: string | null;
+            /** Token */
+            token?: string | null;
+            /** Username */
+            username?: string | null;
+        };
+        /**
+         * ProviderKind
+         * @description Supported provider families.
+         * @enum {string}
+         */
+        ProviderKind: "fmc" | "scc";
+        /** ProviderLifecycleRequest */
+        ProviderLifecycleRequest: {
+            /** Expected Revision */
+            expected_revision: number;
+            /**
+             * Lifecycle
+             * @enum {string}
+             */
+            lifecycle: "ACTIVE" | "DISABLED" | "RETIRED";
         };
         /** ProviderStatusResponse */
         ProviderStatusResponse: {
@@ -1447,6 +1846,889 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+            /** @description Safe application error envelope */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    list_provider_connections_api_v1_admin_provider_connections_get: {
+        parameters: {
+            query?: {
+                offset?: number;
+                limit?: number;
+            };
+            header?: {
+                "X-Dev-User"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProviderConnectionPageResponse"];
+                };
+            };
+            /** @description Safe application error envelope */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    create_provider_connection_api_v1_admin_provider_connections_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Dev-User"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProviderConnectionCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProviderConnectionResponse"];
+                };
+            };
+            /** @description Safe application error envelope */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    provider_connection_guidance_api_v1_admin_provider_connections_guidance__provider_type__get: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Dev-User"?: string | null;
+            };
+            path: {
+                provider_type: components["schemas"]["ProviderKind"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Safe application error envelope */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get_provider_connection_api_v1_admin_provider_connections__connection_id__get: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Dev-User"?: string | null;
+            };
+            path: {
+                connection_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProviderConnectionResponse"];
+                };
+            };
+            /** @description Safe application error envelope */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    update_provider_connection_api_v1_admin_provider_connections__connection_id__configuration_patch: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Dev-User"?: string | null;
+            };
+            path: {
+                connection_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProviderConnectionUpdateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProviderConnectionResponse"];
+                };
+            };
+            /** @description Safe application error envelope */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    rotate_provider_credentials_api_v1_admin_provider_connections__connection_id__credentials_put: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Dev-User"?: string | null;
+            };
+            path: {
+                connection_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProviderCredentialUpdateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProviderConnectionResponse"];
+                };
+            };
+            /** @description Safe application error envelope */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    set_provider_connection_lifecycle_api_v1_admin_provider_connections__connection_id__lifecycle_put: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Dev-User"?: string | null;
+            };
+            path: {
+                connection_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProviderLifecycleRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProviderConnectionResponse"];
+                };
+            };
+            /** @description Safe application error envelope */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    request_provider_connection_sync_api_v1_admin_provider_connections__connection_id__sync_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Dev-User"?: string | null;
+            };
+            path: {
+                connection_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: string;
+                    };
+                };
+            };
+            /** @description Safe application error envelope */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    test_provider_connection_api_v1_admin_provider_connections__connection_id__test_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Dev-User"?: string | null;
+            };
+            path: {
+                connection_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProviderConnectionTestResponse"];
                 };
             };
             /** @description Safe application error envelope */
@@ -3530,6 +4812,98 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DelegatedPolicySummary"][];
+                };
+            };
+            /** @description Safe application error envelope */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    development_users_api_v1_dev_users_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DevelopmentIdentityResponse"][];
                 };
             };
             /** @description Safe application error envelope */

@@ -48,6 +48,14 @@ engineering_context="$(curl --fail --silent -H 'X-Dev-User: viewer@example.test'
 delegated_denial_status="$(curl --silent --output /dev/null --write-out '%{http_code}' -H 'X-Dev-User: viewer@example.test' "${base_url}/api/v1/delegated/context?active_group_id=20000000-0000-0000-0000-000000000004&policy_id=${delegated_policy_id}")"
 admin_denial_status="$(curl --silent --output /dev/null --write-out '%{http_code}' -H 'X-Dev-User: viewer@example.test' "${base_url}/api/v1/admin/authorization")"
 admin_allow_status="$(curl --silent --output /dev/null --write-out '%{http_code}' -H 'X-Dev-User: admin@example.test' "${base_url}/api/v1/admin/authorization")"
+development_users="$(curl --fail --silent "${base_url}/api/v1/dev/users")"
+alice_session="$(curl --fail --silent -H 'X-Dev-User: viewer@example.test' "${base_url}/api/v1/session")"
+bob_session="$(curl --fail --silent -H 'X-Dev-User: editor@example.test' "${base_url}/api/v1/session")"
+viewer_session="$(curl --fail --silent -H 'X-Dev-User: read-only@example.test' "${base_url}/api/v1/session")"
+admin_session="$(curl --fail --silent -H 'X-Dev-User: admin@example.test' "${base_url}/api/v1/session")"
+provider_admin_connections="$(curl --fail --silent -H 'X-Dev-User: admin@example.test' "${base_url}/api/v1/admin/provider-connections")"
+provider_viewer_denial="$(curl --silent --output /dev/null --write-out '%{http_code}' -H 'X-Dev-User: viewer@example.test' "${base_url}/api/v1/admin/provider-connections")"
+provider_group_admin_denial="$(curl --silent --output /dev/null --write-out '%{http_code}' -H 'X-Dev-User: group-admin@example.test' "${base_url}/api/v1/admin/provider-connections")"
 
 printf '%s' "$overview" | grep -q 'Example Organization'
 printf '%s' "$overview" | grep -q 'Local FMC Mock'
@@ -93,6 +101,24 @@ fi
 test "$delegated_denial_status" = "403"
 test "$admin_denial_status" = "403"
 test "$admin_allow_status" = "200"
+printf '%s' "$development_users" | grep -q 'Platform Admin'
+printf '%s' "$development_users" | grep -q 'Alice — Finance + Engineering'
+printf '%s' "$development_users" | grep -q 'Bob — Finance only'
+printf '%s' "$development_users" | grep -q 'Disabled User'
+printf '%s' "$alice_session" | grep -q 'viewer@example.test'
+printf '%s' "$alice_session" | grep -q 'Finance'
+printf '%s' "$alice_session" | grep -q 'Engineering'
+printf '%s' "$bob_session" | grep -q 'editor@example.test'
+printf '%s' "$bob_session" | grep -q 'Finance'
+if printf '%s' "$bob_session" | grep -q 'Engineering'; then
+  echo "Engineering membership leaked into Bob's switched session." >&2
+  exit 1
+fi
+printf '%s' "$viewer_session" | grep -q 'read-only@example.test'
+printf '%s' "$admin_session" | grep -q 'admin@example.test'
+printf '%s' "$provider_admin_connections" | grep -q '"items":'
+test "$provider_viewer_denial" = "403"
+test "$provider_group_admin_denial" = "403"
 docker compose --project-name "$project" exec -T worker python -m firewall_manager.worker.health
 docker compose --project-name "$project" ps --format json | grep -q 'healthy'
 

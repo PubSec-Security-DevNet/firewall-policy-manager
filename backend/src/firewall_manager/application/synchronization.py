@@ -8,6 +8,7 @@ from firewall_manager.application.errors import (
     ProviderContractError,
     ProviderError,
     ProviderMismatchError,
+    ProviderPaginationError,
     ResourceOutOfScopeError,
 )
 from firewall_manager.application.ports import FirewallProvider, SyncRepository
@@ -26,16 +27,22 @@ T = TypeVar("T")
 class SynchronizationService:
     """Synchronize provider observations without adopting or mutating provider resources."""
 
-    def __init__(self, repository: SyncRepository, page_size: int = 50) -> None:
+    def __init__(
+        self,
+        repository: SyncRepository,
+        page_size: int = 50,
+        max_pages_per_collection: int = 200,
+    ) -> None:
         PageRequest(limit=page_size)
         self._repository = repository
         self._page_size = page_size
+        self._max_pages_per_collection = max_pages_per_collection
 
     async def _all(self, fetch: Callable[[PageRequest], Awaitable[ProviderPage[T]]]) -> list[T]:
         items: list[T] = []
         cursor: str | None = None
         used_cursors: set[str] = set()
-        while True:
+        for _page_number in range(self._max_pages_per_collection):
             page = await fetch(PageRequest(limit=self._page_size, cursor=cursor))
             items.extend(page.items)
             if page.next_cursor is None:
@@ -44,6 +51,7 @@ class SynchronizationService:
                 raise ProviderContractError
             used_cursors.add(page.next_cursor)
             cursor = page.next_cursor
+        raise ProviderPaginationError(details={"code": "PROVIDER_PAGE_BOUND_EXCEEDED"})
 
     async def synchronize(  # noqa: PLR0912 -- explicit provider-scope orchestration
         self, manager_id: UUID, provider: FirewallProvider

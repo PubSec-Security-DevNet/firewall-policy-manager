@@ -11,19 +11,26 @@ from firewall_manager.application.ports import (
     AdministrationRepository,
     AuthorizationRepository,
     ChangeSetRepository,
+    DevelopmentIdentityRepository,
     InventoryRepository,
     OverviewRepository,
+    ProviderConnectionRepository,
+    ProviderFactory,
+    ProviderSyncDispatcher,
+    SecretStore,
 )
 from firewall_manager.config import Settings, get_settings
 from firewall_manager.domain.models import Principal
 from firewall_manager.persistence.changesets import SqlChangeSetRepository
 from firewall_manager.persistence.database import get_session
 from firewall_manager.persistence.health import SqlRedisHealthProbe
+from firewall_manager.persistence.provider_connections import SqlProviderConnectionRepository
 from firewall_manager.persistence.repositories import (
     SqlAdministrationRepository,
     SqlAuthorizationRepository,
     SqlOverviewRepository,
 )
+from firewall_manager.persistence.secrets import EncryptedDatabaseSecretStore
 
 SessionDependency = Annotated[Session, Depends(get_session)]
 
@@ -35,6 +42,9 @@ def get_overview_repository(session: SessionDependency) -> OverviewRepository:
 
 RepositoryDependency = Annotated[OverviewRepository, Depends(get_overview_repository)]
 InventoryRepositoryDependency = Annotated[InventoryRepository, Depends(get_overview_repository)]
+DevelopmentIdentityRepositoryDependency = Annotated[
+    DevelopmentIdentityRepository, Depends(get_overview_repository)
+]
 
 
 def get_authorization_repository(session: SessionDependency) -> AuthorizationRepository:
@@ -52,6 +62,52 @@ AuthorizationRepositoryDependency = Annotated[
 ]
 AdministrationRepositoryDependency = Annotated[
     AdministrationRepository, Depends(get_administration_repository)
+]
+
+
+def get_provider_connection_repository(
+    session: SessionDependency,
+) -> ProviderConnectionRepository:
+    """Provide organization-scoped real-provider connection persistence."""
+    return SqlProviderConnectionRepository(session)
+
+
+def get_secret_store(
+    session: SessionDependency,
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> SecretStore:
+    """Provide authenticated encryption backed by an external process secret."""
+    encoded_key = (
+        settings.secret_store_master_key.get_secret_value()
+        if settings.secret_store_master_key is not None
+        else None
+    )
+    return EncryptedDatabaseSecretStore(session, encoded_key, settings.secret_store_key_version)
+
+
+ProviderConnectionRepositoryDependency = Annotated[
+    ProviderConnectionRepository, Depends(get_provider_connection_repository)
+]
+SecretStoreDependency = Annotated[SecretStore, Depends(get_secret_store)]
+
+
+def get_provider_factory() -> ProviderFactory:
+    """Composition hook supplied by the process root, never by a request payload."""
+    msg = "real provider factory is not configured"
+    raise RuntimeError(msg)
+
+
+ProviderFactoryDependency = Annotated[ProviderFactory, Depends(get_provider_factory)]
+
+
+def get_provider_sync_dispatcher() -> ProviderSyncDispatcher:
+    """Composition hook for queue publication after durable sync request state."""
+    msg = "provider sync dispatcher is not configured"
+    raise RuntimeError(msg)
+
+
+ProviderSyncDispatcherDependency = Annotated[
+    ProviderSyncDispatcher, Depends(get_provider_sync_dispatcher)
 ]
 
 

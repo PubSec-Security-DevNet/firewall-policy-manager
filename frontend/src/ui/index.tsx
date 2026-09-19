@@ -21,7 +21,13 @@ import type { ReactNode } from 'react';
 
 import type { Inventory, ProviderSummary } from '../api/client';
 
-export function AppLayout({ children }: { children: ReactNode }) {
+export function AppLayout({
+  children,
+  headerActions,
+}: {
+  children: ReactNode;
+  headerActions?: ReactNode;
+}) {
   return (
     <AppShell header={{ height: 64 }} padding="md">
       <AppShell.Header>
@@ -30,9 +36,12 @@ export function AppLayout({ children }: { children: ReactNode }) {
             <Title order={1} size="h3">
               Firewall Manager
             </Title>
-            <Badge color="yellow" variant="light">
-              Development mode
-            </Badge>
+            <Group>
+              {headerActions}
+              <Badge color="yellow" variant="light">
+                Development mode
+              </Badge>
+            </Group>
           </Group>
         </Container>
       </AppShell.Header>

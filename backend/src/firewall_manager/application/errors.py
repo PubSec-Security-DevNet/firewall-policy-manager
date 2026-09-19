@@ -39,6 +39,46 @@ class ProviderUnavailableError(ProviderError):
     safe_message = "Provider inventory is temporarily unavailable."
 
 
+class ProviderAuthenticationError(ProviderError):
+    code = "AUTHENTICATION_FAILED"
+    status_code = 401
+    safe_message = "The provider rejected the configured credential."
+
+
+class ProviderTlsValidationError(ProviderError):
+    code = "TLS_VALIDATION_FAILED"
+    safe_message = "The provider TLS certificate could not be validated."
+
+
+class ProviderPermissionError(ProviderError):
+    code = "INSUFFICIENT_PRIVILEGES"
+    status_code = 403
+    safe_message = "The provider identity lacks a required read permission."
+
+
+class ProviderRateLimitedError(ProviderError):
+    code = "RATE_LIMITED"
+    status_code = 429
+    safe_message = "The provider rate limit was reached."
+
+
+class ProviderUnsupportedVersionError(ProviderError):
+    code = "UNSUPPORTED_VERSION"
+    safe_message = "The provider version has not passed compatibility validation."
+
+
+class ProviderConfigurationError(ApplicationError):
+    code = "CONFIGURATION_INVALID"
+    status_code = 422
+    safe_message = "The provider connection configuration is invalid."
+
+
+class SecretStoreUnavailableError(ApplicationError):
+    code = "SECRET_STORE_UNAVAILABLE"
+    status_code = 503
+    safe_message = "Secure credential storage is not configured."
+
+
 class ProviderContractError(ProviderError):
     code = "PROVIDER_CONTRACT_ERROR"
     safe_message = "The provider returned an invalid discovery response."

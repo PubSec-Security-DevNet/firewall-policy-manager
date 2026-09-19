@@ -27,6 +27,8 @@ actions:
     description: Perform authorized drift/adoption reconciliation.
   manage_grants:
     description: Administer application authorization/resource grants.
+  manage_providers:
+    description: Administer provider connections, credentials, tests, and synchronization.
 
 invariants:
   - "delegated authorization uses one explicit active Group and Access Policy"

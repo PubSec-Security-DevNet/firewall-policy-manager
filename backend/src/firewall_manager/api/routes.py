@@ -9,10 +9,15 @@ from firewall_manager.api.dependencies import (
     AdministrationRepositoryDependency,
     AuthorizationRepositoryDependency,
     ChangeSetRepositoryDependency,
+    DevelopmentIdentityRepositoryDependency,
     HealthServiceDependency,
     InventoryRepositoryDependency,
     PrincipalDependency,
+    ProviderConnectionRepositoryDependency,
+    ProviderFactoryDependency,
+    ProviderSyncDispatcherDependency,
     RepositoryDependency,
+    SecretStoreDependency,
 )
 from firewall_manager.api.schemas import (
     ActiveGroupResponse,
@@ -24,6 +29,7 @@ from firewall_manager.api.schemas import (
     ChangeSetResponse,
     DelegatedContextResponse,
     DelegatedPolicySummary,
+    DevelopmentIdentityResponse,
     DraftCategoryOperationRequest,
     DraftObjectOperationRequest,
     DraftOperationUpdateRequest,
@@ -36,6 +42,13 @@ from firewall_manager.api.schemas import (
     OverviewResponse,
     PageResponse,
     PolicyResponse,
+    ProviderConnectionCreateRequest,
+    ProviderConnectionPageResponse,
+    ProviderConnectionResponse,
+    ProviderConnectionTestResponse,
+    ProviderConnectionUpdateRequest,
+    ProviderCredentialUpdateRequest,
+    ProviderLifecycleRequest,
     ProviderStatusResponse,
     RuleResponse,
     SessionResponse,
@@ -46,17 +59,30 @@ from firewall_manager.application.changesets import ChangeSetService
 from firewall_manager.application.delegated import DelegatedPolicyService
 from firewall_manager.application.inventory import InventoryService
 from firewall_manager.application.overview import OverviewService
-from firewall_manager.application.ports import ProviderReader
-from firewall_manager.domain.models import ChangeOperationKind, DelegatedPolicyContext
+from firewall_manager.application.ports import ProviderFactory, ProviderReader
+from firewall_manager.application.provider_connections import ProviderConnectionService
+from firewall_manager.domain.models import ChangeOperationKind, DelegatedPolicyContext, ProviderKind
 from firewall_manager.providers.transactions import HttpMockTransactionExecutor
 
 router = APIRouter(prefix="/api/v1")
+dev_router = APIRouter(prefix="/api/v1/dev", tags=["development-auth"])
 
 
 def get_provider_readers() -> tuple[ProviderReader, ...]:
     """Application wiring hook overridden by the process composition root."""
     msg = "provider readers are not configured"
     raise RuntimeError(msg)
+
+
+@dev_router.get("/users")
+async def development_users(
+    repository: DevelopmentIdentityRepositoryDependency,
+) -> list[DevelopmentIdentityResponse]:
+    """Return deterministic identities; this router is never mounted in production."""
+    return [
+        DevelopmentIdentityResponse.model_validate(item)
+        for item in repository.development_identities()
+    ]
 
 
 @router.get("/health/live", tags=["health"])
@@ -377,6 +403,201 @@ async def administration_snapshot(
         principal
     )
     return AdministrationSnapshotResponse.model_validate(result)
+
+
+def _provider_connection_service(
+    authorization_repository: AuthorizationRepositoryDependency,
+    connection_repository: ProviderConnectionRepositoryDependency,
+    secret_store: SecretStoreDependency,
+    provider_factory: ProviderFactory | None = None,
+) -> ProviderConnectionService:
+    return ProviderConnectionService(
+        authorization_repository, connection_repository, secret_store, provider_factory
+    )
+
+
+@router.get("/admin/provider-connections", tags=["provider-connections"])
+async def list_provider_connections(  # noqa: PLR0913, PLR0917 -- FastAPI dependencies
+    principal: PrincipalDependency,
+    authorization_repository: AuthorizationRepositoryDependency,
+    connection_repository: ProviderConnectionRepositoryDependency,
+    secret_store: SecretStoreDependency,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=100)] = 100,
+) -> ProviderConnectionPageResponse:
+    items, total = _provider_connection_service(
+        authorization_repository, connection_repository, secret_store
+    ).list(principal, offset, limit)
+    return ProviderConnectionPageResponse(
+        items=[ProviderConnectionResponse.model_validate(item) for item in items], total=total
+    )
+
+
+@router.get("/admin/provider-connections/guidance/{provider_type}", tags=["provider-connections"])
+async def provider_connection_guidance(
+    provider_type: ProviderKind,
+    principal: PrincipalDependency,
+    authorization_repository: AuthorizationRepositoryDependency,
+    connection_repository: ProviderConnectionRepositoryDependency,
+    secret_store: SecretStoreDependency,
+) -> dict[str, object]:
+    service = _provider_connection_service(
+        authorization_repository, connection_repository, secret_store
+    )
+    # Listing is a cheap way to enforce the same explicit provider-admin boundary.
+    service.list(principal, 0, 1)
+    return service.guidance(provider_type)
+
+
+@router.get("/admin/provider-connections/{connection_id}", tags=["provider-connections"])
+async def get_provider_connection(
+    connection_id: UUID,
+    principal: PrincipalDependency,
+    authorization_repository: AuthorizationRepositoryDependency,
+    connection_repository: ProviderConnectionRepositoryDependency,
+    secret_store: SecretStoreDependency,
+) -> ProviderConnectionResponse:
+    result = _provider_connection_service(
+        authorization_repository, connection_repository, secret_store
+    ).get(principal, connection_id)
+    return ProviderConnectionResponse.model_validate(result)
+
+
+@router.post("/admin/provider-connections", status_code=201, tags=["provider-connections"])
+async def create_provider_connection(
+    body: ProviderConnectionCreateRequest,
+    principal: PrincipalDependency,
+    authorization_repository: AuthorizationRepositoryDependency,
+    connection_repository: ProviderConnectionRepositoryDependency,
+    secret_store: SecretStoreDependency,
+) -> ProviderConnectionResponse:
+    values: dict[str, object] = {
+        "provider_type": body.provider_type,
+        "display_name": body.display_name,
+        "base_endpoint": body.base_endpoint,
+        "region": body.region,
+        "tls_mode": body.tls_mode,
+        "username": body.username,
+        "password": body.password.get_secret_value() if body.password else None,
+        "token": body.token.get_secret_value() if body.token else None,
+        "ca_certificate": body.ca_certificate.get_secret_value() if body.ca_certificate else None,
+        "sync_interval_minutes": body.sync_interval_minutes,
+    }
+    result = _provider_connection_service(
+        authorization_repository, connection_repository, secret_store
+    ).create(principal, values)
+    return ProviderConnectionResponse.model_validate(result)
+
+
+@router.patch(
+    "/admin/provider-connections/{connection_id}/configuration",
+    tags=["provider-connections"],
+)
+async def update_provider_connection(  # noqa: PLR0913, PLR0917 -- FastAPI dependencies
+    connection_id: UUID,
+    body: ProviderConnectionUpdateRequest,
+    principal: PrincipalDependency,
+    authorization_repository: AuthorizationRepositoryDependency,
+    connection_repository: ProviderConnectionRepositoryDependency,
+    secret_store: SecretStoreDependency,
+) -> ProviderConnectionResponse:
+    values = body.model_dump(exclude_none=True)
+    expected_revision = int(values.pop("expected_revision"))
+    result = _provider_connection_service(
+        authorization_repository, connection_repository, secret_store
+    ).update(principal, connection_id, expected_revision, values)
+    return ProviderConnectionResponse.model_validate(result)
+
+
+@router.put(
+    "/admin/provider-connections/{connection_id}/credentials",
+    tags=["provider-connections"],
+)
+async def rotate_provider_credentials(  # noqa: PLR0913, PLR0917 -- FastAPI dependencies
+    connection_id: UUID,
+    body: ProviderCredentialUpdateRequest,
+    principal: PrincipalDependency,
+    authorization_repository: AuthorizationRepositoryDependency,
+    connection_repository: ProviderConnectionRepositoryDependency,
+    secret_store: SecretStoreDependency,
+) -> ProviderConnectionResponse:
+    values = {
+        key: value
+        for key, value in {
+            "username": body.username,
+            "password": body.password.get_secret_value() if body.password else None,
+            "token": body.token.get_secret_value() if body.token else None,
+            "ca_certificate": body.ca_certificate.get_secret_value()
+            if body.ca_certificate
+            else None,
+        }.items()
+        if value is not None
+    }
+    result = _provider_connection_service(
+        authorization_repository, connection_repository, secret_store
+    ).rotate_credentials(principal, connection_id, body.expected_revision, values)
+    return ProviderConnectionResponse.model_validate(result)
+
+
+@router.post("/admin/provider-connections/{connection_id}/test", tags=["provider-connections"])
+async def test_provider_connection(  # noqa: PLR0913, PLR0917 -- FastAPI dependencies
+    connection_id: UUID,
+    request: Request,
+    principal: PrincipalDependency,
+    authorization_repository: AuthorizationRepositoryDependency,
+    connection_repository: ProviderConnectionRepositoryDependency,
+    secret_store: SecretStoreDependency,
+    provider_factory: ProviderFactoryDependency,
+) -> ProviderConnectionTestResponse:
+    result = await _provider_connection_service(
+        authorization_repository, connection_repository, secret_store, provider_factory
+    ).test(
+        principal,
+        connection_id,
+        getattr(request.state, "correlation_id", None),
+    )
+    return ProviderConnectionTestResponse.model_validate(result)
+
+
+@router.put(
+    "/admin/provider-connections/{connection_id}/lifecycle",
+    tags=["provider-connections"],
+)
+async def set_provider_connection_lifecycle(  # noqa: PLR0913, PLR0917 -- FastAPI dependencies
+    connection_id: UUID,
+    body: ProviderLifecycleRequest,
+    principal: PrincipalDependency,
+    authorization_repository: AuthorizationRepositoryDependency,
+    connection_repository: ProviderConnectionRepositoryDependency,
+    secret_store: SecretStoreDependency,
+) -> ProviderConnectionResponse:
+    result = _provider_connection_service(
+        authorization_repository, connection_repository, secret_store
+    ).set_lifecycle(principal, connection_id, body.expected_revision, body.lifecycle)
+    return ProviderConnectionResponse.model_validate(result)
+
+
+@router.post(
+    "/admin/provider-connections/{connection_id}/sync",
+    status_code=202,
+    tags=["provider-connections"],
+)
+async def request_provider_connection_sync(  # noqa: PLR0913, PLR0917 -- FastAPI dependencies
+    connection_id: UUID,
+    principal: PrincipalDependency,
+    authorization_repository: AuthorizationRepositoryDependency,
+    connection_repository: ProviderConnectionRepositoryDependency,
+    secret_store: SecretStoreDependency,
+    dispatch: ProviderSyncDispatcherDependency,
+) -> dict[str, str]:
+    _provider_connection_service(
+        authorization_repository, connection_repository, secret_store
+    ).request_sync(
+        principal,
+        connection_id,
+        dispatch,
+    )
+    return {"status": "QUEUED", "connection_id": str(connection_id)}
 
 
 @router.post("/admin/users", status_code=201, tags=["administration"])

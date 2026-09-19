@@ -25,12 +25,16 @@ certifi==2026.7.22
     #   httpcore
     #   httpx
     #   requests
+cffi==2.1.1
+    # via cryptography
 charset-normalizer==3.5.1
     # via requests
 click==8.5.0
     # via
     #   import-linter
     #   uvicorn
+cryptography==50.0.1
+    # via firewall-manager (pyproject.toml)
 cyclonedx-python-lib==11.12.0
     # via pip-audit
 defusedxml==0.7.1
@@ -95,6 +99,8 @@ pluggy==1.6.0
     # via pytest
 psycopg==3.3.6
     # via firewall-manager (pyproject.toml)
+pycparser==3.0
+    # via cffi
 py-serializable==2.1.0
     # via cyclonedx-python-lib
 pydantic==2.13.5
