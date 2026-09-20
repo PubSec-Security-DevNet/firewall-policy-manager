@@ -1,13 +1,19 @@
 """Sanitized real-adapter parsing and hard read-only safety tests."""
 
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
 import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import NameOID
 
 from firewall_manager.application.errors import (
     ProductionWriteDisabledError,
     ProviderConfigurationError,
+    ProviderTlsValidationError,
     ProviderUnavailableError,
 )
 from firewall_manager.domain.models import CapabilityStatus, PageRequest, ProviderCapability
@@ -22,6 +28,26 @@ def _capabilities() -> dict[str, CapabilityStatus]:
 
 def _test_credential(label: str) -> str:
     return f"sanitized-{label}-credential"
+
+
+def _self_signed_certificate(common_name: str) -> tuple[str, bytes]:
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name)])
+    now = datetime.now(UTC)
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=1))
+        .not_valid_after(now + timedelta(days=1))
+        .sign(key, hashes.SHA256())
+    )
+    return (
+        certificate.public_bytes(serialization.Encoding.PEM).decode(),
+        certificate.public_bytes(serialization.Encoding.DER),
+    )
 
 
 def _collection(items: list[dict[str, Any]]) -> httpx.Response:
@@ -80,8 +106,19 @@ def _fmc_transport(requests: list[httpx.Request]) -> httpx.MockTransport:
 
 
 @pytest.mark.asyncio
-async def test_real_fmc_uses_token_auth_and_normalizes_read_only_inventory() -> None:
+async def test_real_fmc_uses_token_auth_and_normalizes_read_only_inventory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     requests: list[httpx.Request] = []
+    clients: list[httpx.AsyncClient] = []
+    async_client = httpx.AsyncClient
+
+    def build_client(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
+        client = async_client(*args, **kwargs)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(httpx, "AsyncClient", build_client)
     provider = RealFmcProvider(
         endpoint="https://fmc.example.test",
         display_name="FMC — Test",
@@ -116,6 +153,8 @@ async def test_real_fmc_uses_token_auth_and_normalizes_read_only_inventory() -> 
         request.method == "GET" or request.url.path.endswith("/auth/generatetoken")
         for request in requests
     )
+    assert len(clients) == 1
+    await provider.aclose()
 
 
 @pytest.mark.asyncio
@@ -135,6 +174,60 @@ async def test_real_provider_operation_layer_rejects_configuration_post() -> Non
     )
     with pytest.raises(ProductionWriteDisabledError):
         await provider.attempt_configuration_post()
+    await provider.aclose()
+
+
+@pytest.mark.asyncio
+async def test_custom_ca_name_mismatch_requires_exact_uploaded_leaf_pin() -> None:
+    uploaded_pem, uploaded_der = _self_signed_certificate("firepower")
+    _other_pem, other_der = _self_signed_certificate("firepower")
+    provider = RealFmcProvider(
+        endpoint="https://192.0.2.10",
+        display_name="Pinned FMC",
+        username="api-user",
+        password=_test_credential("pinned-fmc"),
+        capabilities=_capabilities(),
+        ca_certificate=uploaded_pem,
+        transport=_fmc_transport([]),
+        validate_network_target=False,
+    )
+
+    assert provider._certificate_is_exactly_pinned(  # pyright: ignore[reportPrivateUsage]
+        uploaded_der
+    )
+    assert not provider._certificate_is_exactly_pinned(  # pyright: ignore[reportPrivateUsage]
+        other_der
+    )
+    provider._exact_pin_active = True  # pyright: ignore[reportPrivateUsage]
+
+    class FakeSslObject:
+        def __init__(self, certificate: bytes) -> None:
+            self.certificate = certificate
+
+        def getpeercert(self, *, binary_form: bool = False) -> bytes:
+            assert binary_form is True
+            return self.certificate
+
+    class FakeStream:
+        def __init__(self, certificate: bytes) -> None:
+            self.certificate = certificate
+
+        def get_extra_info(self, name: str) -> FakeSslObject | None:
+            return FakeSslObject(self.certificate) if name == "ssl_object" else None
+
+    provider._capture_certificate(  # pyright: ignore[reportPrivateUsage]
+        httpx.Response(200, extensions={"network_stream": FakeStream(uploaded_der)})
+    )
+    assert provider.certificate_info["identity_verification"] == "EXACT_CERTIFICATE_PIN"
+    with pytest.raises(ProviderTlsValidationError):
+        provider._capture_certificate(  # pyright: ignore[reportPrivateUsage]
+            httpx.Response(200, extensions={"network_stream": FakeStream(other_der)})
+        )
+    with pytest.raises(ProviderTlsValidationError):
+        provider._capture_certificate(  # pyright: ignore[reportPrivateUsage]
+            httpx.Response(200)
+        )
+    await provider.aclose()
 
 
 @pytest.mark.asyncio
@@ -145,7 +238,7 @@ async def test_real_scc_uses_controlled_region_and_discovers_tenant() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         seen.append(str(request.url))
         assert request.headers["Authorization"] == f"Bearer {scc_token}"
-        if request.url.path.endswith("/v1/token-info"):
+        if request.url.path.endswith("/v1/token"):
             return httpx.Response(
                 200, json={"tenantUid": "tenant-1", "tenantName": "Example Tenant"}
             )
@@ -173,6 +266,7 @@ async def test_real_scc_uses_controlled_region_and_discovers_tenant() -> None:
         "scope_type": "TENANT",
     }
     assert all(url.startswith("https://api.eu.security.cisco.com/firewall/") for url in seen)
+    await provider.aclose()
 
 
 def test_fmc_target_validation_rejects_unsafe_or_credentialed_urls() -> None:
@@ -204,3 +298,4 @@ async def test_real_provider_refuses_redirects_instead_of_following_origins() ->
     )
     with pytest.raises(ProviderUnavailableError):
         await provider.information()
+    await provider.aclose()

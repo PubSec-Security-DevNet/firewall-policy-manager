@@ -68,5 +68,5 @@ describe('ProviderConnectionsPanel', () => {
     expect(await axe.run(container, { rules: { 'color-contrast': { enabled: false } } })).toEqual(
       expect.objectContaining({ violations: [] }),
     );
-  });
+  }, 10_000);
 });

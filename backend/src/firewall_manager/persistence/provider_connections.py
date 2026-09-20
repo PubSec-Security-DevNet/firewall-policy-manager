@@ -115,7 +115,13 @@ class SqlProviderConnectionRepository:
             capabilities=capabilities,
             revision=1,
         )
-        self._session.add_all((row, manager))
+        # These mappers intentionally have no ORM relationship: application services resolve the
+        # connection/manager boundary explicitly. Flush the FK parent first because SQLAlchemy
+        # cannot infer mapper insertion order from a relationship in this model. PostgreSQL would
+        # otherwise be allowed to insert the manager before its provider connection.
+        self._session.add(row)
+        self._flush()
+        self._session.add(manager)
         self._flush()
         self._audit(organization_id, actor_user_id, connection_id, "connection_created", "SUCCESS")
         return self._safe_dict(row)
@@ -243,8 +249,11 @@ class SqlProviderConnectionRepository:
             actor_user_id,
             connection_id,
             "connection_tested",
-            status,
-            {"error_code": row.last_error_code} if row.last_error_code else {},
+            "SUCCESS" if status == "CONNECTED" else "FAILED",
+            {
+                "connection_status": status,
+                **({"error_code": row.last_error_code} if row.last_error_code else {}),
+            },
         )
         return self._safe_dict(row)
 
@@ -285,6 +294,9 @@ class SqlProviderConnectionRepository:
             raise InvalidChangeSetStateError
         row.sync_status = "QUEUED"
         row.last_sync = datetime.now(UTC)
+        row.last_error_code = None
+        row.last_error_message = None
+        row.last_error_correlation_id = None
         self._flush()
         self._audit(
             organization_id, actor_user_id, connection_id, "manual_sync_requested", "QUEUED"
@@ -332,6 +344,9 @@ class SqlProviderConnectionRepository:
             raise InvalidChangeSetStateError
         row.sync_status = "RUNNING"
         row.last_sync = datetime.now(UTC)
+        row.last_error_code = None
+        row.last_error_message = None
+        row.last_error_correlation_id = None
         manager = self._manager(row.organization_id, connection_id)
         self._session.commit()
         return row.organization_id, manager.id

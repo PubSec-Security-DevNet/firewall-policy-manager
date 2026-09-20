@@ -228,12 +228,35 @@ class CiscoReadOnlyProvider:
         self._policy_domains: dict[str, str] = {}
         self.certificate_info: dict[str, str] = {}
         self.tenant_info: dict[str, str] = {}
+        self._custom_ca_certificate = ca_certificate
+        self._exact_pin_fingerprints: set[bytes] = set()
+        self._exact_pin_active = False
         self._ssl_context = ssl.create_default_context()
         if ca_certificate:
             try:
                 self._ssl_context.load_verify_locations(cadata=ca_certificate)
-            except ssl.SSLError as exc:
+                self._exact_pin_fingerprints = {
+                    certificate.fingerprint(hashes.SHA256())
+                    for certificate in x509.load_pem_x509_certificates(ca_certificate.encode())
+                }
+            except (ValueError, ssl.SSLError) as exc:
                 raise ProviderConfigurationError from exc
+        # One provider instance represents one bounded test/sync operation. Reusing its client
+        # preserves verified TLS connection pooling; constructing a client per read made SCC tests
+        # both unnecessarily slow and vulnerable to repeated handshake/read timeouts.
+        self._client = self._build_client(self._ssl_context)
+
+    def _build_client(self, ssl_context: ssl.SSLContext) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            verify=ssl_context,
+            timeout=httpx.Timeout(connect=5.0, read=30.0, write=5.0, pool=5.0),
+            follow_redirects=False,
+            transport=self._transport,
+        )
+
+    async def aclose(self) -> None:
+        """Close the operation-scoped verified HTTP transport."""
+        await self._client.aclose()
 
     async def information(self) -> ProviderInfo:
         await self._ensure_identity()
@@ -411,7 +434,7 @@ class CiscoReadOnlyProvider:
         if not self._bearer_token:
             raise ProviderConfigurationError
         if not self.tenant_info:
-            payload = await self._get("/v1/token-info")
+            payload = await self._get("/v1/token")
             if not isinstance(payload, dict):
                 raise ProviderContractError
             typed_payload = cast("dict[str, Any]", payload)
@@ -472,25 +495,21 @@ class CiscoReadOnlyProvider:
     ) -> httpx.Response:
         if method != "GET" and not (allow_auth_post and method == "POST"):
             raise ProductionWriteDisabledError
-        attempts = 3 if method == "GET" else 1
+        attempts = (3 if method == "GET" else 1) + bool(self._exact_pin_fingerprints)
         for attempt in range(attempts):
             try:
-                async with httpx.AsyncClient(
-                    verify=self._ssl_context,
-                    timeout=httpx.Timeout(connect=5.0, read=20.0, write=5.0, pool=5.0),
-                    follow_redirects=False,
-                    transport=self._transport,
-                ) as client:
-                    response = await client.request(
-                        method,
-                        f"{self._endpoint}{path}",
-                        headers=headers,
-                        auth=auth,
-                        params=params,
-                    )
+                response = await self._client.request(
+                    method,
+                    f"{self._endpoint}{path}",
+                    headers=headers,
+                    auth=auth,
+                    params=params,
+                )
                 self._capture_certificate(response)
             except httpx.TransportError as exc:
                 if self._is_tls_error(exc):
+                    if await self._activate_exact_certificate_pin():
+                        continue
                     raise ProviderTlsValidationError from exc
                 if attempt + 1 < attempts:
                     await asyncio.sleep(0.1 * (2**attempt))
@@ -508,6 +527,44 @@ class CiscoReadOnlyProvider:
             self._raise_for_status(response)
             return response
         raise ProviderUnavailableError
+
+    async def _activate_exact_certificate_pin(self) -> bool:
+        """Replace hostname identity with an exact uploaded leaf pin after verified preflight."""
+        if self._exact_pin_active or not self._exact_pin_fingerprints:
+            return False
+        parsed = urlsplit(self._endpoint)
+        hostname = parsed.hostname
+        if hostname is None or self._custom_ca_certificate is None:
+            raise ProviderTlsValidationError
+        pin_context = ssl.create_default_context()
+        try:
+            pin_context.load_verify_locations(cadata=self._custom_ca_certificate)
+            pin_context.check_hostname = False
+            _reader, writer = await asyncio.open_connection(
+                hostname,
+                parsed.port or 443,
+                ssl=pin_context,
+                server_hostname=hostname,
+            )
+            ssl_object = writer.get_extra_info("ssl_object")
+            certificate = (
+                ssl_object.getpeercert(binary_form=True) if ssl_object is not None else None
+            )
+            writer.close()
+            await writer.wait_closed()
+        except (OSError, ssl.SSLError) as exc:
+            raise ProviderTlsValidationError from exc
+        if not certificate or not self._certificate_is_exactly_pinned(certificate):
+            raise ProviderTlsValidationError
+        await self._client.aclose()
+        self._ssl_context = pin_context
+        self._client = self._build_client(pin_context)
+        self._exact_pin_active = True
+        return True
+
+    def _certificate_is_exactly_pinned(self, certificate: bytes) -> bool:
+        parsed = x509.load_der_x509_certificate(certificate)
+        return parsed.fingerprint(hashes.SHA256()) in self._exact_pin_fingerprints
 
     async def _page(
         self, path: str, page: PageRequest
@@ -603,14 +660,21 @@ class CiscoReadOnlyProvider:
         ssl_object = stream.get_extra_info("ssl_object") if stream is not None else None
         certificate = ssl_object.getpeercert(binary_form=True) if ssl_object is not None else None
         if not certificate:
+            if self._exact_pin_active:
+                raise ProviderTlsValidationError
             return
         parsed = x509.load_der_x509_certificate(certificate)
+        if self._exact_pin_active and not self._certificate_is_exactly_pinned(certificate):
+            raise ProviderTlsValidationError
         self.certificate_info = {
             "subject": parsed.subject.rfc4514_string(),
             "issuer": parsed.issuer.rfc4514_string(),
             "not_valid_before": parsed.not_valid_before_utc.astimezone(UTC).isoformat(),
             "not_valid_after": parsed.not_valid_after_utc.astimezone(UTC).isoformat(),
             "sha256_fingerprint": parsed.fingerprint(hashes.SHA256()).hex(),
+            "identity_verification": (
+                "EXACT_CERTIFICATE_PIN" if self._exact_pin_active else "HOSTNAME"
+            ),
         }
 
     def _config_path(self, domain_id: str, suffix: str) -> str:

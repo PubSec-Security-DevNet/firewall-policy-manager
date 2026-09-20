@@ -30,6 +30,10 @@ The mock-only stack does not require a secret-store key. Before creating a real 
 generate a 32-byte base64 key with the command in `.env.example`, put it in the ignored local
 `.env` as `APP_SECRET_KEY`, and restart the application processes. Production must inject this key
 from an external secrets-management mechanism; it must never be committed or placed in an image.
+All production replicas and workers sharing a database require the same key. Do not rotate the root
+key merely by changing the environment value—current ciphertext must first be migrated. Production
+bootstrap, recovery, and rotation requirements are documented in
+[`docs/OPERATIONS.md`](docs/OPERATIONS.md#production-secretstore-bootstrap).
 
 ## Local services
 
@@ -76,7 +80,9 @@ enabled, retain separate health/sync/evidence/audit state, and may be disabled o
 deleting historical inventory. FMC uses a dedicated username/password to obtain short-lived REST
 tokens in memory; SCC uses an API-only bearer token and a controlled Cisco region selector. FMC
 requires HTTPS with system trust or an administrator-supplied CA bundle. There is no TLS bypass and
-redirects are not followed.
+redirects are not followed. A custom bundle containing the exact presented leaf certificate may
+serve as an explicit identity pin when legacy FMC certificates do not match the endpoint name;
+uploading only an issuing CA does not relax hostname verification.
 
 Credentials are AES-256-GCM ciphertext in a dedicated secret table. Associated data binds each
 ciphertext to its organization, connection purpose, secret UUID, and key version; connection rows

@@ -55,6 +55,7 @@ async def test_real_fmc_read_only_compatibility() -> None:
         for policy in policies.items:
             await provider.categories(policy.native_id, PageRequest(limit=1))
             await provider.rules(policy.native_id, PageRequest(limit=1))
+    await provider.aclose()
 
 
 @pytest.mark.asyncio
@@ -79,3 +80,4 @@ async def test_real_scc_read_only_compatibility() -> None:
         for policy in policies.items:
             await provider.categories(policy.native_id, PageRequest(limit=1))
             await provider.rules(policy.native_id, PageRequest(limit=1))
+    await provider.aclose()

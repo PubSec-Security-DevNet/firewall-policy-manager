@@ -1,5 +1,6 @@
 """Provider-connection authorization, isolation, lifecycle, and persistence regressions."""
 
+import asyncio
 import base64
 import json
 import os
@@ -9,7 +10,7 @@ from typing import Any, cast
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import Table, create_engine, select
+from sqlalchemy import Table, create_engine, event, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import Session
@@ -20,7 +21,7 @@ from firewall_manager.application.errors import (
     StaleWriteError,
 )
 from firewall_manager.application.provider_connections import ProviderConnectionService
-from firewall_manager.domain.models import Principal
+from firewall_manager.domain.models import CapabilityStatus, Principal, ProviderCapability
 from firewall_manager.persistence.models import (
     AuditEvent,
     Base,
@@ -162,6 +163,115 @@ def _connections(
         # Each creation represents its own request transaction in production.
         session.commit()
     return created
+
+
+def test_connection_flushes_parent_before_manager_foreign_key(tmp_path: Path) -> None:
+    session = _session(tmp_path / "flush-order.sqlite")
+    service = _service(session)
+    flush_stages: list[set[type[object]]] = []
+
+    def capture_new_rows(flushing_session: Session, *_args: object) -> None:
+        flush_stages.append({type(item) for item in flushing_session.new})
+
+    event.listen(session, "before_flush", capture_new_rows)
+    service.create(
+        _principal(ADMIN, ORG, "admin"),
+        {
+            "provider_type": "scc",
+            "display_name": "SCC flush ordering",
+            "region": "us",
+            "token": "write-only-test-token",
+        },
+    )
+
+    connection_stage = next(
+        index for index, stage in enumerate(flush_stages) if ProviderConnection in stage
+    )
+    manager_stage = next(
+        index for index, stage in enumerate(flush_stages) if FirewallManager in stage
+    )
+    assert connection_stage < manager_stage
+    assert FirewallManager not in flush_stages[connection_stage]
+
+
+@pytest.mark.asyncio
+async def test_connection_probe_phase_runs_reads_concurrently() -> None:
+    capabilities = {
+        ProviderCapability.DEVICE_DISCOVERY.value: CapabilityStatus.NOT_STARTED.value,
+        ProviderCapability.NETWORK_OBJECT_READ.value: CapabilityStatus.NOT_STARTED.value,
+    }
+    release = asyncio.Event()
+    both_started = asyncio.Event()
+    active = 0
+
+    async def probe(value: str) -> str:
+        nonlocal active
+        active += 1
+        if active == 2:
+            both_started.set()
+        await release.wait()
+        return value
+
+    task = asyncio.create_task(
+        ProviderConnectionService._run_probe_phase(  # pyright: ignore[reportPrivateUsage]
+            capabilities,
+            {
+                ProviderCapability.DEVICE_DISCOVERY: probe("devices"),
+                ProviderCapability.NETWORK_OBJECT_READ: probe("objects"),
+            },
+        )
+    )
+    await asyncio.wait_for(both_started.wait(), timeout=1)
+    release.set()
+    results = await task
+
+    assert results == {
+        ProviderCapability.DEVICE_DISCOVERY: "devices",
+        ProviderCapability.NETWORK_OBJECT_READ: "objects",
+    }
+    assert set(capabilities.values()) == {CapabilityStatus.READ_ONLY.value}
+
+
+def test_failed_connection_status_is_recorded_as_bounded_audit_decision(tmp_path: Path) -> None:
+    session = _session(tmp_path / "failed-test-audit.sqlite")
+    service = _service(session)
+    created = service.create(
+        _principal(ADMIN, ORG, "admin"),
+        {
+            "provider_type": "fmc",
+            "display_name": "FMC TLS failure",
+            "base_endpoint": "https://fmc.example.test",
+            "username": "api-user",
+            "password": "write-only-test-password",
+        },
+    )
+    connection_id = UUID(str(created["id"]))
+
+    SqlProviderConnectionRepository(session).record_connection_test(
+        ORG,
+        ADMIN,
+        connection_id,
+        {
+            "status": "TLS_VALIDATION_FAILED",
+            "error_code": "TLS_VALIDATION_FAILED",
+            "safe_message": "The provider TLS certificate could not be validated.",
+            "correlation_id": "test-correlation-id",
+        },
+        {},
+        [],
+    )
+    session.flush()
+
+    event_row = session.scalar(
+        select(AuditEvent).where(AuditEvent.reason_code == "connection_tested")
+    )
+    assert event_row is not None
+    assert event_row.decision == "FAILED"
+    assert event_row.details == {
+        "provider": "fmc",
+        "connection_status": "TLS_VALIDATION_FAILED",
+        "error_code": "TLS_VALIDATION_FAILED",
+    }
 
 
 def test_two_fmc_and_two_scc_connections_are_fully_isolated(tmp_path: Path) -> None:

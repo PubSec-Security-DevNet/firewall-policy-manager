@@ -24,6 +24,7 @@ import {
   AppTitle as Title,
 } from '../../ui';
 import { Tabs } from '../../ui/tabs';
+import { authorizationExpectedRevision, providerResourcesForPolicy } from './authorizationRevision';
 
 type State =
   | { status: 'loading' }
@@ -32,11 +33,16 @@ type State =
 
 export function AdministrationPanel() {
   const [state, setState] = useState<State>({ status: 'loading' });
+  const refresh = useCallback(
+    () =>
+      loadAdministration()
+        .then((snapshot) => setState({ status: 'ready', snapshot }))
+        .catch((error: unknown) => setState(toError(error))),
+    [],
+  );
   const load = useCallback(() => {
-    void loadAdministration()
-      .then((snapshot) => setState({ status: 'ready', snapshot }))
-      .catch((error: unknown) => setState(toError(error)));
-  }, []);
+    void refresh();
+  }, [refresh]);
   useEffect(load, [load]);
   const revoke = useCallback(
     (resource: string, row: Record<string, unknown>) => {
@@ -45,10 +51,10 @@ export function AdministrationPanel() {
       if (!window.confirm('Revoke this authorization record? This takes effect immediately.'))
         return;
       void revokeAuthorizationResource(resource, id, revision)
-        .then(load)
+        .then(refresh)
         .catch((error: unknown) => setState(toError(error)));
     },
-    [load],
+    [refresh],
   );
   const toggleEnabled = useCallback(
     (resource: 'users' | 'groups', row: Record<string, unknown>) => {
@@ -56,10 +62,10 @@ export function AdministrationPanel() {
       const verb = enabled ? 'Disable' : 'Enable';
       if (!window.confirm(`${verb} this ${resource.slice(0, -1)}?`)) return;
       void updateAdministrativeEnabled(resource, String(row.id), !enabled, Number(row.revision))
-        .then(load)
+        .then(refresh)
         .catch((error: unknown) => setState(toError(error)));
     },
-    [load],
+    [refresh],
   );
 
   if (state.status === 'loading')
@@ -84,8 +90,8 @@ export function AdministrationPanel() {
         </Tabs.List>
         <Tabs.Panel value="identities" pt="md">
           <SimpleGrid cols={{ base: 1, md: 2 }}>
-            <CreateIdentityForm resource="users" onSaved={load} />
-            <CreateIdentityForm resource="groups" onSaved={load} />
+            <CreateIdentityForm resource="users" onSaved={refresh} />
+            <CreateIdentityForm resource="groups" onSaved={refresh} />
           </SimpleGrid>
           <SimpleGrid cols={{ base: 1, md: 2 }} mt="md">
             <AdminTable
@@ -111,7 +117,7 @@ export function AdministrationPanel() {
           />
         </Tabs.Panel>
         <Tabs.Panel value="grants" pt="md">
-          <GrantForm snapshot={state.snapshot} onSaved={load} />
+          <GrantForm snapshot={state.snapshot} onSaved={refresh} />
           <SimpleGrid cols={{ base: 1, md: 2 }} mt="md">
             <AdminTable
               title="Policy delegations"
@@ -176,7 +182,7 @@ function CreateIdentityForm({
   onSaved,
 }: {
   resource: 'users' | 'groups';
-  onSaved: () => void;
+  onSaved: () => Promise<void>;
 }) {
   const [primary, setPrimary] = useState('');
   const [secondary, setSecondary] = useState('');
@@ -242,7 +248,7 @@ function GrantForm({
   onSaved,
 }: {
   snapshot: AdministrationSnapshot;
-  onSaved: () => void;
+  onSaved: () => Promise<void>;
 }) {
   const [kind, setKind] = useState<string>('memberships');
   const [userId, setUserId] = useState<string | null>(null);
@@ -251,14 +257,10 @@ function GrantForm({
   const [resourceId, setResourceId] = useState<string | null>(null);
   const [value, setValue] = useState('');
   const [message, setMessage] = useState('');
-  const resourceOptions =
-    kind === 'object-use-grants'
-      ? options(snapshot.objects, 'name')
-      : kind === 'zone-grants'
-        ? options(snapshot.zones, 'name')
-        : kind === 'category-mappings'
-          ? options(snapshot.categories, 'name')
-          : [];
+  const [saving, setSaving] = useState(false);
+  const resourceOptions = options(providerResourcesForPolicy(snapshot, kind, policyId), 'name');
+  const resourceRequired = ['object-use-grants', 'zone-grants', 'category-mappings'].includes(kind);
+  const policyRequired = kind !== 'memberships';
   const submit = () => {
     setMessage('');
     const payload: Record<string, unknown> = {};
@@ -286,11 +288,16 @@ function GrantForm({
       payload.expected_category_name = value;
       payload.sync_state = 'PENDING';
     }
+    const expectedRevision = authorizationExpectedRevision(snapshot, kind, payload);
+    if (expectedRevision !== undefined) payload.expected_revision = expectedRevision;
+    setSaving(true);
     void upsertAuthorizationResource(kind, payload)
       .then(onSaved)
+      .then(() => setMessage('Grant saved.'))
       .catch((caught: unknown) =>
         setMessage(caught instanceof Error ? caught.message : 'Save failed.'),
-      );
+      )
+      .finally(() => setSaving(false));
   };
   return (
     <Card
@@ -306,7 +313,10 @@ function GrantForm({
         <Select
           label="Grant type"
           value={kind}
-          onChange={(selected) => setKind(selected ?? 'memberships')}
+          onChange={(selected) => {
+            setKind(selected ?? 'memberships');
+            setResourceId(null);
+          }}
           data={grantKinds.map(([value, label]) => ({ value, label }))}
         />
         {['memberships', 'direct-user-policy-grants'].includes(kind) && (
@@ -330,7 +340,10 @@ function GrantForm({
             searchable
             label="Access Policy"
             value={policyId}
-            onChange={setPolicyId}
+            onChange={(selected) => {
+              setPolicyId(selected);
+              setResourceId(null);
+            }}
             data={options(snapshot.policies, 'name')}
           />
         )}
@@ -356,8 +369,14 @@ function GrantForm({
           {message}
         </Text>
       )}
-      <Button type="submit" mt="md" disabled={!groupId}>
-        Save grant
+      <Button
+        type="submit"
+        mt="md"
+        disabled={
+          !groupId || (policyRequired && !policyId) || (resourceRequired && !resourceId) || saving
+        }
+      >
+        {saving ? 'Saving grant…' : 'Save grant'}
       </Button>
     </Card>
   );

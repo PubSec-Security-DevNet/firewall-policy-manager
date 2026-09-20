@@ -4,9 +4,11 @@ from typing import cast
 from unittest.mock import MagicMock
 from uuid import UUID
 
+import pytest
 from sqlalchemy import CheckConstraint, DateTime, Table, UniqueConstraint
 from sqlalchemy.orm import Session
 
+from firewall_manager.application.errors import ResourceOutOfScopeError
 from firewall_manager.persistence.models import (
     AccessPolicy,
     AccessRule,
@@ -37,7 +39,10 @@ from firewall_manager.persistence.models import (
     User,
     ZoneGrant,
 )
-from firewall_manager.persistence.repositories import sanitize_provider_metadata
+from firewall_manager.persistence.repositories import (
+    SqlAdministrationRepository,
+    sanitize_provider_metadata,
+)
 from firewall_manager.seed import upsert_authorization_seed_row
 
 
@@ -219,6 +224,34 @@ def test_delegated_grants_are_durable_and_explicitly_context_scoped() -> None:
     assert {"network", "ip_version"} <= set(IpRangeGrant.__table__.c.keys())
     assert "object_type" in ObjectCreateGrant.__table__.c
     assert "user_id" in DirectUserPolicyGrant.__table__.c
+
+
+@pytest.mark.parametrize(
+    ("resource", "resource_key"),
+    [("object-use-grants", "object_id"), ("zone-grants", "zone_id")],
+)
+def test_provider_resource_grants_require_the_policy_manager(
+    resource: str, resource_key: str
+) -> None:
+    policy_manager_id = UUID("40000000-0000-0000-0000-000000000001")
+    other_manager_id = UUID("40000000-0000-0000-0000-000000000002")
+    session = MagicMock(spec=Session)
+    repository = SqlAdministrationRepository(session)
+    values: dict[str, object] = {
+        "policy_id": UUID("50000000-0000-0000-0000-000000000001"),
+        resource_key: UUID("60000000-0000-0000-0000-000000000001"),
+    }
+
+    session.scalar.side_effect = [policy_manager_id, other_manager_id]
+    with pytest.raises(ResourceOutOfScopeError):
+        repository._validate_provider_resource_manager(  # pyright: ignore[reportPrivateUsage]
+            UUID("10000000-0000-0000-0000-000000000001"), resource, values
+        )
+
+    session.scalar.side_effect = [policy_manager_id, policy_manager_id]
+    repository._validate_provider_resource_manager(  # pyright: ignore[reportPrivateUsage]
+        UUID("10000000-0000-0000-0000-000000000001"), resource, values
+    )
 
 
 def test_identity_and_audit_models_preserve_security_context() -> None:

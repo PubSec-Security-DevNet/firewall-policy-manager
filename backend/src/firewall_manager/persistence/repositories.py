@@ -1075,6 +1075,32 @@ class SqlAdministrationRepository:
             category = self._session.get(RuleCategory, values["category_id"])
             if policy is None or category is None or category.policy_id != policy.id:
                 raise ResourceOutOfScopeError
+        if resource in {"object-use-grants", "zone-grants"}:
+            self._validate_provider_resource_manager(organization_id, resource, values)
+
+    def _validate_provider_resource_manager(
+        self, organization_id: UUID, resource: str, values: dict[str, object]
+    ) -> None:
+        """Require grants to reference inventory on the selected policy's provider manager."""
+        policy_manager_id = self._session.scalar(
+            select(AccessPolicy.manager_id).where(
+                AccessPolicy.id == values.get("policy_id"),
+                AccessPolicy.organization_id == organization_id,
+            )
+        )
+        model, key = (
+            (FirewallObject, "object_id")
+            if resource == "object-use-grants"
+            else (SecurityZone, "zone_id")
+        )
+        resource_manager_id = self._session.scalar(
+            select(model.manager_id).where(
+                model.id == values.get(key),
+                model.organization_id == organization_id,
+            )
+        )
+        if policy_manager_id is None or resource_manager_id != policy_manager_id:
+            raise ResourceOutOfScopeError
 
     @staticmethod
     def _resource_model_and_keys(resource: str) -> tuple[type[Any], tuple[str, ...]]:

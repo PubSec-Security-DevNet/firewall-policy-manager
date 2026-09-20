@@ -284,6 +284,33 @@ def test_switching_active_group_inverts_object_and_zone_entitlements() -> None:
     ).allowed
 
 
+def test_granted_resources_from_another_policy_manager_are_denied() -> None:
+    repository = FakeAuthorizationRepository()
+    other_manager = UUID("40000000-0000-0000-0000-000000000099")
+    repository.objects[(FINANCE, POLICY_A, FINANCE_OBJECT)] = (
+        other_manager,
+        "OBSERVED",
+        {"use"},
+        7,
+    )
+    repository.zones[(FINANCE, POLICY_A, FINANCE_ZONE)] = (
+        other_manager,
+        "OBSERVED",
+        {"BOTH"},
+        7,
+    )
+
+    assert not authorize(
+        repository, AuthorizationResourceType.OBJECT, resource_id=FINANCE_OBJECT
+    ).allowed
+    assert not authorize(
+        repository,
+        AuthorizationResourceType.ZONE,
+        resource_id=FINANCE_ZONE,
+        element="SOURCE",
+    ).allowed
+
+
 def test_read_does_not_imply_object_use_and_drift_fails_closed() -> None:
     repository = FakeAuthorizationRepository()
     repository.objects[(FINANCE, POLICY_A, FINANCE_OBJECT)] = (

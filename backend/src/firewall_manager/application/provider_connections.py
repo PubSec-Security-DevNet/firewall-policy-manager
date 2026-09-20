@@ -1,6 +1,8 @@
 """Authorized provider-connection lifecycle and read-only compatibility validation."""
 
-from collections.abc import Callable
+import asyncio
+from collections.abc import Awaitable, Callable
+from typing import cast
 from uuid import UUID, uuid4
 
 from firewall_manager.application.authorization import AuthorizationService
@@ -19,6 +21,7 @@ from firewall_manager.application.ports import (
 )
 from firewall_manager.domain.models import (
     CapabilityStatus,
+    DiscoveredPolicy,
     PageRequest,
     Principal,
     ProviderCapability,
@@ -26,6 +29,7 @@ from firewall_manager.domain.models import (
     ProviderConnectionStatus,
     ProviderEvidenceProfile,
     ProviderKind,
+    ProviderPage,
     TlsTrustMode,
 )
 from firewall_manager.providers.capabilities import (
@@ -148,6 +152,19 @@ PROVIDER_SETUP_GUIDANCE: dict[str, dict[str, object]] = {
 }
 
 
+class _ProbeFailureError(Exception):
+    """Bind a concurrent provider failure to the capability being exercised."""
+
+    def __init__(
+        self,
+        capability: ProviderCapability,
+        error: ProviderError | ProviderConfigurationError,
+    ) -> None:
+        super().__init__(error.safe_message)
+        self.capability = capability
+        self.error = error
+
+
 class ProviderConnectionService:
     """Manage independent real-provider connections without exposing credential plaintext."""
 
@@ -267,6 +284,7 @@ class ProviderConnectionService:
         context = self._context(principal, connection_id)
         capabilities = self._baseline_capabilities(ProviderKind(str(context["provider_type"])))
         current_probe = ProviderCapability.AUTHENTICATION_SESSION.value
+        provider: ConnectionTestProvider | None = None
         try:
             provider = self._provider(principal, connection_id, context, capabilities)
             info = await provider.information()
@@ -274,26 +292,46 @@ class ProviderConnectionService:
             current_probe = ProviderCapability.MANAGER_TENANT_DISCOVERY.value
             domain_page = await provider.domains(PageRequest(limit=100))
             capabilities[current_probe] = CapabilityStatus.READ_ONLY.value
-            for domain in domain_page.items[:20]:
-                current_probe = ProviderCapability.DEVICE_DISCOVERY.value
-                await provider.devices(domain.native_id, PageRequest(limit=1))
-                capabilities[current_probe] = CapabilityStatus.READ_ONLY.value
-                current_probe = ProviderCapability.ACCESS_POLICY_DISCOVERY.value
-                policies = await provider.policies(domain.native_id, PageRequest(limit=10))
-                capabilities[current_probe] = CapabilityStatus.READ_ONLY.value
-                current_probe = ProviderCapability.SECURITY_ZONE_READ.value
-                await provider.zones(domain.native_id, PageRequest(limit=1))
-                capabilities[current_probe] = CapabilityStatus.READ_ONLY.value
-                current_probe = ProviderCapability.NETWORK_OBJECT_READ.value
-                await provider.objects(domain.native_id, PageRequest(limit=1))
-                capabilities[current_probe] = CapabilityStatus.READ_ONLY.value
-                for policy in policies.items[:10]:
-                    current_probe = ProviderCapability.RULE_CATEGORY_READ.value
-                    await provider.categories(policy.native_id, PageRequest(limit=1))
-                    capabilities[current_probe] = CapabilityStatus.READ_ONLY.value
-                    current_probe = ProviderCapability.ACCESS_RULE_READ.value
-                    await provider.rules(policy.native_id, PageRequest(limit=1))
-                    capabilities[current_probe] = CapabilityStatus.READ_ONLY.value
+            if domain_page.items:
+                # Test representative endpoints rather than exhaustively enumerating every scope.
+                # Full pagination belongs to queued synchronization; the interactive test remains
+                # bounded and uses modest concurrency to tolerate high-latency SCC regions.
+                domain = domain_page.items[0]
+                domain_results = await self._run_probe_phase(
+                    capabilities,
+                    {
+                        ProviderCapability.DEVICE_DISCOVERY: provider.devices(
+                            domain.native_id, PageRequest(limit=1)
+                        ),
+                        ProviderCapability.ACCESS_POLICY_DISCOVERY: provider.policies(
+                            domain.native_id, PageRequest(limit=1)
+                        ),
+                        ProviderCapability.SECURITY_ZONE_READ: provider.zones(
+                            domain.native_id, PageRequest(limit=1)
+                        ),
+                        ProviderCapability.NETWORK_OBJECT_READ: provider.objects(
+                            domain.native_id, PageRequest(limit=1)
+                        ),
+                    },
+                )
+                policies = cast(
+                    "ProviderPage[DiscoveredPolicy]",
+                    domain_results[ProviderCapability.ACCESS_POLICY_DISCOVERY],
+                )
+                policy_items = policies.items
+                if policy_items:
+                    policy = policy_items[0]
+                    await self._run_probe_phase(
+                        capabilities,
+                        {
+                            ProviderCapability.RULE_CATEGORY_READ: provider.categories(
+                                policy.native_id, PageRequest(limit=1)
+                            ),
+                            ProviderCapability.ACCESS_RULE_READ: provider.rules(
+                                policy.native_id, PageRequest(limit=1)
+                            ),
+                        },
+                    )
             scopes = provider.compatibility_scopes(domain_page.items)
             result: dict[str, object] = {
                 "status": ProviderConnectionStatus.CONNECTED.value,
@@ -309,6 +347,24 @@ class ProviderConnectionService:
                 ),
                 "correlation_id": correlation_id,
             }
+        except _ProbeFailureError as failure:
+            current_probe = failure.capability.value
+            exc = failure.error
+            status = (
+                exc.code
+                if exc.code in {item.value for item in ProviderConnectionStatus}
+                else ProviderConnectionStatus.PROVIDER_UNAVAILABLE.value
+            )
+            result = {
+                "status": status,
+                "error_code": exc.code,
+                "safe_message": exc.safe_message,
+                "missing_capability": current_probe
+                if exc.code == "INSUFFICIENT_PRIVILEGES"
+                else None,
+                "correlation_id": correlation_id,
+            }
+            scopes = []
         except (ProviderError, ProviderConfigurationError) as exc:
             status = (
                 exc.code
@@ -325,6 +381,9 @@ class ProviderConnectionService:
                 "correlation_id": correlation_id,
             }
             scopes = []
+        finally:
+            if provider is not None:
+                await provider.aclose()
         saved = self._repository.record_connection_test(
             principal.organization_id,
             principal.user_id,
@@ -334,6 +393,32 @@ class ProviderConnectionService:
             scopes,
         )
         return {**result, "connection": self._public(saved)}
+
+    @staticmethod
+    async def _run_probe_phase(
+        capabilities: dict[str, str],
+        probes: dict[ProviderCapability, Awaitable[object]],
+    ) -> dict[ProviderCapability, object]:
+        async def run(
+            capability: ProviderCapability, operation: Awaitable[object]
+        ) -> tuple[ProviderCapability, object]:
+            try:
+                return capability, await operation
+            except (ProviderError, ProviderConfigurationError) as exc:
+                raise _ProbeFailureError(capability, exc) from exc
+
+        results = await asyncio.gather(
+            *(run(capability, operation) for capability, operation in probes.items()),
+            return_exceptions=True,
+        )
+        values: dict[ProviderCapability, object] = {}
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+            capability, value = result
+            capabilities[capability.value] = CapabilityStatus.READ_ONLY.value
+            values[capability] = value
+        return values
 
     def set_lifecycle(
         self,

@@ -72,14 +72,23 @@ async def _synchronize_provider_connection(connection_id: UUID) -> None:
                 for key, value in cast("dict[object, object]", raw_capabilities).items()
             }
             provider = build_real_provider(context, credential, capabilities)
-            result = await SynchronizationService(SqlSyncRepository(session)).synchronize(
-                manager_id, provider
-            )
+            try:
+                result = await SynchronizationService(SqlSyncRepository(session)).synchronize(
+                    manager_id, provider
+                )
+            finally:
+                await provider.aclose()
             error_code = None if result.status.value == "COMPLETED" else "PROVIDER_SYNC_FAILED"
             connections.mark_sync_finished(connection_id, result.status.value, error_code)
         except ApplicationError as exc:
             session.rollback()
             connections.mark_sync_finished(connection_id, "FAILED", exc.code)
+        except Exception:
+            # Preserve a terminal observable state even when an unexpected adapter/parser defect
+            # is re-raised for Dramatiq's bounded retry and traceback logging.
+            session.rollback()
+            connections.mark_sync_finished(connection_id, "FAILED", "PROVIDER_SYNC_FAILED")
+            raise
 
 
 @dramatiq.actor(max_retries=1, min_backoff=5000)

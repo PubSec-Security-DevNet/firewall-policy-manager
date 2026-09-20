@@ -462,9 +462,17 @@ class DiscoveredObject(NativeResource):
         object.__setattr__(self, "object_type", object_type)
         if object_type is FirewallObjectType.NETWORK and self.normalized_value:
             value = self.normalized_value
-            normalized = (
-                str(ip_network(value, strict=False)) if "/" in value else str(ip_address(value))
-            )
+            if value.count("-") == 1:
+                start_text, _separator, end_text = value.partition("-")
+                start = ip_address(start_text.strip())
+                end = ip_address(end_text.strip())
+                if start.version != end.version or int(start) > int(end):
+                    raise ValueError("network range endpoints must share a version and be ordered")
+                normalized = f"{start}-{end}"
+            else:
+                normalized = (
+                    str(ip_network(value, strict=False)) if "/" in value else str(ip_address(value))
+                )
             object.__setattr__(self, "normalized_value", normalized)
 
 

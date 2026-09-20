@@ -26,6 +26,35 @@ def test_network_object_values_are_canonicalized_with_ip_arithmetic() -> None:
     assert host.normalized_value == "2001:db8::1"
 
 
+def test_network_range_object_values_are_canonicalized() -> None:
+    address_range = DiscoveredObject(
+        native_id="provider-range",
+        name="Application range",
+        native_version="1",
+        fingerprint="range-fingerprint",
+        object_type=FirewallObjectType.NETWORK,
+        normalized_value="192.168.95.100 - 192.168.95.110",
+    )
+
+    assert address_range.normalized_value == "192.168.95.100-192.168.95.110"
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["192.168.95.110-192.168.95.100", "192.168.95.100-2001:db8::1"],
+)
+def test_invalid_network_range_object_value_is_rejected(value: str) -> None:
+    with pytest.raises(ValueError, match="range endpoints"):
+        DiscoveredObject(
+            native_id="provider-range",
+            name="Invalid range",
+            native_version="1",
+            fingerprint="range-fingerprint",
+            object_type=FirewallObjectType.NETWORK,
+            normalized_value=value,
+        )
+
+
 def test_invalid_network_object_value_is_rejected() -> None:
     with pytest.raises(ValueError, match="does not appear"):
         DiscoveredObject(

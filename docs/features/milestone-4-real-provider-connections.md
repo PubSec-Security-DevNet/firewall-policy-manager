@@ -17,9 +17,12 @@ Only an active platform `admin` may list or change connections. `firewall_admin`
 delegated roles are denied through the same current-user authorization service. Connections are
 created `DISABLED` and `NEVER_TESTED`; connection testing runs authentication, identity/version,
 domain/tenant, device, policy, category, rule, object, and zone reads through the runtime adapter.
-Only a `CONNECTED` connection may become `ACTIVE`. Credential or routing/TLS changes disable the
-connection and require retesting. Retirement is irreversible through the current API and preserves
-historical records.
+The interactive test checks one representative domain and policy with bounded concurrent reads;
+complete pagination and multi-domain enumeration belong to queued synchronization. A provider
+instance reuses one verified-TLS connection pool for the operation and is closed afterward. Only a
+`CONNECTED` connection may become `ACTIVE`. Credential or routing/TLS changes disable the connection
+and require retesting. Retirement is irreversible through the current API and preserves historical
+records.
 
 Manual sync writes a durable queue state before dispatch. A single scheduler actor claims bounded
 due batches; stale work for a disabled/retired connection exits without restarting it. The existing
@@ -32,6 +35,9 @@ FMC endpoints must be HTTPS origins without embedded credentials, paths, queries
 Known metadata, loopback, link-local, multicast, reserved, and unspecified targets are rejected,
 while legitimate RFC1918 FMC addresses are permitted. DNS is validated before authentication.
 System TLS verification or an explicit PEM CA bundle is mandatory; redirects are not followed.
+When the custom bundle includes the exact presented leaf, a legacy endpoint-name mismatch may use
+that leaf as an explicit SHA-256 identity pin after a credential-free TLS preflight. Issuing-CA
+trust alone never disables hostname validation, and every pinned response is fingerprint-checked.
 FMC source credentials obtain short-lived `X-auth` tokens, kept only in adapter memory, with one
 bounded re-authentication attempt on a rejected read token.
 
@@ -52,7 +58,15 @@ password, token, API-key, and authorization fields.
 
 The current encrypted-database adapter is replaceable by an external KMS/Vault implementation.
 Production requires `APP_SECRET_KEY` from a secret-management mechanism. Database contents and the
-master key must be protected independently.
+master key must be protected independently. In the current adapter the secret manager supplies the
+root key to every application process through deployment-time secret injection; it is not a
+vendor-specific runtime KMS client. Production startup rejects a missing or invalid key.
+
+`SECRET_STORE_KEY_VERSION` is ciphertext metadata, not an online keyring. Provider passwords,
+tokens, and CA material can be replaced through the supported write-only rotation flow, but the
+root key must not be changed until a reviewed old-key-to-new-key ciphertext migration tool/runbook
+exists. Backup and disaster recovery must preserve the database ciphertext and matching root key
+through separate controls. The complete operating procedure is in `docs/OPERATIONS.md`.
 
 ## Evidence and test boundary
 

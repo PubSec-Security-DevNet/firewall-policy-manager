@@ -441,6 +441,10 @@ class ConnectionTestProvider(FirewallProvider, Protocol):
 
     certificate_info: dict[str, str]
 
+    async def aclose(self) -> None:
+        """Release provider transport resources after one test or synchronization run."""
+        ...
+
     def compatibility_scopes(
         self, domains: tuple[DiscoveredDomain, ...]
     ) -> list[dict[str, str]]: ...
