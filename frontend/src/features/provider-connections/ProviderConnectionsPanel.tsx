@@ -1,4 +1,14 @@
 import { useCallback, useEffect, useState } from 'react';
+import {
+  IconActivityHeartbeat,
+  IconCloudCheck,
+  IconDatabase,
+  IconKey,
+  IconPlus,
+  IconRefresh,
+  IconSettings,
+  IconShieldCheck,
+} from '@tabler/icons-react';
 
 import {
   ApiError,
@@ -8,6 +18,7 @@ import {
   requestProviderSync,
   rotateProviderCredential,
   setProviderConnectionLifecycle,
+  setProviderConnectionWriteGate,
   testProviderConnection,
   updateProviderConnection,
   type ProviderConnection,
@@ -15,19 +26,25 @@ import {
 } from '../../api/client';
 import {
   AppAlert as Alert,
-  AppBadge as Badge,
+  AppActionButton as ActionButton,
   AppButton as Button,
   AppCard as Card,
+  AppDialog as Dialog,
   AppErrorState,
+  AppEmptyState,
   AppGroup as Group,
   AppLoadingState,
+  AppProviderBadge,
+  AppSection,
   AppSelect as Select,
   AppSimpleGrid as SimpleGrid,
   AppStack as Stack,
   AppText as Text,
   AppTextarea as Textarea,
   AppTextInput as TextInput,
-  AppTitle as Title,
+  AppStatusBadge,
+  AppThemeIcon as ThemeIcon,
+  MetricCard,
 } from '../../ui';
 
 type Provider = 'fmc' | 'scc';
@@ -49,6 +66,7 @@ const regions = [
 
 export function ProviderConnectionsPanel() {
   const [state, setState] = useState<State>({ status: 'loading' });
+  const [createOpened, setCreateOpened] = useState(false);
   const load = useCallback(() => {
     void loadProviderConnections()
       .then((connections) => setState({ status: 'ready', connections }))
@@ -60,30 +78,107 @@ export function ProviderConnectionsPanel() {
   if (state.status === 'error') {
     return <AppErrorState message={state.message} reference={state.correlationId} />;
   }
+  const connected = state.connections.filter(
+    (connection) => connection.connection_status === 'CONNECTED',
+  ).length;
+  const active = state.connections.filter((connection) => connection.lifecycle === 'ACTIVE').length;
+  const scopes = state.connections.reduce(
+    (total, connection) => total + connection.scopes.length,
+    0,
+  );
+  const attention = state.connections.filter(
+    (connection) =>
+      connection.last_error_message ||
+      connection.connection_status === 'FAILED' ||
+      connection.compatibility_warning,
+  ).length;
+
   return (
-    <section aria-labelledby="provider-connections-heading">
-      <Title id="provider-connections-heading" order={3} mb="sm">
-        Provider connections
-      </Title>
-      <Alert color="blue" mb="md">
-        Real FMC and SCC connections are structurally read-only. Credentials with broader provider
-        roles do not enable configuration writes.
-      </Alert>
-      {state.message && <Alert color="green">{state.message}</Alert>}
-      <ConnectionWizard onSaved={load} />
-      <Stack mt="lg">
-        {state.connections.length === 0 && (
-          <Text c="dimmed">No real providers are configured. Local mocks continue to operate.</Text>
-        )}
-        {state.connections.map((connection) => (
-          <ConnectionCard key={connection.id} connection={connection} onChanged={load} />
-        ))}
-      </Stack>
-    </section>
+    <Stack gap="lg">
+      <SimpleGrid cols={{ base: 1, sm: 2, lg: 4 }}>
+        <MetricCard
+          label="Connections"
+          value={state.connections.length}
+          detail={`${active} enabled for sync`}
+          icon={<IconDatabase size={19} />}
+        />
+        <MetricCard
+          label="Healthy"
+          value={connected}
+          detail="Latest test connected"
+          icon={<IconCloudCheck size={19} />}
+        />
+        <MetricCard
+          label="Discovered scopes"
+          value={scopes}
+          detail="Domains and tenants"
+          icon={<IconShieldCheck size={19} />}
+        />
+        <MetricCard
+          label="Needs attention"
+          value={attention}
+          detail={attention ? 'Review warnings or connection health' : 'No warnings or failures'}
+          icon={<IconActivityHeartbeat size={19} />}
+        />
+      </SimpleGrid>
+
+      <Card>
+        <AppSection
+          title="Provider connections"
+          description="Manage FMC and Security Cloud Control connectivity, synchronization, and production writes."
+          actions={
+            <Group gap="sm">
+              <AppStatusBadge
+                value="COUNT"
+                label={`${state.connections.length} ${state.connections.length === 1 ? 'connection' : 'connections'}`}
+              />
+              <Button leftSection={<IconPlus size={16} />} onClick={() => setCreateOpened(true)}>
+                Add Connection
+              </Button>
+            </Group>
+          }
+        >
+          {state.message && <Alert color="green">{state.message}</Alert>}
+          <Stack mt="lg" gap="md">
+            {state.connections.length === 0 && (
+              <AppEmptyState
+                title="No provider connections"
+                description="Add an FMC or Security Cloud Control connection to begin discovery."
+              />
+            )}
+            {state.connections.map((connection) => (
+              <ConnectionCard key={connection.id} connection={connection} onChanged={load} />
+            ))}
+          </Stack>
+        </AppSection>
+      </Card>
+
+      <Dialog
+        opened={createOpened}
+        onClose={() => setCreateOpened(false)}
+        title="Add Provider Connection"
+        closeButtonProps={{ 'aria-label': 'Close' }}
+        classNames={{
+          content: 'fm-management-modal',
+          header: 'fm-management-modal-header',
+          body: 'fm-management-modal-body',
+        }}
+        size="xl"
+        centered
+      >
+        <ConnectionWizard onSaved={load} onCompleted={() => setCreateOpened(false)} />
+      </Dialog>
+    </Stack>
   );
 }
 
-function ConnectionWizard({ onSaved }: { onSaved: () => void }) {
+function ConnectionWizard({
+  onSaved,
+  onCompleted,
+}: {
+  onSaved: () => void;
+  onCompleted?: () => void;
+}) {
   const [provider, setProvider] = useState<Provider>('fmc');
   const [guidance, setGuidance] = useState<ProviderGuidance | null>(null);
   const [displayName, setDisplayName] = useState('');
@@ -120,9 +215,10 @@ function ConnectionWizard({ onSaved }: { onSaved: () => void }) {
         : { provider_type: provider, display_name: displayName, region, token };
     void createProviderConnection(payload)
       .then(() => {
-        setMessage('Connection saved disabled. Test it before enabling synchronization.');
+        setMessage('Connection saved. Test it, then enable the connection when ready.');
         setDisplayName('');
         onSaved();
+        onCompleted?.();
       })
       .catch((error: unknown) => setMessage(errorMessage(error)))
       .finally(() => {
@@ -135,19 +231,24 @@ function ConnectionWizard({ onSaved }: { onSaved: () => void }) {
   };
 
   return (
-    <Card
-      withBorder
-      component="form"
-      onSubmit={(event) => {
+    <form
+      onSubmit={(event: React.FormEvent<HTMLFormElement>) => {
         event.preventDefault();
         submit();
       }}
     >
-      <Title order={4}>Add connection</Title>
-      <Text size="sm" c="dimmed">
-        1. Choose provider · 2. Connection details · 3. Credential · 4. TLS/region · 5. Least
-        privilege · 6. Save, test, then enable
-      </Text>
+      <div className="fm-provider-wizard-intro">
+        <ThemeIcon variant="light" color="blue" size="lg">
+          <IconKey size={19} />
+        </ThemeIcon>
+        <div>
+          <Text fw={700}>Connect a provider</Text>
+          <Text size="sm" c="dimmed">
+            Enter the endpoint and a least-privilege credential for the operations you intend to
+            allow. The connection remains disabled until it passes a connection test.
+          </Text>
+        </div>
+      </div>
       <SimpleGrid cols={{ base: 1, md: 2 }} mt="md">
         <Select
           label="Provider"
@@ -240,7 +341,7 @@ function ConnectionWizard({ onSaved }: { onSaved: () => void }) {
       >
         Save disabled connection
       </Button>
-    </Card>
+    </form>
   );
 }
 
@@ -288,6 +389,7 @@ function ConnectionCard({
   const [newRegion, setNewRegion] = useState<string | null>(connection.region);
   const [newTlsMode, setNewTlsMode] = useState<string | null>(connection.tls_mode);
   const [newSyncInterval, setNewSyncInterval] = useState(String(connection.sync_interval_minutes));
+  const [editing, setEditing] = useState(false);
 
   const run = (operation: () => Promise<unknown>, success: string) => {
     setBusy(true);
@@ -335,6 +437,21 @@ function ConnectionCard({
     (connection.provider_type === 'fmc'
       ? newEndpoint !== connection.base_endpoint || newTlsMode !== connection.tls_mode
       : newRegion !== connection.region);
+  const canEnableWrites =
+    connection.lifecycle === 'ACTIVE' && connection.connection_status === 'CONNECTED';
+  const toggleWrites = () => {
+    const confirmation =
+      `Enable production configuration writes for ${connection.display_name} (${connection.provider_type.toUpperCase()})? ` +
+      (connection.compatibility_warning ? `${connection.compatibility_warning} ` : '') +
+      'All writes still require a reviewed ChangeSet and backend authorization. This does not deploy changes.';
+    if (!connection.write_enabled && !window.confirm(confirmation)) return;
+    run(
+      () => setProviderConnectionWriteGate(connection, !connection.write_enabled),
+      connection.write_enabled
+        ? 'Provider writes disabled.'
+        : 'Production provider writes enabled.',
+    );
+  };
   const retire = () => {
     if (!window.confirm('Retire this connection? Historical inventory and audit records remain.'))
       return;
@@ -342,45 +459,55 @@ function ConnectionCard({
   };
 
   return (
-    <Card withBorder>
-      <Group justify="space-between" align="start">
-        <div>
-          <Title order={4}>{connection.display_name}</Title>
-          <Text size="sm" c="dimmed">
-            {connection.provider_type.toUpperCase()} ·{' '}
-            {connection.provider_version ?? 'Version not discovered'} · evidence: real · writable:
-            false
-          </Text>
-        </div>
-        <Group>
-          <Badge>{connection.lifecycle}</Badge>
-          <Badge color={statusColor(connection.connection_status)}>
-            {connection.connection_status.replaceAll('_', ' ')}
-          </Badge>
+    <Card className="fm-provider-card">
+      <div className="fm-provider-card-head">
+        <Group align="center" gap="sm" wrap="nowrap">
+          <ThemeIcon className="fm-provider-mark" variant="light" color="blue" size="xl">
+            <IconDatabase size={21} />
+          </ThemeIcon>
+          <div className="fm-provider-title">
+            <Group gap="xs">
+              <AppProviderBadge provider={connection.provider_type} />
+              <Text fw={700} size="lg">
+                {connection.display_name}
+              </Text>
+            </Group>
+            <Text size="xs" c="dimmed">
+              {connection.provider_version ?? 'Version not discovered'} · Real provider
+            </Text>
+          </div>
         </Group>
-      </Group>
-      <SimpleGrid cols={{ base: 1, md: 3 }} mt="md">
-        <Text size="sm">
-          <b>Endpoint/region:</b> {connection.region ?? connection.base_endpoint}
-        </Text>
-        <Text size="sm">
-          <b>Last successful test:</b> {formatDate(connection.last_successful_connection)}
-        </Text>
-        <Text size="sm">
-          <b>Last successful sync:</b> {formatDate(connection.last_successful_sync)}
-        </Text>
-        <Text size="sm">
-          <b>Credential:</b> configured{' '}
-          {connection.credential_username ? `for ${connection.credential_username}` : ''}; updated{' '}
-          {formatDate(connection.credential_updated_at)}
-        </Text>
-        <Text size="sm">
-          <b>Sync:</b> {connection.sync_status ?? 'Never synchronized'}
-        </Text>
-        <Text size="sm">
-          <b>TLS:</b> {connection.tls_mode}
-        </Text>
-      </SimpleGrid>
+        <Group gap="xs" className="fm-provider-statuses">
+          <AppStatusBadge value={connection.lifecycle} />
+          <AppStatusBadge value={connection.connection_status} />
+          {connection.compatibility_warning && (
+            <AppStatusBadge value="WARNING" label="Version untested" />
+          )}
+          <AppStatusBadge
+            value={connection.write_enabled ? 'WRITE_ENABLED' : 'READ_ONLY'}
+            label={connection.write_enabled ? 'Production writes enabled' : 'Read only'}
+          />
+        </Group>
+      </div>
+
+      <div className="fm-provider-facts">
+        <ProviderFact
+          label="Endpoint / region"
+          value={connection.region ?? connection.base_endpoint ?? 'Not configured'}
+        />
+        <ProviderFact
+          label="Last successful test"
+          value={formatDate(connection.last_successful_connection)}
+        />
+        <ProviderFact
+          label="Last successful sync"
+          value={formatDate(connection.last_successful_sync)}
+        />
+        <ProviderFact
+          label="Sync schedule"
+          value={`Every ${connection.sync_interval_minutes} minutes`}
+        />
+      </div>
       {connection.last_error_message && (
         <Alert color="red" mt="sm">
           {connection.last_error_message}{' '}
@@ -389,76 +516,98 @@ function ConnectionCard({
             : ''}
         </Alert>
       )}
-      {Object.keys(connection.certificate_info).length > 0 && (
-        <Text size="sm" mt="sm">
-          Certificate: {connection.certificate_info.subject} · issuer{' '}
-          {connection.certificate_info.issuer} · SHA-256{' '}
-          {connection.certificate_info.sha256_fingerprint} · valid{' '}
-          {connection.certificate_info.not_valid_before} to{' '}
-          {connection.certificate_info.not_valid_after}
-        </Text>
+      {connection.compatibility_warning && (
+        <Alert color="yellow" mt="sm" title="Untested provider version">
+          {connection.compatibility_warning}
+        </Alert>
       )}
-      <Text size="sm" mt="sm">
-        <b>Domains/tenants:</b>{' '}
-        {connection.scopes.map((scope) => `${scope.name} (${scope.scope_type})`).join(', ') ||
-          'None discovered'}
-      </Text>
-      <Text size="sm">
-        <b>Tested reads:</b>{' '}
-        {connection.capability_evidence
-          .filter((item) => item.evidence_level === 'TESTED')
-          .map((item) => item.capability)
-          .join(', ') || 'None'}
-      </Text>
-      <Group mt="md">
-        <Button
-          variant="outline"
-          loading={busy}
-          onClick={() =>
-            run(() => testProviderConnection(connection.id), 'Connection test completed.')
-          }
-        >
-          Test connection
-        </Button>
-        {connection.lifecycle === 'ACTIVE' ? (
-          <Button
-            variant="outline"
+      <div className="fm-provider-discovery">
+        <ProviderTokens
+          label="Domains and tenants"
+          values={connection.scopes.map((scope) => scope.name)}
+          empty="No scopes discovered"
+        />
+      </div>
+
+      <div className="fm-provider-actions">
+        <Group gap="xs" wrap="wrap">
+          <ActionButton
+            intent="secondary"
+            leftSection={<IconActivityHeartbeat size={14} />}
+            loading={busy}
             onClick={() =>
-              run(
-                () => setProviderConnectionLifecycle(connection, 'DISABLED'),
-                'Connection disabled.',
-              )
+              run(() => testProviderConnection(connection.id), 'Connection test completed.')
             }
           >
-            Disable
-          </Button>
-        ) : connection.lifecycle !== 'RETIRED' ? (
-          <Button
-            disabled={connection.connection_status !== 'CONNECTED'}
-            onClick={() =>
-              run(() => setProviderConnectionLifecycle(connection, 'ACTIVE'), 'Connection enabled.')
-            }
+            Test connection
+          </ActionButton>
+          <ActionButton
+            intent={connection.write_enabled ? 'quiet-danger' : 'secondary'}
+            disabled={!connection.write_enabled && !canEnableWrites}
+            loading={busy}
+            onClick={toggleWrites}
           >
-            Enable
-          </Button>
-        ) : null}
-        <Button
-          variant="outline"
-          disabled={connection.lifecycle !== 'ACTIVE'}
-          onClick={() => run(() => requestProviderSync(connection.id), 'Read-only sync queued.')}
-        >
-          Sync now
-        </Button>
-        {connection.lifecycle !== 'RETIRED' && (
-          <Button color="red" variant="outline" onClick={retire}>
-            Retire
-          </Button>
-        )}
-      </Group>
-      {connection.lifecycle !== 'RETIRED' && (
-        <SimpleGrid cols={{ base: 1, md: 2 }} mt="md">
-          <Card withBorder>
-            <Text fw={700}>Edit non-secret configuration</Text>
+            {connection.write_enabled ? 'Return to read-only' : 'Enable production writes'}
+          </ActionButton>
+          {connection.lifecycle === 'ACTIVE' ? (
+            <ActionButton
+              intent="quiet-danger"
+              onClick={() =>
+                run(
+                  () => setProviderConnectionLifecycle(connection, 'DISABLED'),
+                  'Connection disabled.',
+                )
+              }
+            >
+              Disable
+            </ActionButton>
+          ) : connection.lifecycle !== 'RETIRED' ? (
+            <ActionButton
+              intent="success"
+              disabled={connection.connection_status !== 'CONNECTED'}
+              onClick={() =>
+                run(
+                  () => setProviderConnectionLifecycle(connection, 'ACTIVE'),
+                  'Connection enabled.',
+                )
+              }
+            >
+              Enable
+            </ActionButton>
+          ) : null}
+          <ActionButton
+            intent="secondary"
+            leftSection={<IconRefresh size={14} />}
+            disabled={connection.lifecycle !== 'ACTIVE'}
+            onClick={() => run(() => requestProviderSync(connection.id), 'Sync queued.')}
+          >
+            Sync now
+          </ActionButton>
+        </Group>
+        <Group gap="xs" wrap="wrap">
+          {connection.lifecycle !== 'RETIRED' && (
+            <ActionButton
+              intent="quiet"
+              leftSection={<IconSettings size={14} />}
+              onClick={() => setEditing((value) => !value)}
+            >
+              {editing ? 'Close settings' : 'Edit connection'}
+            </ActionButton>
+          )}
+          {connection.lifecycle !== 'RETIRED' && (
+            <ActionButton intent="danger" onClick={retire}>
+              Retire
+            </ActionButton>
+          )}
+        </Group>
+      </div>
+      {connection.lifecycle !== 'RETIRED' && editing && (
+        <SimpleGrid className="fm-provider-settings" cols={{ base: 1, md: 2 }}>
+          <div className="fm-provider-settings-panel">
+            <Text fw={700}>Connection settings</Text>
+            <Text size="xs" c="dimmed" mb="sm">
+              Update discovery and synchronization configuration.
+            </Text>
             <TextInput
               label="Display name"
               value={newName}
@@ -497,12 +646,15 @@ function ConnectionCard({
               value={newSyncInterval}
               onChange={(event) => setNewSyncInterval(event.currentTarget.value)}
             />
-            <Button size="xs" mt="sm" disabled={!configurationChanged} onClick={saveConfiguration}>
+            <Button mt="sm" disabled={!configurationChanged} onClick={saveConfiguration}>
               Save configuration
             </Button>
-          </Card>
-          <Card withBorder>
-            <Text fw={700}>Update credentials</Text>
+          </div>
+          <div className="fm-provider-settings-panel">
+            <Text fw={700}>Credential rotation</Text>
+            <Text size="xs" c="dimmed" mb="sm">
+              Replace the stored secret, then test the connection again.
+            </Text>
             {connection.provider_type === 'fmc' && (
               <TextInput
                 label="Username"
@@ -525,10 +677,10 @@ function ConnectionCard({
                 minRows={3}
               />
             )}
-            <Button size="xs" mt="sm" disabled={!replacement} onClick={rotate}>
+            <Button mt="sm" disabled={!replacement} onClick={rotate}>
               Replace credential
             </Button>
-          </Card>
+          </div>
         </SimpleGrid>
       )}
       {message && (
@@ -540,11 +692,52 @@ function ConnectionCard({
   );
 }
 
+function ProviderFact({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="fm-provider-fact">
+      <Text size="10px" c="dimmed" tt="uppercase" fw={700} lts=".06em">
+        {label}
+      </Text>
+      <Text size="sm" fw={650} mt={5} lineClamp={2} title={value}>
+        {value}
+      </Text>
+    </div>
+  );
+}
+
+function ProviderTokens({
+  label,
+  values,
+  empty,
+}: {
+  label: string;
+  values: string[];
+  empty: string;
+}) {
+  return (
+    <div>
+      <Text size="10px" c="dimmed" tt="uppercase" fw={700} lts=".06em" mb={7}>
+        {label}
+      </Text>
+      <div className="fm-provider-tokens">
+        {values.length ? (
+          values.map((value) => (
+            <span className="fm-provider-token" key={value}>
+              {value}
+            </span>
+          ))
+        ) : (
+          <Text size="xs" c="dimmed">
+            {empty}
+          </Text>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function formatDate(value: string | null) {
   return value ? new Date(value).toLocaleString() : 'Never';
-}
-function statusColor(value: string) {
-  return value === 'CONNECTED' ? 'green' : value === 'NEVER_TESTED' ? 'gray' : 'red';
 }
 function errorMessage(error: unknown) {
   return error instanceof ApiError

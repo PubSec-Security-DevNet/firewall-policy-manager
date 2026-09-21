@@ -73,7 +73,9 @@ def test_provider_capability_document_separates_mock_and_real_evidence() -> None
         assert mock["rule_ordering"] is CapabilityStatus.SUPPORTED
         assert mock["application_object_create"] is CapabilityStatus.PARTIAL
         assert real["access_rule_read"] is CapabilityStatus.NOT_STARTED
-        assert real["access_rule_create"] is CapabilityStatus.NOT_STARTED
+        assert real["access_rule_create"] is CapabilityStatus.PARTIAL
+        assert real["pending_change_inspection"] is CapabilityStatus.PARTIAL
+        assert real["application_object_create"] is CapabilityStatus.NOT_STARTED
         assert CapabilityStatus.SUPPORTED not in real.values()
 
 

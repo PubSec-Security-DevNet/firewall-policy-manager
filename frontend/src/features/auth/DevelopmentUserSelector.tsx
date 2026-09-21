@@ -8,7 +8,7 @@ import {
 } from '../../api/client';
 import { AppSelect as Select } from '../../ui';
 
-export function DevelopmentUserSelector() {
+export function DevelopmentUserSelector({ compact = false }: { compact?: boolean }) {
   const [identities, setIdentities] = useState<DevelopmentIdentity[]>([]);
 
   useEffect(() => {
@@ -29,7 +29,13 @@ export function DevelopmentUserSelector() {
   return (
     <Select
       aria-label="Development user"
-      w={260}
+      description={compact ? undefined : 'DEV USER'}
+      leftSection={
+        compact ? (
+          <span style={{ fontSize: 9, fontWeight: 800, color: 'var(--fm-warning)' }}>DEV</span>
+        ) : undefined
+      }
+      w={compact ? 250 : 260}
       value={getDevelopmentUser()}
       onChange={(email) => {
         if (email) switchDevelopmentUser(email);

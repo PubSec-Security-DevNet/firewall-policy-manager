@@ -129,11 +129,11 @@ Creation UI and APIs are available only when the current provider/version advert
 support. Provider-specific name character/length restrictions are supplied through the provider
 boundary; application naming is centralized rather than reimplemented in pages/adapters.
 
-Before creation, the application checks normalized equivalence across provider inventory. Network
-and host comparisons use canonical address/network values; services use protocol plus port/range;
-URLs and application/filter definitions use type-appropriate canonical forms. If an equivalent
-object exists but is not authorized for USE, return an authorization/conflict result for
-administrator resolution. Never silently grant access or create a duplicate.
+Before creation, the application canonicalizes the value for validation and comparison. Creation
+is namespaced by the active Group: an existing object with the same canonical value but a different
+name does not override the requested Group-owned object. An exact prefixed-name match with the same
+content may be reused only with USE access; the same prefixed name with different content is an
+explicit conflict.
 
 Delegated-created objects belong to the active Group and use its immutable provider slug:
 
@@ -185,8 +185,8 @@ Within-scope references may permit modification, but any outside or unknown blas
 safely. Delete requires an unreferenced object; ownership never permits deleting a referenced
 object. The mock provider independently rejects referenced deletion as defense in depth.
 
-Equivalence is rechecked for mutation. Neither creation nor modification may manufacture a
-duplicate to bypass another object's missing USE grant.
+Equivalence is rechecked for mutation. Creation may use the same canonical value under a distinct
+Group-prefixed name; modification cannot silently replace or adopt another object.
 
 ## IP-range authorization
 

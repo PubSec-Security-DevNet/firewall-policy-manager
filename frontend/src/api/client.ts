@@ -78,6 +78,12 @@ export interface ProviderConnection {
   last_error_correlation_id: string | null;
   certificate_info: Record<string, string>;
   sync_interval_minutes: number;
+  write_enabled: boolean;
+  write_validation_mode: boolean;
+  version_family_tested: boolean;
+  compatibility_warning: string | null;
+  write_enabled_at: string | null;
+  write_enabled_by_user_id: string | null;
   scopes: ProviderConnectionScope[];
   capability_evidence: ProviderCapabilityEvidence[];
   revision: number;
@@ -98,6 +104,9 @@ export function getDevelopmentUser(): string {
 
 export function switchDevelopmentUser(email: string): void {
   window.sessionStorage.setItem(developmentUserKey, email);
+  Object.keys(window.sessionStorage)
+    .filter((key) => key.startsWith('firewall-manager.active-context.'))
+    .forEach((key) => window.sessionStorage.removeItem(key));
   // A navigation is the cache boundary: Group selection and all user-specific React state die here.
   window.location.reload();
 }
@@ -179,6 +188,25 @@ export async function setProviderConnectionLifecycle(
   );
 }
 
+export async function setProviderConnectionWriteGate(
+  connection: ProviderConnection,
+  enabled: boolean,
+  allowUnvalidatedNonProduction = false,
+): Promise<ProviderConnection> {
+  return request<ProviderConnection>(
+    `/api/v1/admin/provider-connections/${encodeURIComponent(connection.id)}/write-gate`,
+    {
+      method: 'PUT',
+      body: JSON.stringify({
+        expected_revision: connection.revision,
+        enabled,
+        acknowledge_configuration_mutation: enabled,
+        acknowledge_unvalidated_non_production_writes: enabled && allowUnvalidatedNonProduction,
+      }),
+    },
+  );
+}
+
 export async function requestProviderSync(connectionId: string): Promise<void> {
   await request(`/api/v1/admin/provider-connections/${encodeURIComponent(connectionId)}/sync`, {
     method: 'POST',
@@ -227,6 +255,16 @@ export async function loadDelegatedContext(
   );
 }
 
+export async function setDefaultDelegatedContext(
+  groupId: string,
+  policyId: string,
+): Promise<{ group_id: string; policy_id: string }> {
+  return request('/api/v1/session/default-context', {
+    method: 'PUT',
+    body: JSON.stringify({ group_id: groupId, policy_id: policyId }),
+  });
+}
+
 export async function loadAdministration(): Promise<AdministrationSnapshot> {
   return get<AdministrationSnapshot>('/api/v1/admin/authorization');
 }
@@ -262,6 +300,20 @@ export async function updateAdministrativeEnabled(
     {
       method: 'PATCH',
       body: JSON.stringify({ enabled, expected_revision: expectedRevision }),
+    },
+  );
+}
+
+export async function updateAdministrativeUserRole(
+  userId: string,
+  role: string,
+  expectedRevision: number,
+): Promise<Record<string, unknown>> {
+  return request<Record<string, unknown>>(
+    `/api/v1/admin/users/${encodeURIComponent(userId)}/role`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify({ role, expected_revision: expectedRevision }),
     },
   );
 }
@@ -304,12 +356,27 @@ export async function addDraftRule(
   changeSetId: string,
   activeGroupId: string,
   rule: Record<string, unknown>,
+  kind: 'CREATE_RULE' | 'MODIFY_RULE' | 'DELETE_RULE' | 'MOVE_RULE' = 'CREATE_RULE',
 ): Promise<ChangeSet> {
   return request<ChangeSet>(
     `/api/v1/changesets/${encodeURIComponent(changeSetId)}/operations/rules`,
     {
       method: 'POST',
-      body: JSON.stringify({ active_group_id: activeGroupId, kind: 'CREATE_RULE', rule }),
+      body: JSON.stringify({ active_group_id: activeGroupId, kind, rule }),
+    },
+  );
+}
+
+export async function addDraftCategory(
+  changeSetId: string,
+  activeGroupId: string,
+  policyId: string,
+): Promise<ChangeSet> {
+  return request<ChangeSet>(
+    `/api/v1/changesets/${encodeURIComponent(changeSetId)}/operations/categories`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ active_group_id: activeGroupId, policy_id: policyId }),
     },
   );
 }
@@ -331,7 +398,7 @@ export async function addDraftObject(
 export async function changeSetAction(
   changeSetId: string,
   activeGroupId: string,
-  action: 'preflight' | 'refresh' | 'execute' | 'cancel',
+  action: 'preflight' | 'refresh' | 'execute' | 'retry' | 'cancel',
 ): Promise<ChangeSet> {
   return request<ChangeSet>(`/api/v1/changesets/${encodeURIComponent(changeSetId)}/${action}`, {
     method: 'POST',

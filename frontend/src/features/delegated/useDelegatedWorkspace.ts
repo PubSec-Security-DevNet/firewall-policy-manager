@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import {
   ApiError,
@@ -26,10 +26,18 @@ type WorkspaceState =
     }
   | { status: 'error'; activeGroupId: string; message: string; correlationId?: string };
 
-export function useDelegatedWorkspace(groups: ActiveGroup[]) {
-  const initialGroupId = groups.length === 1 ? (groups[0]?.id ?? '') : '';
+export function useDelegatedWorkspace(
+  groups: ActiveGroup[],
+  preferredGroupId?: string,
+  preferredPolicyId?: string,
+) {
+  const initialGroupId = groups.some((group) => group.id === preferredGroupId)
+    ? (preferredGroupId ?? '')
+    : (groups[0]?.id ?? '');
   const [activeGroupId, setActiveGroupId] = useState(initialGroupId);
-  const [activePolicyId, setActivePolicyId] = useState('');
+  const [activePolicyId, setActivePolicyId] = useState(preferredPolicyId ?? '');
+  const requestedPolicyId = useRef(preferredPolicyId ?? '');
+  const requestGeneration = useRef(0);
   const [state, setState] = useState<WorkspaceState>(
     initialGroupId
       ? { status: 'loading', activeGroupId: initialGroupId, policies: [] }
@@ -40,10 +48,11 @@ export function useDelegatedWorkspace(groups: ActiveGroup[]) {
 
   useEffect(() => {
     if (!activeGroupId) return;
+    const generation = ++requestGeneration.current;
     let current = true;
     void loadDelegatedPolicies(activeGroupId)
       .then((policies) => {
-        if (!current) return;
+        if (!current || generation !== requestGeneration.current) return;
         if (policies.length === 0) {
           setState({
             status: 'unavailable',
@@ -51,11 +60,19 @@ export function useDelegatedWorkspace(groups: ActiveGroup[]) {
           });
           return;
         }
-        const policyId = policies[0]?.id;
+        const policyId = policies.some((policy) => policy.id === requestedPolicyId.current)
+          ? requestedPolicyId.current
+          : policies[0]?.id;
         if (!policyId) return;
         setActivePolicyId(policyId);
+        setState({
+          status: 'loading',
+          activeGroupId,
+          activePolicyId: policyId,
+          policies,
+        });
         return loadDelegatedContext(activeGroupId, policyId).then((context) => {
-          if (current) {
+          if (current && generation === requestGeneration.current) {
             setState({
               status: 'ready',
               activeGroupId,
@@ -67,7 +84,7 @@ export function useDelegatedWorkspace(groups: ActiveGroup[]) {
         });
       })
       .catch((error: unknown) => {
-        if (!current) return;
+        if (!current || generation !== requestGeneration.current) return;
         setState(errorState(activeGroupId, error));
       });
     return () => {
@@ -75,9 +92,43 @@ export function useDelegatedWorkspace(groups: ActiveGroup[]) {
     };
   }, [activeGroupId]);
 
+  useEffect(() => {
+    if (!activeGroupId || !activePolicyId) return;
+    let current = true;
+    let refreshing = false;
+    const refresh = () => {
+      if (refreshing) return;
+      refreshing = true;
+      void loadDelegatedContext(activeGroupId, activePolicyId)
+        .then((context) => {
+          if (!current) return;
+          setState((existing) =>
+            existing.status === 'ready' &&
+            existing.activeGroupId === activeGroupId &&
+            existing.activePolicyId === activePolicyId
+              ? { ...existing, context }
+              : existing,
+          );
+        })
+        .catch(() => {
+          // Keep the last usable inventory during a transient refresh failure.
+        })
+        .finally(() => {
+          refreshing = false;
+        });
+    };
+    const timer = window.setInterval(refresh, 3_000);
+    return () => {
+      current = false;
+      window.clearInterval(timer);
+    };
+  }, [activeGroupId, activePolicyId]);
+
   const selectGroup = (groupId: string) => {
     // Clear every resource from the previous Group before loading the next context.
+    requestGeneration.current += 1;
     setActiveGroupId(groupId);
+    requestedPolicyId.current = '';
     setActivePolicyId('');
     setState(
       groupId
@@ -86,8 +137,10 @@ export function useDelegatedWorkspace(groups: ActiveGroup[]) {
     );
   };
   const selectPolicy = (policyId: string) => {
+    requestedPolicyId.current = policyId;
     setActivePolicyId(policyId);
     if (state.status === 'ready' && policyId) {
+      const generation = ++requestGeneration.current;
       const policies = state.policies;
       setState({
         status: 'loading',
@@ -97,6 +150,7 @@ export function useDelegatedWorkspace(groups: ActiveGroup[]) {
       });
       void loadDelegatedContext(activeGroupId, policyId)
         .then((context) => {
+          if (generation !== requestGeneration.current) return;
           setState({
             status: 'ready',
             activeGroupId,
@@ -105,8 +159,26 @@ export function useDelegatedWorkspace(groups: ActiveGroup[]) {
             context,
           });
         })
-        .catch((error: unknown) => setState(errorState(activeGroupId, error)));
+        .catch((error: unknown) => {
+          if (generation === requestGeneration.current) setState(errorState(activeGroupId, error));
+        });
     }
+  };
+  const activateMapping = (groupId: string, policyId: string) => {
+    requestedPolicyId.current = policyId;
+    requestGeneration.current += 1;
+    setActivePolicyId(policyId);
+    if (groupId !== activeGroupId) {
+      setActiveGroupId(groupId);
+      setState({
+        status: 'loading',
+        activeGroupId: groupId,
+        activePolicyId: policyId,
+        policies: [],
+      });
+      return;
+    }
+    selectPolicy(policyId);
   };
   return {
     state,
@@ -114,6 +186,7 @@ export function useDelegatedWorkspace(groups: ActiveGroup[]) {
     activePolicyId,
     setActiveGroupId: selectGroup,
     setActivePolicyId: selectPolicy,
+    activateMapping,
   };
 }
 

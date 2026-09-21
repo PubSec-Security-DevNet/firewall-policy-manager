@@ -1,4 +1,4 @@
-"""Shared, configuration-read-only Cisco FMC/cdFMC REST implementation."""
+"""Shared Cisco FMC/cdFMC REST implementation with an explicit write gate."""
 
 import asyncio
 import hashlib
@@ -10,6 +10,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any, cast
 from urllib.parse import urlsplit, urlunsplit
+from uuid import UUID
 
 import httpx
 from cryptography import x509
@@ -20,6 +21,7 @@ from firewall_manager.application.errors import (
     ProviderAuthenticationError,
     ProviderConfigurationError,
     ProviderContractError,
+    ProviderError,
     ProviderPermissionError,
     ProviderRateLimitedError,
     ProviderTlsValidationError,
@@ -27,6 +29,7 @@ from firewall_manager.application.errors import (
 )
 from firewall_manager.domain.models import (
     CapabilityStatus,
+    ChangeOperationKind,
     DiscoveredCategory,
     DiscoveredDevice,
     DiscoveredDomain,
@@ -37,14 +40,21 @@ from firewall_manager.domain.models import (
     DiscoveredZone,
     DiscoveredZoneReference,
     FirewallObjectType,
+    OperationStatus,
     PageRequest,
+    ProviderCapability,
     ProviderEvidenceProfile,
     ProviderInfo,
     ProviderInventory,
     ProviderKind,
     ProviderPage,
+    ProviderTransactionState,
     RuleObjectElement,
     ZoneElement,
+)
+from firewall_manager.providers.transactions import (
+    ProviderExecutionResult,
+    real_transaction_operation_id,
 )
 
 SCC_ENDPOINTS: Mapping[str, str] = {
@@ -74,6 +84,23 @@ _OBJECT_ENDPOINTS: tuple[tuple[str, FirewallObjectType], ...] = (
     ("protocolportobjects", FirewallObjectType.PORT_SERVICE),
     ("urls", FirewallObjectType.URL),
 )
+
+
+class _ProviderMutationConflictError(Exception):
+    """A provider-side state or capability conflict known to be non-mutating."""
+
+    def __init__(self, code: str, details: Mapping[str, object] | None = None) -> None:
+        self.code = code
+        self.details = dict(details or {})
+        super().__init__(code)
+
+
+class _AmbiguousMutationError(Exception):
+    """The request may have reached the provider and must not be retried blindly."""
+
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
 
 
 def normalize_fmc_endpoint(value: str) -> str:
@@ -195,7 +222,7 @@ def _objects(container: object) -> list[Mapping[str, Any]]:
 
 
 class CiscoReadOnlyProvider:
-    """Normalized FMC-compatible reader with an operation-layer write safety envelope."""
+    """Normalized Cisco provider with connection-specific, default-deny writes."""
 
     kind: ProviderKind
 
@@ -212,6 +239,7 @@ class CiscoReadOnlyProvider:
         ca_certificate: str | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
         validate_network_target: bool = True,
+        writable: bool = False,
     ) -> None:
         self._endpoint = endpoint.rstrip("/")
         self._display_name = display_name
@@ -223,6 +251,7 @@ class CiscoReadOnlyProvider:
         self._transport = transport
         self._validate_network_target = validate_network_target
         self._target_validated = False
+        self._writable = writable
         self._access_token: str | None = None
         self._refresh_token: str | None = None
         self._policy_domains: dict[str, str] = {}
@@ -269,7 +298,7 @@ class CiscoReadOnlyProvider:
             provider_version=version,
             capabilities=self._capabilities,
             evidence_profile=ProviderEvidenceProfile.REAL,
-            writable=False,
+            writable=self._writable,
         )
 
     async def discover(self) -> ProviderInventory:
@@ -287,7 +316,7 @@ class CiscoReadOnlyProvider:
             info.provider_version,
             policy_count,
             object_count,
-            False,
+            self._writable,
         )
 
     async def domains(self, page: PageRequest) -> ProviderPage[DiscoveredDomain]:
@@ -425,6 +454,744 @@ class CiscoReadOnlyProvider:
             ),
             next_cursor,
         )
+
+    async def execute_transaction(  # noqa: PLR0912, PLR0915 -- explicit provider outcome mapping
+        self,
+        change_set_id: UUID,
+        manager_id: UUID,
+        operations: list[dict[str, object]],
+    ) -> ProviderExecutionResult:
+        """Execute one already-authorized normalized transaction without unsafe retries."""
+        if not self._writable:
+            raise ProductionWriteDisabledError
+        transaction_id = real_transaction_operation_id(change_set_id, manager_id)
+        results: list[dict[str, object]] = []
+        checked_pending_scopes: set[tuple[str, str]] = set()
+        checked_move_categories: set[tuple[str, str, str]] = set()
+        resolved_categories: dict[str, str] = {}
+        mutation_seen = False
+        ambiguous = False
+        for operation in operations:
+            operation_id = str(operation.get("id", ""))
+            operation_warnings: list[dict[str, object]] = []
+            if ambiguous:
+                results.append(self._operation_result(operation_id, OperationStatus.NOT_ATTEMPTED))
+                continue
+            try:
+                payload = operation.get("provider_payload")
+                if not isinstance(payload, dict):
+                    raise ProviderContractError
+                typed_payload = cast("dict[str, object]", payload)
+                category_name = typed_payload.get("category_provider_name")
+                if category_name and not typed_payload.get("category_native_id"):
+                    native_category = resolved_categories.get(str(category_name))
+                    if native_category:
+                        typed_payload = {**typed_payload, "category_native_id": native_category}
+                kind = ChangeOperationKind(str(operation["kind"]))
+                if kind is ChangeOperationKind.MOVE_RULE and typed_payload.get(
+                    "category_native_id"
+                ):
+                    category_scope = (
+                        str(typed_payload.get("domain_native_id", "")),
+                        str(typed_payload.get("policy_native_id", "")),
+                        str(typed_payload["category_native_id"]),
+                    )
+                    if category_scope in checked_move_categories:
+                        typed_payload = {**typed_payload, "expected_category_version": None}
+                    else:
+                        checked_move_categories.add(category_scope)
+                if (
+                    kind is ChangeOperationKind.CREATE_RULE
+                    and category_name
+                    and not typed_payload.get("category_native_id")
+                ):
+                    results.append(
+                        self._operation_result(
+                            operation_id,
+                            OperationStatus.NOT_ATTEMPTED,
+                            failure={"code": "CATEGORY_DEPENDENCY_FAILED", "retry_safe": True},
+                        )
+                    )
+                    continue
+                resource, mutated = await self._execute_operation(
+                    kind,
+                    typed_payload,
+                    checked_pending_scopes,
+                    operation_warnings,
+                )
+                if kind is ChangeOperationKind.ENSURE_RULE_CATEGORY:
+                    provider_name = typed_payload.get("provider_name")
+                    native_id = resource.get("native_id")
+                    if provider_name and native_id:
+                        resolved_categories[str(provider_name)] = str(native_id)
+                mutation_seen = mutation_seen or mutated
+                results.append(
+                    self._operation_result(
+                        operation_id,
+                        OperationStatus.SUCCEEDED,
+                        mutated=mutated,
+                        resource=resource,
+                        warnings=operation_warnings,
+                    )
+                )
+            except _AmbiguousMutationError as exc:
+                ambiguous = True
+                results.append(
+                    self._operation_result(
+                        operation_id,
+                        OperationStatus.AMBIGUOUS,
+                        mutated="unknown",
+                        failure={
+                            "code": exc.code,
+                            "retry_safe": False,
+                            "reconciliation_required": True,
+                        },
+                        warnings=operation_warnings,
+                    )
+                )
+            except _ProviderMutationConflictError as exc:
+                results.append(
+                    self._operation_result(
+                        operation_id,
+                        OperationStatus.CONFLICT,
+                        failure={
+                            "code": exc.code,
+                            "retry_safe": False,
+                            **exc.details,
+                        },
+                        warnings=operation_warnings,
+                    )
+                )
+            except ProviderError as exc:
+                results.append(
+                    self._operation_result(
+                        operation_id,
+                        OperationStatus.FAILED,
+                        failure={"code": exc.code, "retry_safe": False},
+                        warnings=operation_warnings,
+                    )
+                )
+            except (KeyError, TypeError, ValueError):
+                results.append(
+                    self._operation_result(
+                        operation_id,
+                        OperationStatus.FAILED,
+                        failure={"code": "PROVIDER_CONTRACT_ERROR", "retry_safe": False},
+                        warnings=operation_warnings,
+                    )
+                )
+        statuses = {str(item["status"]) for item in results}
+        if ambiguous:
+            state = ProviderTransactionState.RECONCILIATION_REQUIRED
+        elif OperationStatus.CONFLICT.value in statuses and not mutation_seen:
+            state = ProviderTransactionState.CONFLICT
+        elif statuses == {OperationStatus.SUCCEEDED.value}:
+            state = ProviderTransactionState.SUCCEEDED
+        elif mutation_seen:
+            state = ProviderTransactionState.PARTIALLY_SUCCEEDED
+        else:
+            state = ProviderTransactionState.FAILED
+        failures = [item for item in results if item["status"] != OperationStatus.SUCCEEDED.value]
+        return ProviderExecutionResult(
+            state=state,
+            operation_results=results,
+            failure_info={"operation_failures": failures} if failures else {},
+            reconciliation_required=ambiguous,
+            external_operation_id=transaction_id,
+        )
+
+    async def _execute_operation(  # noqa: PLR0912, PLR0915 -- explicit mutation routing
+        self,
+        kind: ChangeOperationKind,
+        payload: dict[str, object],
+        checked_pending_scopes: set[tuple[str, str]],
+        warnings: list[dict[str, object]],
+    ) -> tuple[dict[str, object], bool]:
+        required = self._mutation_capability(kind, payload)
+        if self._capabilities.get(required.value) is not CapabilityStatus.SUPPORTED:
+            raise _ProviderMutationConflictError("PROVIDER_CAPABILITY_UNAVAILABLE")
+        domain_id = self._required(payload, "domain_native_id")
+        policy_id = self._required(payload, "policy_native_id")
+        pending_scope = (domain_id, policy_id)
+        if pending_scope not in checked_pending_scopes:
+            await self._assert_current(
+                self._config_path(domain_id, f"policy/accesspolicies/{policy_id}"),
+                payload.get("expected_policy_version"),
+            )
+            pending_warning = await self._pending_change_warning(domain_id, policy_id)
+            if pending_warning:
+                warnings.append(pending_warning)
+            checked_pending_scopes.add(pending_scope)
+        if kind is ChangeOperationKind.ENSURE_RULE_CATEGORY:
+            category_id = payload.get("category_native_id")
+            if category_id:
+                current = await self._assert_current(
+                    self._config_path(
+                        domain_id,
+                        f"policy/accesspolicies/{policy_id}/categories/{category_id}",
+                    ),
+                    payload.get("expected_category_version"),
+                )
+                if _name(current, "") != self._required(payload, "provider_name"):
+                    raise _ProviderMutationConflictError("PROVIDER_CATEGORY_MAPPING_CONFLICT")
+                return self._provider_resource(current), False
+            categories = await self._get_with_params(
+                self._config_path(domain_id, f"policy/accesspolicies/{policy_id}/categories"),
+                {"offset": 0, "limit": 1000, "expanded": True},
+            )
+            typed_categories = (
+                cast("dict[str, object]", categories) if isinstance(categories, dict) else {}
+            )
+            items = typed_categories.get("items", [])
+            if not isinstance(items, list):
+                raise _ProviderMutationConflictError("CATEGORY_STATE_UNKNOWN")
+            typed_items = cast("list[object]", items)
+            paging = typed_categories.get("paging", {})
+            typed_paging = cast("dict[str, object]", paging) if isinstance(paging, dict) else {}
+            if int(str(typed_paging.get("count", len(typed_items)))) > len(typed_items):
+                raise _ProviderMutationConflictError("CATEGORY_STATE_INCOMPLETE")
+            if any(
+                isinstance(item, dict)
+                and _name(cast("Mapping[str, Any]", item), "")
+                == self._required(payload, "provider_name")
+                for item in typed_items
+            ):
+                raise _ProviderMutationConflictError("PROVIDER_CATEGORY_NAME_CONFLICT")
+            access_rules = await self._get_with_params(
+                self._config_path(domain_id, f"policy/accesspolicies/{policy_id}/accessrules"),
+                {"offset": 0, "limit": 1000, "expanded": True},
+            )
+            typed_rules = (
+                cast("dict[str, object]", access_rules) if isinstance(access_rules, dict) else {}
+            )
+            rules = typed_rules.get("items", [])
+            if not isinstance(rules, list):
+                raise _ProviderMutationConflictError("RULE_STATE_UNKNOWN")
+            typed_rules_list = cast("list[object]", rules)
+            rule_paging = typed_rules.get("paging", {})
+            typed_rule_paging = (
+                cast("dict[str, object]", rule_paging) if isinstance(rule_paging, dict) else {}
+            )
+            if int(str(typed_rule_paging.get("count", len(typed_rules_list)))) > len(
+                typed_rules_list
+            ):
+                raise _ProviderMutationConflictError("RULE_STATE_INCOMPLETE")
+            default_indexes: list[int] = []
+            for rule in typed_rules_list:
+                if not isinstance(rule, dict):
+                    raise _ProviderMutationConflictError("RULE_STATE_UNKNOWN")
+                metadata = rule.get("metadata")
+                if not isinstance(metadata, dict):
+                    continue
+                typed_metadata = cast("dict[str, object]", metadata)
+                if str(typed_metadata.get("section", "")).casefold() != "default":
+                    continue
+                if typed_metadata.get("ruleIndex") is not None:
+                    default_indexes.append(int(str(typed_metadata["ruleIndex"])))
+            default_categories: list[tuple[int, str]] = []
+            for item in typed_items:
+                if not isinstance(item, dict) or not item.get("name"):
+                    continue
+                metadata = item.get("metadata")
+                if not isinstance(metadata, dict):
+                    continue
+                typed_metadata = cast("dict[str, object]", metadata)
+                if str(typed_metadata.get("section", "")).casefold() != "default":
+                    continue
+                if typed_metadata.get("startIndex") is not None:
+                    typed_item = cast("dict[str, object]", item)
+                    default_categories.append(
+                        (int(str(typed_metadata["startIndex"])), str(typed_item["name"]))
+                    )
+            if default_categories:
+                placement: dict[str, str | int | bool] = {
+                    "aboveCategory": min(default_categories)[1]
+                }
+            elif default_indexes:
+                placement = {"insertBefore": str(min(default_indexes))}
+            else:
+                placement = {"section": "default"}
+            response = await self._mutate_json(
+                "POST",
+                self._config_path(domain_id, f"policy/accesspolicies/{policy_id}/categories"),
+                {"name": self._required(payload, "provider_name"), "type": "Category"},
+                params=placement,
+            )
+            return self._provider_resource(response), True
+        if kind in {
+            ChangeOperationKind.CREATE_OBJECT,
+            ChangeOperationKind.MODIFY_OBJECT,
+            ChangeOperationKind.DELETE_OBJECT,
+        }:
+            return await self._execute_object(kind, domain_id, payload)
+        return await self._execute_rule(kind, domain_id, policy_id, payload)
+
+    async def _execute_rule(  # noqa: PLR0912, PLR0915 -- explicit Cisco payload mapping
+        self,
+        kind: ChangeOperationKind,
+        domain_id: str,
+        policy_id: str,
+        payload: dict[str, object],
+    ) -> tuple[dict[str, object], bool]:
+        base = self._config_path(domain_id, f"policy/accesspolicies/{policy_id}/accessrules")
+        if kind is ChangeOperationKind.CREATE_RULE:
+            if payload.get("category_provider_name") and not payload.get("category_native_id"):
+                raise _ProviderMutationConflictError("PROVIDER_RULE_CATEGORY_NOT_RESOLVED")
+            existing = await self._get_with_params(
+                base, {"offset": 0, "limit": 1000, "expanded": True}
+            )
+            typed_existing = (
+                cast("dict[str, object]", existing) if isinstance(existing, dict) else {}
+            )
+            items = typed_existing.get("items", [])
+            if not isinstance(items, list):
+                raise _ProviderMutationConflictError("RULE_STATE_UNKNOWN")
+            typed_existing_items = cast("list[object]", items)
+            paging = typed_existing.get("paging", {})
+            typed_paging = cast("dict[str, object]", paging) if isinstance(paging, dict) else {}
+            if int(str(typed_paging.get("count", len(typed_existing_items)))) > len(
+                typed_existing_items
+            ):
+                raise _ProviderMutationConflictError("RULE_STATE_INCOMPLETE")
+            requested_name = str(payload.get("name", ""))
+            matching_name = next(
+                (
+                    cast("Mapping[str, Any]", item)
+                    for item in typed_existing_items
+                    if isinstance(item, dict)
+                    and _name(cast("Mapping[str, Any]", item), "") == requested_name
+                ),
+                None,
+            )
+            if matching_name is not None:
+                if self._rule_create_matches(matching_name, payload):
+                    return self._provider_resource(matching_name), False
+                raise _ProviderMutationConflictError("PROVIDER_RULE_NAME_CONFLICT")
+            # Cisco rejects empty match containers on rule creation.  Omit optional
+            # criteria that the caller did not select; an omitted criterion means Any.
+            body = self._rule_payload(payload)
+            body.pop("category", None)
+            params: dict[str, str | int | bool] = {
+                "category": self._required(payload, "category_provider_name")
+            }
+            if payload.get("position") is not None:
+                position = int(str(payload["position"]))
+                anchor_native_id = payload.get("anchor_rule_native_id")
+                if anchor_native_id:
+                    anchor = await self._assert_current(f"{base}/{anchor_native_id}", None)
+                    if not self._rule_category_matches(
+                        anchor,
+                        str(payload.get("category_native_id", "")),
+                        str(payload.get("category_provider_name", "")),
+                    ):
+                        raise _ProviderMutationConflictError("PROVIDER_OWNERSHIP_CATEGORY_CONFLICT")
+                    position = self._position(anchor)
+                placement = str(payload.get("placement", "BEFORE")).upper()
+                params["insertAfter" if placement == "AFTER" else "insertBefore"] = str(position)
+            response = await self._mutate_json(
+                "POST",
+                base,
+                body,
+                params=params,
+            )
+            return self._provider_resource(response), True
+        rule_id = self._required(payload, "rule_native_id")
+        current = await self._assert_current(
+            f"{base}/{rule_id}", payload.get("expected_rule_version")
+        )
+        if _name(current, "") != self._required(payload, "expected_rule_name"):
+            raise _ProviderMutationConflictError("PROVIDER_OWNERSHIP_NAME_CONFLICT")
+        current_action = str(current.get("action", "")).upper()
+        expected_action = str(payload.get("expected_rule_action", "")).upper()
+        if expected_action and current_action != expected_action:
+            raise _ProviderMutationConflictError("STALE_PROVIDER_REVISION")
+        if kind is ChangeOperationKind.DELETE_RULE:
+            await self._mutate_json("DELETE", f"{base}/{rule_id}", None)
+            return self._provider_resource(current), True
+        if kind is ChangeOperationKind.MOVE_RULE:
+            category = payload.get("category_native_id")
+            if not category:
+                raise _ProviderMutationConflictError("PROVIDER_RULE_CATEGORY_NOT_RESOLVED")
+            current_category = await self._assert_current(
+                self._config_path(
+                    domain_id,
+                    f"policy/accesspolicies/{policy_id}/categories/{category}",
+                ),
+                payload.get("expected_category_version"),
+            )
+            expected_category_name = payload.get("expected_category_name")
+            if expected_category_name and _name(current_category, "") != str(
+                expected_category_name
+            ):
+                raise _ProviderMutationConflictError("PROVIDER_CATEGORY_MAPPING_CONFLICT")
+            if not self._rule_category_matches(
+                current,
+                str(category),
+                _name(current_category, ""),
+            ):
+                raise _ProviderMutationConflictError("PROVIDER_OWNERSHIP_CATEGORY_CONFLICT")
+            metadata = current_category.get("metadata")
+            typed_metadata = (
+                cast("dict[str, object]", metadata) if isinstance(metadata, dict) else {}
+            )
+            start = typed_metadata.get("startIndex")
+            end = typed_metadata.get("endIndex")
+            target_position = int(str(payload["position"]))
+            if (
+                start is not None
+                and end is not None
+                and not (int(str(start)) <= target_position <= int(str(end)))
+            ):
+                raise _ProviderMutationConflictError("RULE_ORDERING_BOUNDARY_VIOLATION")
+            # FMC's update endpoint does not expose rule ordering. Recreate the same rule at the
+            # requested index, preserving its configuration while treating any post-delete failure
+            # as ambiguous so reconciliation—not a blind retry—repairs the local/native ID mapping.
+            body = dict(current)
+            for field in ("id", "links", "metadata", "version"):
+                body.pop(field, None)
+            await self._mutate_json("DELETE", f"{base}/{rule_id}", None)
+            try:
+                response = await self._mutate_json(
+                    "POST",
+                    base,
+                    body,
+                    params={
+                        "category": _name(current_category, ""),
+                        "insertBefore": str(target_position),
+                    },
+                )
+            except (_ProviderMutationConflictError, _AmbiguousMutationError, ProviderError) as exc:
+                raise _AmbiguousMutationError("RULE_REORDER_RECONCILIATION_REQUIRED") from exc
+            return self._provider_resource(response), True
+        body = dict(current)
+        body["id"] = rule_id
+        # On update an explicit empty container is meaningful: it clears a match
+        # criterion that may already exist on the provider rule.
+        body.update(self._rule_payload(payload, include_empty=True))
+        response = await self._mutate_json("PUT", f"{base}/{rule_id}", body)
+        return self._provider_resource(response), True
+
+    async def _execute_object(
+        self, kind: ChangeOperationKind, domain_id: str, payload: dict[str, object]
+    ) -> tuple[dict[str, object], bool]:
+        resolution = payload.get("resolution")
+        if kind is ChangeOperationKind.CREATE_OBJECT and isinstance(resolution, dict):
+            existing = cast("dict[str, object]", resolution).get("existing_object_native_id")
+            if existing:
+                return {"native_id": str(existing), "fingerprint": "reused"}, False
+        endpoint, body = self._object_payload(payload)
+        base = self._config_path(domain_id, f"object/{endpoint}")
+        if kind is ChangeOperationKind.CREATE_OBJECT:
+            existing = await self._get_with_params(
+                base, {"offset": 0, "limit": 1000, "expanded": True}
+            )
+            typed_existing = (
+                cast("dict[str, object]", existing) if isinstance(existing, dict) else {}
+            )
+            items = typed_existing.get("items", [])
+            if not isinstance(items, list):
+                raise _ProviderMutationConflictError("OBJECT_STATE_UNKNOWN")
+            typed_items = cast("list[object]", items)
+            paging = typed_existing.get("paging", {})
+            typed_paging = cast("dict[str, object]", paging) if isinstance(paging, dict) else {}
+            if int(str(typed_paging.get("count", len(typed_items)))) > len(typed_items):
+                raise _ProviderMutationConflictError("OBJECT_STATE_INCOMPLETE")
+            for item in typed_items:
+                if not isinstance(item, dict):
+                    raise _ProviderMutationConflictError("OBJECT_STATE_UNKNOWN")
+                candidate = cast("Mapping[str, Any]", item)
+                if _name(candidate, "") == str(body["name"]):
+                    raise _ProviderMutationConflictError("PROVIDER_OBJECT_NAME_CONFLICT")
+            response = await self._mutate_json("POST", base, body)
+            return self._provider_resource(response), True
+        native_id = self._required(payload, "object_native_id")
+        current = await self._assert_current(
+            f"{base}/{native_id}", payload.get("expected_object_version")
+        )
+        if _name(current, "") != self._required(payload, "expected_provider_name"):
+            raise _ProviderMutationConflictError("PROVIDER_OWNERSHIP_NAME_CONFLICT")
+        if kind is ChangeOperationKind.DELETE_OBJECT:
+            await self._mutate_json("DELETE", f"{base}/{native_id}", None)
+            return self._provider_resource(current), True
+        body["id"] = native_id
+        response = await self._mutate_json("PUT", f"{base}/{native_id}", body)
+        return self._provider_resource(response), True
+
+    async def _pending_change_warning(
+        self, domain_id: str, _policy_id: str
+    ) -> dict[str, object] | None:
+        if (
+            self._capabilities.get(ProviderCapability.PENDING_CHANGE_INSPECTION.value)
+            is not CapabilityStatus.SUPPORTED
+        ):
+            raise _ProviderMutationConflictError("PENDING_CHANGE_INSPECTION_UNAVAILABLE")
+        payload = await self._get_with_params(
+            self._config_path(domain_id, "deployment/deployabledevices"),
+            {"offset": 0, "limit": 1000, "expanded": True},
+        )
+        raw_items = payload.get("items", []) if isinstance(payload, dict) else []
+        if not isinstance(raw_items, list):
+            raise _ProviderMutationConflictError("PENDING_CHANGE_STATE_UNKNOWN")
+        items = cast("list[object]", raw_items)
+        raw_paging = payload.get("paging", {}) if isinstance(payload, dict) else {}
+        paging = cast("dict[str, object]", raw_paging) if isinstance(raw_paging, dict) else {}
+        count = paging.get("count", len(items))
+        if int(str(count)) > len(items):
+            raise _ProviderMutationConflictError("PENDING_CHANGE_STATE_INCOMPLETE")
+        pending_changes: list[Mapping[str, Any]] = []
+        for item in items:
+            if not isinstance(item, dict) or not item.get("id"):
+                raise _ProviderMutationConflictError("PENDING_CHANGE_STATE_UNKNOWN")
+            pending = await self._get(
+                self._config_path(
+                    domain_id,
+                    f"deployment/deployabledevices/{item['id']}/pendingchanges",
+                )
+            )
+            pending_items = pending.get("items", []) if isinstance(pending, dict) else []
+            if not isinstance(pending_items, list):
+                raise _ProviderMutationConflictError("PENDING_CHANGE_STATE_UNKNOWN")
+            if not all(isinstance(change, dict) for change in pending_items):
+                raise _ProviderMutationConflictError("PENDING_CHANGE_STATE_UNKNOWN")
+            pending_changes.extend(cast("Mapping[str, Any]", change) for change in pending_items)
+        if not pending_changes:
+            return None
+        actors: set[str] = set()
+        entity_types: set[str] = set()
+        for item in pending_changes:
+            entity_type = str(item.get("entityType", "")).strip()
+            if entity_type:
+                entity_types.add(entity_type)
+            raw_actors = item.get("lastUpdatedByUsers", [])
+            if isinstance(raw_actors, list):
+                actors.update(
+                    str(actor).strip()
+                    for actor in cast("list[object]", raw_actors)
+                    if str(actor).strip()
+                )
+        return {
+            "code": "OTHER_PENDING_CHANGES_PRESENT",
+            "pending_change_count": len(pending_changes),
+            "entity_types": sorted(entity_types),
+            "actors": sorted(actors),
+            "deployment_notice": (
+                "Deployment is separate and may include provider changes outside this ChangeSet."
+            ),
+        }
+
+    async def _assert_current(self, path: str, expected_version: object) -> Mapping[str, Any]:
+        payload = await self._get(path)
+        if not isinstance(payload, dict):
+            raise ProviderContractError
+        current = cast("Mapping[str, Any]", payload)
+        if expected_version is not None and str(expected_version) != str(_version(current)):
+            raise _ProviderMutationConflictError("STALE_PROVIDER_REVISION")
+        return current
+
+    async def _mutate_json(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, object] | None,
+        *,
+        params: dict[str, str | int | bool] | None = None,
+    ) -> Mapping[str, Any]:
+        """Send a mutation exactly once; transport/5xx outcomes are always ambiguous."""
+        await self._ensure_target_safe()
+        await self._ensure_identity()
+        headers = (
+            {"X-auth-access-token": self._access_token or ""}
+            if self.kind is ProviderKind.FMC
+            else {"Authorization": f"Bearer {self._bearer_token or ''}"}
+        )
+        try:
+            response = await self._client.request(
+                method,
+                f"{self._endpoint}{path}",
+                headers=headers,
+                json=payload,
+                params=params,
+            )
+            self._capture_certificate(response)
+        except httpx.TransportError as exc:
+            if self._is_tls_error(exc):
+                raise ProviderTlsValidationError from exc
+            raise _AmbiguousMutationError("MUTATION_TRANSPORT_RESULT_UNKNOWN") from exc
+        if response.status_code >= 500 or response.status_code == 429:
+            raise _AmbiguousMutationError("MUTATION_PROVIDER_RESULT_UNKNOWN")
+        if response.status_code in {409, 412}:
+            raise _ProviderMutationConflictError("STALE_PROVIDER_REVISION")
+        if response.status_code in {400, 422}:
+            raise _ProviderMutationConflictError(
+                "PROVIDER_VALIDATION_ERROR",
+                self._provider_validation_details(response),
+            )
+        self._raise_for_status(response)
+        if method == "DELETE" or not response.content:
+            return {}
+        try:
+            value = response.json()
+        except ValueError as exc:
+            raise _AmbiguousMutationError("MUTATION_RESPONSE_INVALID") from exc
+        if not isinstance(value, dict):
+            raise _AmbiguousMutationError("MUTATION_RESPONSE_INVALID")
+        return cast("Mapping[str, Any]", value)
+
+    @staticmethod
+    def _provider_validation_details(response: httpx.Response) -> dict[str, object]:
+        """Retain only bounded, user-actionable fields from a provider error response."""
+        details: dict[str, object] = {"provider_status": response.status_code}
+        try:
+            payload = response.json()
+        except ValueError:
+            return details
+        if not isinstance(payload, dict):
+            return details
+        messages = payload.get("messages")
+        if not isinstance(messages, list):
+            return details
+        safe_messages: list[dict[str, str]] = []
+        for message in messages[:3]:
+            if not isinstance(message, dict):
+                continue
+            safe_message: dict[str, str] = {}
+            for field in ("errorCode", "code", "description", "details", "location"):
+                value = message.get(field)
+                if isinstance(value, (str, int, float)) and str(value).strip():
+                    safe_message[field] = str(value).strip()[:500]
+            if safe_message:
+                safe_messages.append(safe_message)
+        if safe_messages:
+            details["provider_messages"] = safe_messages
+        return details
+
+    @staticmethod
+    def _mutation_capability(
+        kind: ChangeOperationKind, payload: dict[str, object]
+    ) -> ProviderCapability:
+        direct = {
+            ChangeOperationKind.CREATE_RULE: ProviderCapability.ACCESS_RULE_CREATE,
+            ChangeOperationKind.MODIFY_RULE: ProviderCapability.ACCESS_RULE_UPDATE,
+            ChangeOperationKind.DELETE_RULE: ProviderCapability.ACCESS_RULE_DELETE,
+            ChangeOperationKind.MOVE_RULE: ProviderCapability.RULE_ORDERING,
+            ChangeOperationKind.ENSURE_RULE_CATEGORY: ProviderCapability.RULE_CATEGORY_MUTATION,
+        }
+        if kind in direct:
+            return direct[kind]
+        object_type = FirewallObjectType(str(payload["object_type"]))
+        if kind is ChangeOperationKind.CREATE_OBJECT:
+            return {
+                FirewallObjectType.NETWORK: ProviderCapability.NETWORK_OBJECT_CREATE,
+                FirewallObjectType.PORT_SERVICE: ProviderCapability.PORT_SERVICE_OBJECT_CREATE,
+                FirewallObjectType.URL: ProviderCapability.URL_OBJECT_CREATE,
+            }.get(object_type, ProviderCapability.APPLICATION_OBJECT_CREATE)
+        return {
+            FirewallObjectType.NETWORK: ProviderCapability.NETWORK_OBJECT_MUTATION,
+            FirewallObjectType.PORT_SERVICE: ProviderCapability.PORT_SERVICE_OBJECT_MUTATION,
+            FirewallObjectType.URL: ProviderCapability.URL_OBJECT_MUTATION,
+        }.get(object_type, ProviderCapability.APPLICATION_OBJECT_MUTATION)
+
+    @staticmethod
+    def _required(payload: dict[str, object], key: str) -> str:
+        value = payload.get(key)
+        if value is None or not str(value):
+            raise ProviderContractError(details={"code": f"MISSING_{key.upper()}"})
+        return str(value)
+
+    @staticmethod
+    def _rule_payload(
+        payload: dict[str, object], *, include_empty: bool = False
+    ) -> dict[str, object]:
+        body: dict[str, object] = {
+            "type": "AccessRule",
+            "name": str(payload.get("name", "delegated rule")),
+            "action": str(payload.get("action", "ALLOW")),
+            "enabled": bool(payload.get("enabled", True)),
+        }
+        category = payload.get("category_native_id")
+        if category:
+            body["category"] = {"id": str(category), "type": "Category"}
+        for source, target in (
+            ("source_zone_native_ids", "sourceZones"),
+            ("destination_zone_native_ids", "destinationZones"),
+            ("source_object_native_ids", "sourceNetworks"),
+            ("destination_object_native_ids", "destinationNetworks"),
+            ("port_object_native_ids", "destinationPorts"),
+            ("source_port_object_native_ids", "sourcePorts"),
+            ("destination_port_object_native_ids", "destinationPorts"),
+            ("application_object_native_ids", "applications"),
+            ("url_object_native_ids", "urls"),
+        ):
+            values = payload.get(source)
+            if isinstance(values, list) and (values or include_empty):
+                body[target] = {
+                    "objects": [
+                        _provider_reference_payload(item) for item in cast("list[object]", values)
+                    ]
+                }
+        return body
+
+    @staticmethod
+    def _object_payload(payload: dict[str, object]) -> tuple[str, dict[str, object]]:
+        object_type = FirewallObjectType(str(payload["object_type"]))
+        value = str(payload.get("normalized_value", ""))
+        name = str(payload.get("provider_name") or payload.get("expected_provider_name") or "")
+        if object_type is FirewallObjectType.NETWORK:
+            if value.count("-") == 1:
+                start, end = value.split("-", 1)
+                # Naming normalization has already verified ordering and address-family equality.
+                canonical_range = f"{ipaddress.ip_address(start)}-{ipaddress.ip_address(end)}"
+                return "ranges", {"type": "Range", "name": name, "value": canonical_range}
+            parsed = ipaddress.ip_network(value, strict=False)
+            if parsed.prefixlen == parsed.max_prefixlen:
+                return "hosts", {"type": "Host", "name": name, "value": str(parsed.network_address)}
+            return "networks", {"type": "Network", "name": name, "value": str(parsed)}
+        if object_type is FirewallObjectType.PORT_SERVICE:
+            protocol, port = value.split("/", maxsplit=1)
+            return "protocolportobjects", {
+                "type": "ProtocolPortObject",
+                "name": name,
+                "protocol": protocol.upper(),
+                "port": port,
+            }
+        if object_type is FirewallObjectType.URL:
+            return "urls", {"type": "Url", "name": name, "url": value}
+        raise _ProviderMutationConflictError("PROVIDER_CAPABILITY_UNAVAILABLE")
+
+    @staticmethod
+    def _provider_resource(value: Mapping[str, Any]) -> dict[str, object]:
+        native_id = _native_id(value) if value else "deleted"
+        return {
+            "native_id": native_id,
+            "native_version": _version(value) or "",
+            "fingerprint": (
+                _fingerprint(value) if value else hashlib.sha256(native_id.encode()).hexdigest()
+            ),
+            "position": CiscoReadOnlyProvider._position(value) if value else 0,
+        }
+
+    @staticmethod
+    def _operation_result(  # noqa: PLR0913 -- normalized provider-result constructor
+        operation_id: str,
+        status: OperationStatus,
+        *,
+        mutated: bool | str = False,
+        resource: dict[str, object] | None = None,
+        failure: dict[str, object] | None = None,
+        warnings: list[dict[str, object]] | None = None,
+    ) -> dict[str, object]:
+        value: dict[str, object] = {
+            "operation_id": operation_id,
+            "status": status.value,
+            "mutated": mutated,
+            "failure": failure or {},
+        }
+        if resource:
+            value["provider_resource"] = resource
+            value["provider_resource_id"] = resource.get("native_id")
+        if warnings:
+            value["warnings"] = warnings
+        return value
 
     async def _ensure_identity(self) -> None:
         if self.kind is ProviderKind.FMC:
@@ -730,8 +1497,8 @@ class CiscoReadOnlyProvider:
         for field, element in (
             ("sourceNetworks", RuleObjectElement.SOURCE_NETWORK),
             ("destinationNetworks", RuleObjectElement.DESTINATION_NETWORK),
-            ("sourcePorts", RuleObjectElement.PORT_SERVICE),
-            ("destinationPorts", RuleObjectElement.PORT_SERVICE),
+            ("sourcePorts", RuleObjectElement.SOURCE_PORT),
+            ("destinationPorts", RuleObjectElement.DESTINATION_PORT),
             ("applications", RuleObjectElement.APPLICATION),
             ("urls", RuleObjectElement.URL),
         ):
@@ -777,6 +1544,72 @@ class CiscoReadOnlyProvider:
         )
 
     @staticmethod
+    def _rule_category_matches(
+        item: Mapping[str, Any], category_id: str, category_name: str
+    ) -> bool:
+        """Match both UUID references and FMC's metadata.category name representation."""
+        category = item.get("category")
+        metadata = item.get("metadata")
+        if category is None and isinstance(metadata, dict):
+            category = cast("dict[str, Any]", metadata).get("category")
+        if isinstance(category, dict):
+            typed_category = cast("Mapping[str, Any]", category)
+            native_id = typed_category.get("id") or typed_category.get("uuid")
+            if native_id is not None and str(native_id) == category_id:
+                return True
+            name = typed_category.get("name")
+            return name is not None and str(name) == category_name
+        return isinstance(category, str) and category == category_name
+
+    @classmethod
+    def _rule_create_matches(cls, item: Mapping[str, Any], payload: dict[str, object]) -> bool:
+        """Recognize an exact prior create after a duplicate worker delivery."""
+        if str(item.get("action", "")).upper() != str(payload.get("action", "")).upper():
+            return False
+        if bool(item.get("enabled", True)) != bool(payload.get("enabled", True)):
+            return False
+        if not cls._rule_category_matches(
+            item,
+            str(payload.get("category_native_id", "")),
+            str(payload.get("category_provider_name", "")),
+        ):
+            return False
+
+        for source, target in (
+            ("source_zone_native_ids", "sourceZones"),
+            ("destination_zone_native_ids", "destinationZones"),
+            ("source_object_native_ids", "sourceNetworks"),
+            ("destination_object_native_ids", "destinationNetworks"),
+            ("source_port_object_native_ids", "sourcePorts"),
+            ("destination_port_object_native_ids", "destinationPorts"),
+            ("application_object_native_ids", "applications"),
+            ("url_object_native_ids", "urls"),
+        ):
+            requested = payload.get(source)
+            if not isinstance(requested, list):
+                continue
+            requested_ids = {
+                _provider_reference_id(value) for value in cast("list[object]", requested)
+            }
+            container = item.get(target)
+            values: object = []
+            if isinstance(container, dict):
+                typed_container = cast("dict[str, object]", container)
+                values = typed_container.get("objects", typed_container.get("applications", []))
+            existing_ids = (
+                {
+                    _provider_reference_id(value)
+                    for value in cast("list[object]", values)
+                    if _provider_reference_has_id(value)
+                }
+                if isinstance(values, list)
+                else set()
+            )
+            if existing_ids != requested_ids:
+                return False
+        return True
+
+    @staticmethod
     def _object(
         item: Mapping[str, Any], domain_id: str, object_type: FirewallObjectType
     ) -> DiscoveredObject:
@@ -794,7 +1627,13 @@ class CiscoReadOnlyProvider:
         if object_type is FirewallObjectType.PORT_SERVICE:
             protocol = item.get("protocol")
             port = item.get("port")
-            value = f"{protocol}:{port}" if protocol is not None and port is not None else None
+            value = (
+                f"{str(protocol).lower()}/{port}"
+                if protocol is not None and port is not None
+                else None
+            )
+        elif object_type is FirewallObjectType.URL:
+            value = item.get("url", value)
         return DiscoveredObject(
             native_id=native_id,
             name=_name(item, native_id),
@@ -821,3 +1660,20 @@ class CiscoReadOnlyProvider:
 def connection_test_timestamp() -> str:
     """Small deterministic-format helper used in safe evidence summaries."""
     return datetime.now(UTC).isoformat()
+
+
+def _provider_reference_id(value: object) -> str:
+    if isinstance(value, dict):
+        return str(cast("dict[str, object]", value).get("id"))
+    return str(value)
+
+
+def _provider_reference_payload(value: object) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {"id": str(value)}
+    item = cast("dict[str, object]", value)
+    return {key: str(item[key]) for key in ("id", "name", "type") if key in item}
+
+
+def _provider_reference_has_id(value: object) -> bool:
+    return isinstance(value, dict) and cast("dict[str, object]", value).get("id") is not None

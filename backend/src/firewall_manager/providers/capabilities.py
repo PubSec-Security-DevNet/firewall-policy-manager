@@ -12,6 +12,41 @@ from firewall_manager.domain.models import (
     ProviderKind,
 )
 
+VALIDATION_WRITE_CAPABILITIES = frozenset(
+    {
+        ProviderCapability.ACCESS_RULE_CREATE.value,
+        ProviderCapability.ACCESS_RULE_UPDATE.value,
+        ProviderCapability.ACCESS_RULE_DELETE.value,
+        ProviderCapability.RULE_ORDERING.value,
+        ProviderCapability.RULE_CATEGORY_MUTATION.value,
+        ProviderCapability.NETWORK_OBJECT_CREATE.value,
+        ProviderCapability.NETWORK_OBJECT_MUTATION.value,
+        ProviderCapability.PORT_SERVICE_OBJECT_CREATE.value,
+        ProviderCapability.PORT_SERVICE_OBJECT_MUTATION.value,
+        ProviderCapability.URL_OBJECT_CREATE.value,
+        ProviderCapability.URL_OBJECT_MUTATION.value,
+    }
+)
+VALIDATION_REQUIRED_CAPABILITIES = VALIDATION_WRITE_CAPABILITIES | {
+    ProviderCapability.PENDING_CHANGE_INSPECTION.value
+}
+
+
+def effective_write_capabilities(
+    capabilities: dict[str, str], *, validation_writes_enabled: bool
+) -> dict[str, str]:
+    """Expose implemented PARTIAL capabilities only inside an explicit validation write gate."""
+    if not validation_writes_enabled:
+        return dict(capabilities)
+    return {
+        name: (
+            CapabilityStatus.SUPPORTED.value
+            if name in VALIDATION_REQUIRED_CAPABILITIES and status == CapabilityStatus.PARTIAL.value
+            else status
+        )
+        for name, status in capabilities.items()
+    }
+
 
 class ProviderKindCapabilityValues(BaseModel):
     """Capability status for both first-class provider families."""

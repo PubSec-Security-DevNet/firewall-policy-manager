@@ -8,14 +8,19 @@ from uuid import UUID
 import dramatiq
 from redis import Redis
 
+from firewall_manager.application.changesets import ChangeSetService
 from firewall_manager.application.errors import ApplicationError
 from firewall_manager.application.synchronization import SynchronizationService
 from firewall_manager.config import get_settings
+from firewall_manager.domain.models import ChangeSetState, Principal
+from firewall_manager.persistence.changesets import SqlChangeSetRepository
 from firewall_manager.persistence.database import new_session
+from firewall_manager.persistence.models import ChangeSet, User
 from firewall_manager.persistence.provider_connections import SqlProviderConnectionRepository
-from firewall_manager.persistence.repositories import SqlSyncRepository
+from firewall_manager.persistence.repositories import SqlAuthorizationRepository, SqlSyncRepository
 from firewall_manager.persistence.secrets import EncryptedDatabaseSecretStore
 from firewall_manager.providers.factory import build_real_provider
+from firewall_manager.providers.transactions import GuardedProviderTransactionExecutor
 from firewall_manager.worker.broker import broker
 
 BROKER = broker
@@ -37,6 +42,134 @@ def record_worker_heartbeat() -> None:
 def synchronize_provider_connection(connection_id: str) -> None:
     """Run one connection-isolated, read-only sync outside the web request process."""
     asyncio.run(_synchronize_provider_connection(UUID(connection_id)))
+
+
+@dramatiq.actor(max_retries=0)
+def execute_change_set(
+    change_set_id: str, principal_id: str, group_id: str, organization_id: str
+) -> None:
+    """Execute one durably queued ChangeSet; mutation delivery is never blindly retried."""
+    asyncio.run(
+        _execute_change_set(
+            UUID(change_set_id),
+            UUID(principal_id),
+            UUID(group_id),
+            UUID(organization_id),
+        )
+    )
+
+
+async def _execute_change_set(
+    change_set_id: UUID,
+    principal_id: UUID,
+    group_id: UUID,
+    organization_id: UUID,
+) -> None:
+    settings = get_settings()
+    with new_session() as session:
+        user = session.get(User, principal_id)
+        row = session.get(ChangeSet, change_set_id)
+        if (
+            user is None
+            or user.organization_id != organization_id
+            or row is None
+            or row.organization_id != organization_id
+            or row.principal_id != principal_id
+            or row.acting_group_id != group_id
+            or row.state != ChangeSetState.QUEUED.value
+        ):
+            return
+        principal = Principal(
+            user_id=user.id,
+            organization_id=user.organization_id,
+            email=user.email,
+            role=user.role,
+            issuer=user.identity_issuer,
+            subject=user.identity_subject,
+        )
+        repository = SqlChangeSetRepository(session)
+        encoded_key = (
+            settings.secret_store_master_key.get_secret_value()
+            if settings.secret_store_master_key is not None
+            else None
+        )
+        secrets = EncryptedDatabaseSecretStore(
+            session, encoded_key, settings.secret_store_key_version
+        )
+        service = ChangeSetService(
+            SqlAuthorizationRepository(session),
+            repository,
+            GuardedProviderTransactionExecutor(secrets, build_real_provider),
+        )
+        try:
+            await service.execute(principal, group_id, change_set_id, queued=True)
+            session.commit()
+        except ApplicationError as exc:
+            if exc.details.get("code") == "CHANGE_SET_ALREADY_CLAIMED":
+                # Redis may redeliver while the original worker still owns the durable
+                # execution claim. The duplicate must exit without changing its state.
+                session.rollback()
+                return
+            current = repository.get_change_set(principal, group_id, change_set_id)
+            if current is not None and current["state"] not in {
+                ChangeSetState.QUEUED.value,
+                ChangeSetState.EXECUTING.value,
+            }:
+                # The service persisted a deliberate terminal outcome (for example a current
+                # authorization denial). Preserve that detailed result instead of rolling it back
+                # and replacing it with a generic worker failure.
+                session.commit()
+                return
+            session.rollback()
+            current = repository.get_change_set(principal, group_id, change_set_id)
+            if current is not None and current["state"] in {
+                ChangeSetState.QUEUED.value,
+                ChangeSetState.EXECUTING.value,
+            }:
+                repository.set_execution_state(
+                    principal,
+                    group_id,
+                    change_set_id,
+                    ChangeSetState.FAILED.value,
+                    {},
+                    {"code": exc.code},
+                )
+                repository.record_change_event(
+                    principal,
+                    group_id,
+                    UUID(str(current["access_policy_id"])),
+                    change_set_id,
+                    "change_set_execution",
+                    "FAILED",
+                    {"error_code": exc.code},
+                )
+                session.commit()
+        except Exception:
+            session.rollback()
+            current = repository.get_change_set(principal, group_id, change_set_id)
+            if current is not None and current["state"] in {
+                ChangeSetState.QUEUED.value,
+                ChangeSetState.EXECUTING.value,
+            }:
+                repository.set_execution_state(
+                    principal,
+                    group_id,
+                    change_set_id,
+                    ChangeSetState.FAILED.value,
+                    {},
+                    {"code": "CHANGE_SET_EXECUTION_ERROR"},
+                )
+                repository.record_change_event(
+                    principal,
+                    group_id,
+                    UUID(str(current["access_policy_id"])),
+                    change_set_id,
+                    "change_set_execution",
+                    "FAILED",
+                    {"error_code": "CHANGE_SET_EXECUTION_ERROR"},
+                )
+                session.commit()
+            raise
 
 
 async def _synchronize_provider_connection(connection_id: UUID) -> None:

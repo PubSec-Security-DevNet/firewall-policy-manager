@@ -28,6 +28,18 @@ class SessionResponse(BaseModel):
     email: str
     role: str
     groups: list["ActiveGroupResponse"]
+    default_group_id: UUID | None = None
+    default_policy_id: UUID | None = None
+
+
+class DefaultContextRequest(BaseModel):
+    group_id: UUID
+    policy_id: UUID
+
+
+class DefaultContextResponse(BaseModel):
+    group_id: UUID
+    policy_id: UUID
 
 
 class DevelopmentIdentityResponse(BaseModel):
@@ -142,6 +154,14 @@ class DelegatedRuleResponse(BaseModel):
     management_state: str
     revision: int
     category_id: UUID | None = None
+    source_zones: list[str] = Field(default_factory=list)
+    destination_zones: list[str] = Field(default_factory=list)
+    source_networks: list[str] = Field(default_factory=list)
+    destination_networks: list[str] = Field(default_factory=list)
+    source_services: list[str] = Field(default_factory=list)
+    destination_services: list[str] = Field(default_factory=list)
+    applications: list[str] = Field(default_factory=list)
+    urls: list[str] = Field(default_factory=list)
 
 
 class DelegatedObjectResponse(BaseModel):
@@ -172,6 +192,10 @@ class DelegatedCategoryResponse(BaseModel):
 
 class DelegatedContextResponse(BaseModel):
     policy: DelegatedPolicySummary
+    provider_writable: bool = False
+    provider_type: Literal["fmc", "scc"] = "fmc"
+    provider_name: str = "Provider"
+    provider_is_mock: bool = True
     capabilities: list[str]
     rules: list[DelegatedRuleResponse]
     objects: list[DelegatedObjectResponse]
@@ -196,6 +220,11 @@ class GroupCreateRequest(BaseModel):
 
 class EnabledUpdateRequest(BaseModel):
     enabled: bool
+    expected_revision: int
+
+
+class UserRoleUpdateRequest(BaseModel):
+    role: Literal["viewer", "editor", "approver", "group_admin", "firewall_admin", "admin"]
     expected_revision: int
 
 
@@ -233,6 +262,7 @@ class AdministrationSnapshotResponse(BaseModel):
     ip_range_grants: list[dict[str, object]]
     object_create_grants: list[dict[str, object]]
     category_mappings: list[dict[str, object]]
+    audit_events: list[dict[str, object]] = Field(default_factory=list)
 
 
 class ProviderConnectionScopeResponse(BaseModel):
@@ -278,6 +308,12 @@ class ProviderConnectionResponse(BaseModel):
     last_error_correlation_id: str | None
     certificate_info: dict[str, str]
     sync_interval_minutes: int
+    write_enabled: bool = False
+    write_validation_mode: bool = False
+    version_family_tested: bool = False
+    compatibility_warning: str | None = None
+    write_enabled_at: datetime | None = None
+    write_enabled_by_user_id: UUID | None = None
     scopes: list[ProviderConnectionScopeResponse]
     capability_evidence: list[ProviderCapabilityEvidenceResponse]
     created_at: datetime
@@ -340,6 +376,13 @@ class ProviderLifecycleRequest(BaseModel):
     lifecycle: Literal["ACTIVE", "DISABLED", "RETIRED"]
 
 
+class ProviderWriteGateRequest(BaseModel):
+    expected_revision: int = Field(ge=1)
+    enabled: bool
+    acknowledge_configuration_mutation: bool = False
+    acknowledge_unvalidated_non_production_writes: bool = False
+
+
 class ProviderConnectionTestResponse(BaseModel):
     status: str
     provider_version: str | None = None
@@ -373,12 +416,16 @@ class DraftRuleRequest(BaseModel):
     rule_id: UUID | None = None
     action: Literal["ALLOW", "BLOCK", "TRUST", "MONITOR"] | None = None
     category_id: UUID | None = None
+    anchor_rule_id: UUID | None = None
     position: int | None = Field(default=None, ge=0)
+    placement: Literal["BEFORE", "AFTER"] | None = None
     source_zone_ids: list[UUID] = Field(default_factory=list)
     destination_zone_ids: list[UUID] = Field(default_factory=list)
     source_object_ids: list[UUID] = Field(default_factory=list)
     destination_object_ids: list[UUID] = Field(default_factory=list)
     port_object_ids: list[UUID] = Field(default_factory=list)
+    source_port_object_ids: list[UUID] = Field(default_factory=list)
+    destination_port_object_ids: list[UUID] = Field(default_factory=list)
     application_object_ids: list[UUID] = Field(default_factory=list)
     url_object_ids: list[UUID] = Field(default_factory=list)
     manual_source_networks: list[str] = Field(default_factory=list)
@@ -474,6 +521,8 @@ class ChangeSetResponse(BaseModel):
     id: UUID
     organization_id: UUID
     creator_id: UUID
+    creator_display_name: str | None = None
+    creator_email: str | None = None
     active_group_id: UUID
     access_policy_id: UUID
     target_policy_ids: list[str]

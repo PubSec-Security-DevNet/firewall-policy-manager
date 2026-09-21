@@ -55,6 +55,7 @@ from firewall_manager.persistence.models import (
     ObjectUseGrant,
     Organization,
     PolicyDelegation,
+    ProviderConnection,
     ProviderDomain,
     RuleCategory,
     RuleZoneReference,
@@ -66,6 +67,7 @@ from firewall_manager.persistence.models import (
 from firewall_manager.providers.capabilities import (
     CapabilityEvidenceMismatchError,
     default_capability_path,
+    effective_write_capabilities,
     load_capabilities,
     verify_capability_evidence,
 )
@@ -542,6 +544,7 @@ class SqlAuthorizationRepository:
                 FirewallManager.capabilities,
                 FirewallManager.is_mock,
                 ObjectCreateGrant.revision,
+                ProviderConnection.write_enabled,
             )
             .join(
                 ObjectCreateGrant,
@@ -549,6 +552,10 @@ class SqlAuthorizationRepository:
                 & (ObjectCreateGrant.organization_id == AccessPolicy.organization_id),
             )
             .join(FirewallManager, FirewallManager.id == AccessPolicy.manager_id)
+            .outerjoin(
+                ProviderConnection,
+                ProviderConnection.id == FirewallManager.provider_connection_id,
+            )
             .where(
                 ObjectCreateGrant.organization_id == organization_id,
                 ObjectCreateGrant.group_id == group_id,
@@ -558,7 +565,14 @@ class SqlAuthorizationRepository:
         ).one_or_none()
         if row is None:
             return None
-        return row[0], dict(row[1]), int(row[3])
+        return (
+            row[0],
+            effective_write_capabilities(
+                dict(row[1]),
+                validation_writes_enabled=bool(row[4]) and not bool(row[2]),
+            ),
+            int(row[3]),
+        )
 
     def equivalent_object_id(
         self, manager_id: UUID, object_type: str, normalized_value: str, organization_id: UUID
@@ -682,6 +696,38 @@ class SqlAuthorizationRepository:
             for row in rows
         ]
 
+    def default_context_for_user(
+        self, user_id: UUID, organization_id: UUID
+    ) -> tuple[UUID | None, UUID | None]:
+        row = self._session.execute(
+            select(User.default_group_id, User.default_policy_id).where(
+                User.id == user_id, User.organization_id == organization_id
+            )
+        ).one_or_none()
+        return (row[0], row[1]) if row else (None, None)
+
+    def set_default_context_for_user(
+        self, user_id: UUID, group_id: UUID, policy_id: UUID, organization_id: UUID
+    ) -> bool:
+        membership = self.membership_state(user_id, group_id, organization_id)
+        if membership is None or not membership[0]:
+            return False
+        delegated = any(
+            item["id"] == policy_id
+            for item in self.delegated_policies(user_id, group_id, organization_id)
+        )
+        if not delegated:
+            return False
+        user = self._session.scalar(
+            select(User).where(User.id == user_id, User.organization_id == organization_id)
+        )
+        if user is None:
+            return False
+        user.default_group_id = group_id
+        user.default_policy_id = policy_id
+        user.revision += 1
+        return True
+
     def delegated_context_view(
         self, user_id: UUID, group_id: UUID, policy_id: UUID, organization_id: UUID
     ) -> dict[str, object] | None:
@@ -707,6 +753,59 @@ class SqlAuthorizationRepository:
                 .order_by(AccessRule.position, AccessRule.id)
             )
         )
+        rule_ids = [row.id for row in rules]
+        rule_elements: dict[UUID, dict[str, list[str]]] = {
+            rule_id: {
+                "source_zones": [],
+                "destination_zones": [],
+                "source_networks": [],
+                "destination_networks": [],
+                "source_services": [],
+                "destination_services": [],
+                "applications": [],
+                "urls": [],
+            }
+            for rule_id in rule_ids
+        }
+        if rule_ids:
+            zone_references = self._session.execute(
+                select(RuleZoneReference.rule_id, SecurityZone.name, RuleZoneReference.element_type)
+                .join(SecurityZone, SecurityZone.id == RuleZoneReference.zone_id)
+                .where(
+                    RuleZoneReference.organization_id == organization_id,
+                    RuleZoneReference.rule_id.in_(rule_ids),
+                )
+                .order_by(SecurityZone.name)
+            )
+            for rule_id, zone_name, element_type in zone_references:
+                key = "source_zones" if element_type == "SOURCE" else "destination_zones"
+                rule_elements[rule_id][key].append(str(zone_name))
+            object_references = self._session.execute(
+                select(
+                    ObjectReference.source_rule_id,
+                    FirewallObject.name,
+                    ObjectReference.element_type,
+                )
+                .join(FirewallObject, FirewallObject.id == ObjectReference.target_object_id)
+                .where(
+                    ObjectReference.organization_id == organization_id,
+                    ObjectReference.source_rule_id.in_(rule_ids),
+                )
+                .order_by(FirewallObject.name)
+            )
+            element_keys = {
+                "SOURCE_NETWORK": "source_networks",
+                "DESTINATION_NETWORK": "destination_networks",
+                "PORT_SERVICE": "destination_services",
+                "SOURCE_PORT": "source_services",
+                "DESTINATION_PORT": "destination_services",
+                "APPLICATION": "applications",
+                "URL": "urls",
+            }
+            for rule_id, object_name, element_type in object_references:
+                key = element_keys.get(str(element_type))
+                if rule_id is not None and key is not None:
+                    rule_elements[rule_id][key].append(str(object_name))
         objects = list(
             self._session.execute(
                 select(
@@ -765,6 +864,19 @@ class SqlAuthorizationRepository:
             )
         )
         manager = self._session.get(FirewallManager, policy.manager_id)
+        if manager is None:
+            return None
+        connection = (
+            self._session.get(ProviderConnection, manager.provider_connection_id)
+            if manager.provider_connection_id is not None
+            else None
+        )
+        provider_capabilities = effective_write_capabilities(
+            dict(manager.capabilities),
+            validation_writes_enabled=bool(
+                connection and connection.write_enabled and not manager.is_mock
+            ),
+        )
         categories = list(
             self._session.execute(
                 select(RuleCategory.id, RuleCategory.name)
@@ -790,6 +902,10 @@ class SqlAuthorizationRepository:
                 "management_state": policy.management_state,
                 "revision": policy.revision,
             },
+            "provider_writable": bool(manager) and not manager.read_only,
+            "provider_type": manager.provider,
+            "provider_name": manager.display_name,
+            "provider_is_mock": manager.is_mock,
             "capabilities": sorted(capabilities),
             "rules": [
                 {
@@ -800,6 +916,7 @@ class SqlAuthorizationRepository:
                     "management_state": row.management_state,
                     "revision": row.revision,
                     "category_id": row.category_id,
+                    **rule_elements[row.id],
                 }
                 for row in rules
             ],
@@ -822,7 +939,7 @@ class SqlAuthorizationRepository:
                 {
                     "object_type": object_type,
                     "provider_supported": bool(manager)
-                    and manager.capabilities.get(
+                    and provider_capabilities.get(
                         _OBJECT_CREATE_CAPABILITY_NAMES.get(object_type, "")
                     )
                     == "SUPPORTED",
@@ -889,6 +1006,27 @@ class SqlAdministrationRepository:
                 select(Group).where(Group.organization_id == organization_id).order_by(Group.name)
             )
         )
+        audit_events = self._session.execute(
+            select(AuditEvent, User.display_name, Group.name, AccessPolicy.name)
+            .join(
+                User,
+                (User.id == AuditEvent.actor_user_id)
+                & (User.organization_id == AuditEvent.organization_id),
+            )
+            .outerjoin(
+                Group,
+                (Group.id == AuditEvent.active_group_id)
+                & (Group.organization_id == AuditEvent.organization_id),
+            )
+            .outerjoin(
+                AccessPolicy,
+                (AccessPolicy.id == AuditEvent.policy_id)
+                & (AccessPolicy.organization_id == AuditEvent.organization_id),
+            )
+            .where(AuditEvent.organization_id == organization_id)
+            .order_by(AuditEvent.occurred_at.desc(), AuditEvent.id.desc())
+            .limit(200)
+        ).all()
         return {
             "users": [self._user_dict(row) for row in users],
             "groups": [self._group_dict(row) for row in groups],
@@ -938,6 +1076,33 @@ class SqlAdministrationRepository:
                 organization_id,
                 (GroupPolicyCategoryMapping.group_id, GroupPolicyCategoryMapping.policy_id),
             ),
+            "audit_events": [
+                {
+                    "id": event.id,
+                    "actor": actor_name,
+                    "acting_group": group_name,
+                    "policy": policy_name,
+                    "action": event.action,
+                    "resource_type": event.resource_type,
+                    "decision": event.decision,
+                    "reason_code": event.reason_code,
+                    "interface": event.interface,
+                    "correlation_id": event.correlation_id,
+                    "details": {
+                        key: event.details[key]
+                        for key in (
+                            "authorization_revision",
+                            "status",
+                            "error_code",
+                            "operation",
+                            "provider",
+                        )
+                        if key in event.details
+                    },
+                    "occurred_at": event.occurred_at,
+                }
+                for event, actor_name, group_name, policy_name in audit_events
+            ],
         }
 
     def create_user(
@@ -993,6 +1158,27 @@ class SqlAdministrationRepository:
         self._session.flush()
         self._audit_change(organization_id, actor_user_id, row.id, resource)
         return self._user_dict(row) if isinstance(row, User) else self._group_dict(row)
+
+    def update_user_role(
+        self,
+        organization_id: UUID,
+        actor_user_id: UUID,
+        user_id: UUID,
+        role: str,
+        expected_revision: int,
+    ) -> dict[str, object]:
+        row = self._session.scalar(
+            select(User).where(User.id == user_id, User.organization_id == organization_id)
+        )
+        if row is None:
+            raise ResourceOutOfScopeError
+        if row.revision != expected_revision:
+            raise StaleWriteError
+        row.role = role
+        row.revision += 1
+        self._session.flush()
+        self._audit_change(organization_id, actor_user_id, row.id, "users")
+        return self._user_dict(row)
 
     def upsert_authorization_resource(
         self,

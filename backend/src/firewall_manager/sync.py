@@ -19,7 +19,13 @@ async def synchronize_all() -> None:
     """Run a complete read-only sync for each seeded manager."""
     settings = get_settings()
     with new_session() as session:
-        managers = list(session.scalars(select(FirewallManager).order_by(FirewallManager.id)))
+        managers = list(
+            session.scalars(
+                select(FirewallManager)
+                .where(FirewallManager.is_mock.is_(True))
+                .order_by(FirewallManager.id)
+            )
+        )
         repository = SqlSyncRepository(session)
         for manager in managers:
             provider = (

@@ -507,6 +507,34 @@ class MemoryChangeSetRepository:
         self.change_sets[UUID(str(change_set["id"]))]["transactions"].append(result)  # type: ignore[union-attr]
         return deepcopy(result)
 
+    def commit_provider_transaction_intent(self) -> None:
+        pass
+
+    def queue_execution(
+        self, actor: Principal, group_id: UUID, change_set_id: UUID
+    ) -> dict[str, object]:
+        row = self.change_sets[change_set_id]
+        assert row["creator_id"] == actor.user_id
+        assert row["active_group_id"] == group_id
+        row["state"] = "QUEUED"
+        row["revision"] = int(row["revision"]) + 1
+        row["validated_revision"] = row["revision"]
+        return deepcopy(row)
+
+    def commit_change_set_queue(self) -> None:
+        pass
+
+    def claim_queued_execution(self, actor: Principal, group_id: UUID, change_set_id: UUID) -> bool:
+        row = self.change_sets[change_set_id]
+        if (
+            row["creator_id"] != actor.user_id
+            or row["active_group_id"] != group_id
+            or row["state"] != "QUEUED"
+        ):
+            return False
+        row["state"] = "EXECUTING"
+        return True
+
     def manager_execution_target(self, *args: object) -> dict[str, object]:
         return {
             "id": MANAGER,
@@ -590,6 +618,9 @@ class MemoryChangeSetRepository:
                         "expected_provider_name": operation["resolution"]["provider_name"],
                     }
                 )
+
+    def record_successful_write_evidence(self, *args: object) -> set[str]:
+        return set()
 
     def group_provider_slug(self, *args: object) -> str:
         return "FINANCE"
@@ -758,7 +789,88 @@ async def test_execute_reauthorizes_and_permission_removal_fails_closed() -> Non
     repository.object_grants.clear()
     with pytest.raises(ResourceOutOfScopeError):
         await service.execute(principal(), FINANCE, UUID(str(change_set["id"])))
-    assert repository.change_sets[UUID(str(change_set["id"]))]["state"] == "VALIDATION_FAILED"
+    assert repository.change_sets[UUID(str(change_set["id"]))]["state"] == "FAILED"
+
+
+@pytest.mark.asyncio
+async def test_queue_execution_persists_fixed_security_context_before_dispatch() -> None:
+    repository, service, change_set = service_and_change(ProviderKind.FMC)
+    ready = service.add_operation(
+        principal(),
+        FINANCE,
+        UUID(str(change_set["id"])),
+        ChangeOperationKind.CREATE_RULE,
+        valid_rule(),
+    )
+    dispatched: list[tuple[UUID, UUID, UUID, UUID]] = []
+
+    def dispatch(
+        change_set_id: UUID, principal_id: UUID, group_id: UUID, organization_id: UUID
+    ) -> None:
+        dispatched.append((change_set_id, principal_id, group_id, organization_id))
+
+    queued = service.queue_execution(
+        principal(),
+        FINANCE,
+        UUID(str(ready["id"])),
+        dispatch,
+    )
+    assert queued["state"] == "QUEUED"
+    assert dispatched == [(UUID(str(ready["id"])), USER, FINANCE, ORG)]
+    assert repository.change_sets[UUID(str(ready["id"]))]["active_group_id"] == FINANCE
+    executed = await service.execute(principal(), FINANCE, UUID(str(ready["id"])), queued=True)
+    assert executed["state"] == "SUCCEEDED"
+
+
+def test_failed_change_set_without_provider_attempt_can_be_revalidated_and_requeued() -> None:
+    repository, service, change_set = service_and_change(ProviderKind.FMC)
+    ready = service.add_operation(
+        principal(),
+        FINANCE,
+        UUID(str(change_set["id"])),
+        ChangeOperationKind.CREATE_RULE,
+        valid_rule(),
+    )
+    change_set_id = UUID(str(ready["id"]))
+    repository.set_execution_state(
+        principal(), FINANCE, change_set_id, "FAILED", {}, {"code": "QUEUE_PUBLISH_FAILED"}
+    )
+    dispatched: list[tuple[UUID, UUID, UUID, UUID]] = []
+
+    def dispatch(change_id: UUID, user_id: UUID, group_id: UUID, organization_id: UUID) -> None:
+        dispatched.append((change_id, user_id, group_id, organization_id))
+
+    retried = service.retry_execution(
+        principal(),
+        FINANCE,
+        change_set_id,
+        dispatch,
+    )
+
+    assert retried["state"] == "QUEUED"
+    assert dispatched == [(change_set_id, USER, FINANCE, ORG)]
+
+
+def test_failed_change_set_with_provider_attempt_cannot_be_retried() -> None:
+    repository, service, change_set = service_and_change(ProviderKind.FMC)
+    ready = service.add_operation(
+        principal(),
+        FINANCE,
+        UUID(str(change_set["id"])),
+        ChangeOperationKind.CREATE_RULE,
+        valid_rule(),
+    )
+    change_set_id = UUID(str(ready["id"]))
+    repository.set_execution_state(
+        principal(), FINANCE, change_set_id, "FAILED", {}, {"code": "FAILED"}
+    )
+    repository.change_sets[change_set_id]["transactions"] = [{"state": "FAILED"}]
+
+    def dispatch(_change_id: UUID, _user_id: UUID, _group_id: UUID, _organization_id: UUID) -> None:
+        return None
+
+    with pytest.raises(InvalidChangeSetStateError):
+        service.retry_execution(principal(), FINANCE, change_set_id, dispatch)
 
 
 @pytest.mark.asyncio
@@ -871,6 +983,7 @@ async def test_supported_rule_operations_follow_changeset_to_provider_path(
     [
         ("NETWORK", "10.20.77.0/24"),
         ("PORT_SERVICE", "tcp/8443"),
+        ("PORT_SERVICE", "tcp/8000-8080"),
         ("URL", "delegated.example.test"),
     ],
 )
@@ -889,7 +1002,12 @@ async def test_supported_object_create_follows_changeset_to_provider_path(
     result = await service.execute(principal(), FINANCE, UUID(str(change_set["id"])))
     assert result["state"] == "SUCCEEDED"
     objects = await repository.provider.objects(f"{provider_kind.value}-domain-main", PageRequest())
-    assert any(item.name == f"FINANCE__created-{object_type.lower()}" for item in objects.items)
+    created = next(
+        item for item in objects.items if item.name == f"FINANCE__created-{object_type.lower()}"
+    )
+    assert created.normalized_value == ProviderObjectNamingService().normalize_value(
+        object_type, value
+    )
     assert repository.reconciled_objects == [
         {
             "owner_group_id": FINANCE,
@@ -1366,7 +1484,7 @@ def test_centralized_naming_distinguishes_reuse_and_conflicts() -> None:
         value="10.20.40.0/24",
         candidates=[candidate],
     )
-    equivalent = naming.resolve(
+    same_value_with_group_name = naming.resolve(
         provider=ProviderKind.FMC,
         group_slug="FINANCE",
         requested_name="alternate",
@@ -1376,7 +1494,34 @@ def test_centralized_naming_distinguishes_reuse_and_conflicts() -> None:
     )
     assert exact.kind is NamingResolutionKind.EXACT_REUSE
     assert conflict.kind is NamingResolutionKind.NAMING_CONFLICT
-    assert equivalent.kind is NamingResolutionKind.EQUIVALENT_REUSE
+    assert same_value_with_group_name.kind is NamingResolutionKind.NEW_OBJECT_REQUIRED
+
+
+def test_port_service_normalization_accepts_one_port_or_range() -> None:
+    naming = ProviderObjectNamingService()
+
+    assert naming.normalize_value("PORT_SERVICE", "tcp/443") == "tcp/443"
+    assert naming.normalize_value("PORT_SERVICE", "UDP/8000-8080") == "udp/8000-8080"
+    with pytest.raises(ValueError, match="must use protocol"):
+        naming.normalize_value("PORT_SERVICE", "tcp/80,tcp/443")
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("10.10.10.1", "10.10.10.1"),
+        ("10.10.10.12/24", "10.10.10.0/24"),
+        ("10.10.10.1 - 10.10.20.30", "10.10.10.1-10.10.20.30"),
+    ],
+)
+def test_network_normalization_accepts_hosts_subnets_and_ranges(value: str, expected: str) -> None:
+    assert ProviderObjectNamingService().normalize_value("NETWORK", value) == expected
+
+
+@pytest.mark.parametrize("value", ["10.10.20.30-10.10.10.1", "10.10.10.1-2001:db8::1"])
+def test_network_normalization_rejects_invalid_ranges(value: str) -> None:
+    with pytest.raises(ValueError, match="range endpoints"):
+        ProviderObjectNamingService().normalize_value("NETWORK", value)
 
 
 @pytest.mark.parametrize("role", ["viewer", "editor", "approver", "admin"])

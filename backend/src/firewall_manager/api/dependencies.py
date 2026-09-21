@@ -10,6 +10,7 @@ from firewall_manager.application.health import HealthService
 from firewall_manager.application.ports import (
     AdministrationRepository,
     AuthorizationRepository,
+    ChangeSetExecutionDispatcher,
     ChangeSetRepository,
     DevelopmentIdentityRepository,
     InventoryRepository,
@@ -108,6 +109,17 @@ def get_provider_sync_dispatcher() -> ProviderSyncDispatcher:
 
 ProviderSyncDispatcherDependency = Annotated[
     ProviderSyncDispatcher, Depends(get_provider_sync_dispatcher)
+]
+
+
+def get_change_set_execution_dispatcher() -> ChangeSetExecutionDispatcher:
+    """Composition hook for durable ChangeSet worker publication."""
+    msg = "ChangeSet execution dispatcher is not configured"
+    raise RuntimeError(msg)
+
+
+ChangeSetExecutionDispatcherDependency = Annotated[
+    ChangeSetExecutionDispatcher, Depends(get_change_set_execution_dispatcher)
 ]
 
 

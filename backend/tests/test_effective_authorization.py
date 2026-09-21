@@ -168,6 +168,16 @@ class FakeAuthorizationRepository:
     ) -> list[dict[str, object]]:
         return []
 
+    def default_context_for_user(
+        self, user_id: UUID, organization_id: UUID
+    ) -> tuple[UUID | None, UUID | None]:
+        return None, None
+
+    def set_default_context_for_user(
+        self, user_id: UUID, group_id: UUID, policy_id: UUID, organization_id: UUID
+    ) -> bool:
+        return False
+
     def delegated_context_view(
         self, user_id: UUID, group_id: UUID, policy_id: UUID, organization_id: UUID
     ) -> dict[str, object] | None:
@@ -347,6 +357,8 @@ def test_read_does_not_imply_object_use_and_drift_fails_closed() -> None:
         ("10.20.0.0/16", True),
         ("10.21.1.5", False),
         ("10.20.0.0/15", False),
+        ("10.20.10.1-10.20.20.30", True),
+        ("10.20.10.1 - 10.21.0.1", False),
         ("192.0.2.255", True),
         ("2001:db8::1", False),
         ("invalid", False),
@@ -400,31 +412,17 @@ def test_object_create_requires_app_grant_and_provider_capability() -> None:
     ).allowed
 
 
-def test_equivalent_object_cannot_be_duplicated_to_bypass_use() -> None:
+def test_group_prefixed_object_can_share_a_normalized_value() -> None:
     repository = FakeAuthorizationRepository()
     repository.equivalents[("NETWORK", "10.20.10.0/24")] = ENGINEERING_OBJECT
-    denied = authorize(
+    decision = authorize(
         repository,
         AuthorizationResourceType.OBJECT_TYPE,
         action=Action.CREATE,
         value="NETWORK",
         element="10.20.10.0/24",
     )
-    assert denied.reason is AuthorizationReason.RESOURCE_NOT_USABLE
-    repository.objects[(FINANCE, POLICY_A, ENGINEERING_OBJECT)] = (
-        MANAGER,
-        "OBSERVED",
-        {"use"},
-        6,
-    )
-    conflict = authorize(
-        repository,
-        AuthorizationResourceType.OBJECT_TYPE,
-        action=Action.CREATE,
-        value="NETWORK",
-        element="10.20.10.0/24",
-    )
-    assert conflict.reason is AuthorizationReason.EQUIVALENT_OBJECT_EXISTS
+    assert decision.reason is AuthorizationReason.ALLOWED
 
 
 def test_rule_ownership_is_exactly_the_acting_group() -> None:

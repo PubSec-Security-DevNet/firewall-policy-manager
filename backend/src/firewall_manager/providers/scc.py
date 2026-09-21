@@ -28,6 +28,7 @@ class RealSccProvider(CiscoReadOnlyProvider):
         capabilities: dict[str, CapabilityStatus],
         transport: httpx.AsyncBaseTransport | None = None,
         validate_network_target: bool = True,
+        writable: bool = False,
     ) -> None:
         endpoint = SCC_ENDPOINTS.get(region)
         if endpoint is None:
@@ -40,4 +41,5 @@ class RealSccProvider(CiscoReadOnlyProvider):
             api_prefix="/v1/cdfmc",
             transport=transport,
             validate_network_target=validate_network_target,
+            writable=writable,
         )

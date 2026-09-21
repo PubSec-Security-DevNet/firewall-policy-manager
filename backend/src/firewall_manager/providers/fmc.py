@@ -29,6 +29,7 @@ class RealFmcProvider(CiscoReadOnlyProvider):
         ca_certificate: str | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
         validate_network_target: bool = True,
+        writable: bool = False,
     ) -> None:
         super().__init__(
             endpoint=normalize_fmc_endpoint(endpoint),
@@ -39,4 +40,5 @@ class RealFmcProvider(CiscoReadOnlyProvider):
             ca_certificate=ca_certificate,
             transport=transport,
             validate_network_target=validate_network_target,
+            writable=writable,
         )

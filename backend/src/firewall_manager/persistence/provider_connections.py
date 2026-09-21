@@ -1,5 +1,6 @@
 """SQL persistence for isolated, unlimited provider connections."""
 
+import re
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from uuid import UUID
@@ -21,6 +22,18 @@ from firewall_manager.persistence.models import (
     ProviderConnection,
     ProviderConnectionScope,
 )
+from firewall_manager.providers.capabilities import (
+    VALIDATION_REQUIRED_CAPABILITIES,
+    VALIDATION_WRITE_CAPABILITIES,
+)
+
+
+def _provider_api_family(version: str | None) -> str | None:
+    """Return the stable major.minor API family from a provider build string."""
+    if not version:
+        return None
+    components = re.findall(r"\d+", version)
+    return ".".join(components[:2]) if len(components) >= 2 else None
 
 
 class SqlProviderConnectionRepository:
@@ -146,6 +159,7 @@ class SqlProviderConnectionRepository:
                 setattr(row, key, values[key])
         if routing_changed:
             row.lifecycle = "DISABLED"
+            self._disable_writes(row)
             row.connection_status = "NEVER_TESTED"
             row.provider_version = None
             row.last_error_code = None
@@ -183,6 +197,7 @@ class SqlProviderConnectionRepository:
         row.credential_updated_at = datetime.now(UTC)
         row.connection_status = "NEVER_TESTED"
         row.lifecycle = "DISABLED"
+        self._disable_writes(row)
         row.next_sync_at = None
         row.provider_version = None
         row.certificate_info = {}
@@ -205,6 +220,11 @@ class SqlProviderConnectionRepository:
     ) -> dict[str, object]:
         row = self._require_row(organization_id, connection_id)
         self._require_not_retired(row)
+        writes_were_enabled = row.write_enabled
+        previous_version = row.provider_version
+        previous_write_enabled_at = row.write_enabled_at
+        previous_write_enabled_by_user_id = row.write_enabled_by_user_id
+        self._disable_writes(row)
         now = datetime.now(UTC)
         status = str(result["status"])
         row.connection_status = status
@@ -228,14 +248,25 @@ class SqlProviderConnectionRepository:
             row.last_error_message = None
             row.last_error_correlation_id = None
             self._replace_scopes(row, scopes, now)
-            self._replace_evidence(row, capabilities, now)
+            tested_capabilities = self._replace_evidence(
+                row, capabilities, now, previous_version=previous_version
+            )
             manager = self._manager(organization_id, connection_id)
             manager.provider_version = row.provider_version
-            manager.capabilities = capabilities
-            manager.read_only = True
+            manager.capabilities = {
+                **capabilities,
+                **dict.fromkeys(tested_capabilities, "SUPPORTED"),
+            }
+            restore_writes = writes_were_enabled and row.lifecycle == "ACTIVE"
+            if restore_writes:
+                row.write_enabled = True
+                row.write_enabled_at = previous_write_enabled_at
+                row.write_enabled_by_user_id = previous_write_enabled_by_user_id
+            manager.read_only = not restore_writes
             manager.revision += 1
         else:
             row.lifecycle = "DISABLED"
+            self._disable_writes(row)
             row.next_sync_at = None
             row.provider_version = None
             row.certificate_info = {}
@@ -255,6 +286,14 @@ class SqlProviderConnectionRepository:
                 **({"error_code": row.last_error_code} if row.last_error_code else {}),
             },
         )
+        if writes_were_enabled and not row.write_enabled:
+            self._audit(
+                organization_id,
+                actor_user_id,
+                connection_id,
+                "provider_writes_disabled_for_revalidation",
+                "SUCCESS",
+            )
         return self._safe_dict(row)
 
     def set_lifecycle(
@@ -266,6 +305,7 @@ class SqlProviderConnectionRepository:
         lifecycle: str,
     ) -> dict[str, object]:
         row = self._require_row(organization_id, connection_id)
+        writes_were_enabled = row.write_enabled
         self._require_revision(row, expected_revision)
         if lifecycle == "ACTIVE" and row.connection_status != "CONNECTED":
             raise InvalidChangeSetStateError
@@ -279,13 +319,77 @@ class SqlProviderConnectionRepository:
         elif lifecycle == "RETIRED":
             row.retired_at = now
             row.next_sync_at = None
+            self._disable_writes(row)
             action = "connection_retired"
         else:
             row.next_sync_at = None
+            self._disable_writes(row)
             action = "connection_disabled"
+        if lifecycle != "ACTIVE":
+            manager = self._manager(organization_id, connection_id)
+            manager.read_only = True
+            manager.revision += 1
         row.revision += 1
         self._flush()
         self._audit(organization_id, actor_user_id, connection_id, action, "SUCCESS")
+        if writes_were_enabled and not row.write_enabled:
+            self._audit(
+                organization_id,
+                actor_user_id,
+                connection_id,
+                "provider_writes_disabled",
+                "SUCCESS",
+                {"reason": "connection_lifecycle_changed"},
+            )
+        return self._safe_dict(row)
+
+    def set_write_enabled(  # noqa: PLR0913, PLR0917 -- explicit actor and gate context
+        self,
+        organization_id: UUID,
+        actor_user_id: UUID,
+        connection_id: UUID,
+        expected_revision: int,
+        enabled: bool,
+        allow_unvalidated_non_production: bool,
+    ) -> dict[str, object]:
+        """Set the independent production write gate; compatibility evidence is advisory."""
+        del allow_unvalidated_non_production  # Retained for backward-compatible API clients.
+        row = self._require_row(organization_id, connection_id)
+        self._require_not_retired(row)
+        self._require_revision(row, expected_revision)
+        manager = self._manager(organization_id, connection_id)
+        if enabled:
+            if (
+                row.lifecycle != "ACTIVE"
+                or row.connection_status != "CONNECTED"
+                or not row.provider_version
+            ):
+                raise InvalidChangeSetStateError(
+                    details={"code": "PROVIDER_CONNECTION_NOT_VALIDATED"}
+                )
+            row.write_enabled = True
+            row.write_enabled_at = datetime.now(UTC)
+            row.write_enabled_by_user_id = actor_user_id
+            manager.read_only = False
+            action = "provider_writes_enabled"
+        else:
+            self._disable_writes(row)
+            manager.read_only = True
+            action = "provider_writes_disabled"
+        row.revision += 1
+        manager.revision += 1
+        self._flush()
+        self._audit(
+            organization_id,
+            actor_user_id,
+            connection_id,
+            action,
+            "SUCCESS",
+            {
+                "write_enabled": enabled,
+                "compatibility_evidence_is_advisory": True,
+            },
+        )
         return self._safe_dict(row)
 
     def request_sync(self, organization_id: UUID, actor_user_id: UUID, connection_id: UUID) -> None:
@@ -384,6 +488,41 @@ class SqlProviderConnectionRepository:
                 .order_by(ProviderCapabilityEvidence.capability)
             )
         )
+        provider_evidence = list(
+            self._session.scalars(
+                select(ProviderCapabilityEvidence)
+                .join(
+                    ProviderConnection,
+                    ProviderConnection.id == ProviderCapabilityEvidence.connection_id,
+                )
+                .where(ProviderConnection.provider_type == row.provider_type)
+            )
+        )
+        current_api_family = _provider_api_family(row.provider_version)
+        tested_by_family: dict[str, set[str]] = {}
+        for item in provider_evidence:
+            family = _provider_api_family(item.provider_version)
+            if (
+                family is not None
+                and item.status == "SUPPORTED"
+                and item.evidence_level == "TESTED"
+            ):
+                tested_by_family.setdefault(family, set()).add(item.capability)
+        current_family_capabilities = tested_by_family.get(current_api_family or "", set())
+        version_family_tested = bool(
+            current_api_family
+            and current_family_capabilities.intersection(VALIDATION_WRITE_CAPABILITIES)
+            and "pending_change_inspection" in current_family_capabilities
+        )
+        compatibility_warning = (
+            None
+            if version_family_tested or current_api_family is None
+            else (
+                f"{row.provider_type.upper()} {current_api_family}.x has not been write-tested "
+                "with this application version. Production writes are allowed, but provider "
+                "behavior should be monitored closely."
+            )
+        )
         return {
             "id": row.id,
             "provider_type": row.provider_type,
@@ -411,6 +550,12 @@ class SqlProviderConnectionRepository:
             "last_error_correlation_id": row.last_error_correlation_id,
             "certificate_info": dict(row.certificate_info),
             "sync_interval_minutes": row.sync_interval_minutes,
+            "write_enabled": row.write_enabled,
+            "write_validation_mode": False,
+            "version_family_tested": version_family_tested,
+            "compatibility_warning": compatibility_warning,
+            "write_enabled_at": row.write_enabled_at,
+            "write_enabled_by_user_id": row.write_enabled_by_user_id,
             "scopes": [
                 {
                     "id": scope.id,
@@ -466,10 +611,35 @@ class SqlProviderConnectionRepository:
                 self._session.delete(scope)
 
     def _replace_evidence(
-        self, row: ProviderConnection, capabilities: dict[str, str], now: datetime
-    ) -> None:
+        self,
+        row: ProviderConnection,
+        capabilities: dict[str, str],
+        now: datetime,
+        *,
+        previous_version: str | None,
+    ) -> set[str]:
         if row.provider_version is None:
-            return
+            return set()
+        compatible_previous: dict[str, ProviderCapabilityEvidence] = {}
+        previous_api_family = _provider_api_family(previous_version)
+        if (
+            previous_version
+            and previous_version != row.provider_version
+            and previous_api_family is not None
+            and previous_api_family == _provider_api_family(row.provider_version)
+        ):
+            compatible_previous = {
+                item.capability: item
+                for item in self._session.scalars(
+                    select(ProviderCapabilityEvidence).where(
+                        ProviderCapabilityEvidence.connection_id == row.id,
+                        ProviderCapabilityEvidence.provider_version == previous_version,
+                        ProviderCapabilityEvidence.status == "SUPPORTED",
+                        ProviderCapabilityEvidence.evidence_level == "TESTED",
+                    )
+                )
+            }
+        tested: set[str] = set()
         for capability, status in capabilities.items():
             evidence = self._session.scalar(
                 select(ProviderCapabilityEvidence).where(
@@ -486,6 +656,25 @@ class SqlProviderConnectionRepository:
                     capability=capability,
                 )
                 self._session.add(evidence)
+            elif evidence.status == "SUPPORTED" and evidence.evidence_level == "TESTED":
+                # A read-only connection probe must not erase live write evidence
+                # already proven against this exact provider version.
+                tested.add(capability)
+                continue
+            previous = compatible_previous.get(capability)
+            if (
+                previous is not None
+                and capability in VALIDATION_REQUIRED_CAPABILITIES
+                and status in {"PARTIAL", "SUPPORTED"}
+            ):
+                evidence.status = "SUPPORTED"
+                evidence.evidence_level = "TESTED"
+                evidence.evidence_summary = (
+                    f"Carried forward from compatible API family version {previous_version}."
+                )
+                evidence.tested_at = now
+                tested.add(capability)
+                continue
             evidence.status = status
             evidence.evidence_level = "TESTED" if status == "READ_ONLY" else "NOT_STARTED"
             evidence.evidence_summary = (
@@ -494,6 +683,9 @@ class SqlProviderConnectionRepository:
                 else "No live compatibility evidence has been recorded."
             )
             evidence.tested_at = now if status == "READ_ONLY" else None
+            if evidence.status == "SUPPORTED" and evidence.evidence_level == "TESTED":
+                tested.add(capability)
+        return tested
 
     def _audit(  # noqa: PLR0913, PLR0917 -- complete append-only evidence context
         self,
@@ -552,6 +744,13 @@ class SqlProviderConnectionRepository:
     def _reset_manager_validation(manager: FirewallManager) -> None:
         manager.provider_version = None
         manager.capabilities = dict.fromkeys(manager.capabilities, "NOT_STARTED")
+        manager.read_only = True
+
+    @staticmethod
+    def _disable_writes(row: ProviderConnection) -> None:
+        row.write_enabled = False
+        row.write_enabled_at = None
+        row.write_enabled_by_user_id = None
 
     @staticmethod
     def _require_revision(row: ProviderConnection, expected_revision: int) -> None:

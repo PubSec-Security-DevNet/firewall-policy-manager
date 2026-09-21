@@ -23,6 +23,7 @@ _RESOURCE_NAMES = frozenset(
         "category-mappings",
     }
 )
+_USER_ROLES = frozenset({"viewer", "editor", "approver", "group_admin", "firewall_admin", "admin"})
 
 
 class AdministrationService:
@@ -75,6 +76,20 @@ class AdministrationService:
             resource,
             resource_id,
             enabled,
+            expected_revision,
+        )
+
+    def update_user_role(
+        self, principal: Principal, user_id: UUID, role: str, expected_revision: int
+    ) -> dict[str, object]:
+        self._require_admin(principal)
+        if role not in _USER_ROLES or expected_revision < 1:
+            raise InvalidInputError
+        return self._repository.update_user_role(
+            principal.organization_id,
+            principal.user_id,
+            user_id,
+            role,
             expected_revision,
         )
 

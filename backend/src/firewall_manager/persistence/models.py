@@ -80,6 +80,12 @@ class User(TimestampMixin, Base):
     display_name: Mapped[str] = mapped_column(String(200))
     role: Mapped[str] = mapped_column(String(50))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    default_group_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("application_groups.id"), nullable=True
+    )
+    default_policy_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("access_policies.id"), nullable=True
+    )
     revision: Mapped[int] = mapped_column(Integer, default=1)
 
 
@@ -158,6 +164,9 @@ class ProviderConnection(TimestampMixin, Base):
     certificate_info: Mapped[dict[str, str]] = mapped_column(JSONB, default=dict)
     sync_interval_minutes: Mapped[int] = mapped_column(Integer, default=60)
     next_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    write_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    write_enabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    write_enabled_by_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
     retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     revision: Mapped[int] = mapped_column(Integer, default=1)
 
@@ -502,7 +511,7 @@ class ObjectReference(TimestampMixin, Base):
         ),
         CheckConstraint(
             "element_type IN ('UNSPECIFIED','SOURCE_NETWORK','DESTINATION_NETWORK','PORT_SERVICE',"
-            "'APPLICATION','URL','MEMBER')",
+            "'SOURCE_PORT','DESTINATION_PORT','APPLICATION','URL','MEMBER')",
             name="ck_object_references_element_type",
         ),
         UniqueConstraint("source_rule_id", "target_object_id", "element_type"),

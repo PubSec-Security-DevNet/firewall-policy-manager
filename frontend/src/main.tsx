@@ -1,4 +1,5 @@
 import '@mantine/core/styles.css';
+import './ui/skin.css';
 
 import { MantineProvider } from '@mantine/core';
 import { StrictMode } from 'react';
@@ -12,7 +13,7 @@ if (root === null) throw new Error('Application root element is missing');
 
 createRoot(root).render(
   <StrictMode>
-    <MantineProvider theme={appTheme} defaultColorScheme="auto">
+    <MantineProvider theme={appTheme} defaultColorScheme="dark">
       <App />
     </MantineProvider>
   </StrictMode>,

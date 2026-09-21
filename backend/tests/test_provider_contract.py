@@ -84,7 +84,7 @@ async def test_mock_provider_contract_supports_paginated_normalized_discovery(
     assert {reference.element for reference in rules.items[0].object_references} >= {
         RuleObjectElement.SOURCE_NETWORK,
         RuleObjectElement.DESTINATION_NETWORK,
-        RuleObjectElement.PORT_SERVICE,
+        RuleObjectElement.DESTINATION_PORT,
     }
     assert {reference.element for reference in rules.items[0].zone_references} == {
         ZoneElement.SOURCE,

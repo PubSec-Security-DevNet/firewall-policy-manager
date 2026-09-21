@@ -12,7 +12,11 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import RequestResponseEndpoint
 from starlette.responses import Response
 
-from firewall_manager.api.dependencies import get_provider_factory, get_provider_sync_dispatcher
+from firewall_manager.api.dependencies import (
+    get_change_set_execution_dispatcher,
+    get_provider_factory,
+    get_provider_sync_dispatcher,
+)
 from firewall_manager.api.routes import dev_router, get_provider_readers, router
 from firewall_manager.api.schemas import ErrorEnvelope
 from firewall_manager.application.errors import ApplicationError
@@ -21,12 +25,21 @@ from firewall_manager.providers.factory import build_real_provider
 from firewall_manager.providers.fmc import FmcProviderReader
 from firewall_manager.providers.scc import SccProviderReader
 from firewall_manager.security.redaction import SecretRedactionFilter
-from firewall_manager.worker.tasks import synchronize_provider_connection
+from firewall_manager.worker.tasks import execute_change_set, synchronize_provider_connection
 
 
 def dispatch_provider_sync(connection_id: UUID) -> object:
     """Publish one connection UUID after the repository has committed its queue state."""
     return synchronize_provider_connection.send(str(connection_id))
+
+
+def dispatch_change_set_execution(
+    change_set_id: UUID, principal_id: UUID, group_id: UUID, organization_id: UUID
+) -> object:
+    """Publish the immutable ChangeSet execution context after its queue claim commits."""
+    return execute_change_set.send(
+        str(change_set_id), str(principal_id), str(group_id), str(organization_id)
+    )
 
 
 def configure_logging() -> None:
@@ -61,6 +74,9 @@ def create_app() -> FastAPI:
     application.dependency_overrides[get_provider_readers] = lambda: providers
     application.dependency_overrides[get_provider_factory] = lambda: build_real_provider
     application.dependency_overrides[get_provider_sync_dispatcher] = lambda: dispatch_provider_sync
+    application.dependency_overrides[get_change_set_execution_dispatcher] = lambda: (
+        dispatch_change_set_execution
+    )
 
     @application.middleware("http")
     async def correlation_id(request: Request, call_next: RequestResponseEndpoint) -> Response:

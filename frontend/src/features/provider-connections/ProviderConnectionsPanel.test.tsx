@@ -45,7 +45,8 @@ describe('ProviderConnectionsPanel', () => {
       </MantineProvider>,
     );
 
-    expect(await screen.findByText(/How to create this credential/)).toBeVisible();
+    await userEvent.click(await screen.findByRole('button', { name: 'Add Connection' }));
+    await waitFor(() => expect(screen.getByText(/How to create this credential/)).toBeVisible());
     expect(screen.getByText(/READ-ONLY DISCOVERY/)).toBeVisible();
     const user = userEvent.setup();
     await user.type(screen.getByRole('textbox', { name: 'Display name' }), 'FMC — Test');
@@ -53,7 +54,7 @@ describe('ProviderConnectionsPanel', () => {
     await user.clear(endpoint);
     await user.type(endpoint, 'https://fmc.example.test');
     await user.type(screen.getByRole('textbox', { name: 'Dedicated API username' }), 'api-user');
-    const password = container.querySelector<HTMLInputElement>('input[type="password"]');
+    const password = document.querySelector<HTMLInputElement>('input[type="password"]');
     expect(password).not.toBeNull();
     if (!password) throw new Error('Password field was not rendered');
     await user.type(password, 'restricted-test-value');
@@ -68,5 +69,78 @@ describe('ProviderConnectionsPanel', () => {
     expect(await axe.run(container, { rules: { 'color-contrast': { enabled: false } } })).toEqual(
       expect.objectContaining({ violations: [] }),
     );
-  }, 10_000);
+  }, 20_000);
+
+  it('shows an untested-version warning without obsolete validation-write messaging', async () => {
+    const warning =
+      'FMC 10.1.x has not been write-tested with this application version. Production writes are allowed, but provider behavior should be monitored closely.';
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const path =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        if (path.startsWith('/api/v1/admin/provider-connections?')) {
+          return Promise.resolve(
+            Response.json({
+              total: 1,
+              items: [
+                {
+                  id: 'connection-1',
+                  provider_type: 'fmc',
+                  display_name: 'Production FMC',
+                  lifecycle: 'ACTIVE',
+                  enabled: true,
+                  connection_mode: 'DIRECT',
+                  evidence_profile: 'real',
+                  base_endpoint: 'https://fmc.example.test',
+                  region: null,
+                  tls_mode: 'SYSTEM',
+                  credential_present: true,
+                  credential_type: 'USERNAME_PASSWORD',
+                  credential_username: 'api-user',
+                  credential_updated_at: '2026-09-20T00:00:00Z',
+                  provider_version: '10.1.2 (build 3)',
+                  connection_status: 'CONNECTED',
+                  sync_status: 'COMPLETED',
+                  last_connection_test: '2026-09-20T00:00:00Z',
+                  last_successful_connection: '2026-09-20T00:00:00Z',
+                  last_sync: '2026-09-20T00:00:00Z',
+                  last_successful_sync: '2026-09-20T00:00:00Z',
+                  last_error_code: null,
+                  last_error_message: null,
+                  last_error_correlation_id: null,
+                  certificate_info: {},
+                  sync_interval_minutes: 15,
+                  write_enabled: false,
+                  write_validation_mode: false,
+                  version_family_tested: false,
+                  compatibility_warning: warning,
+                  write_enabled_at: null,
+                  write_enabled_by_user_id: null,
+                  scopes: [],
+                  capability_evidence: [],
+                  created_at: '2026-09-20T00:00:00Z',
+                  updated_at: '2026-09-20T00:00:00Z',
+                  revision: 1,
+                },
+              ],
+            }),
+          );
+        }
+        throw new Error(`Unexpected request: ${path}`);
+      }),
+    );
+
+    render(
+      <MantineProvider theme={appTheme}>
+        <ProviderConnectionsPanel />
+      </MantineProvider>,
+    );
+
+    expect(await screen.findByText('Version untested')).toBeVisible();
+    expect(screen.getByText(warning)).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Enable production writes' })).toBeEnabled();
+    expect(screen.queryByText(/validation writes/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/non-production/i)).not.toBeInTheDocument();
+  });
 });

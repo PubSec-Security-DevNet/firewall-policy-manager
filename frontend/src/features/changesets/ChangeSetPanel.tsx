@@ -1,30 +1,41 @@
 import { useEffect, useState } from 'react';
+import { IconAlertTriangle, IconCircleCheck, IconFileDiff, IconLoader2 } from '@tabler/icons-react';
 
 import {
-  addDraftObject,
-  addDraftRule,
   ApiError,
   changeSetAction,
-  createChangeSet,
   loadChangeSets,
   type ChangeSet,
   type DelegatedContext,
 } from '../../api/client';
 import {
   AppAlert as Alert,
-  AppBadge as Badge,
   AppButton as Button,
   AppCard as Card,
+  AppDataTable,
+  AppDialog as Dialog,
+  AppDivider as Divider,
+  AppEmptyState,
   AppGroup as Group,
-  AppSelect as Select,
+  AppPaper as Paper,
   AppSimpleGrid as SimpleGrid,
   AppStack as Stack,
+  AppStatusBadge,
   AppTable as Table,
   AppText as Text,
-  AppTextarea as Textarea,
-  AppTextInput as TextInput,
   AppTitle as Title,
+  MetricCard,
 } from '../../ui';
+
+const SUBMITTED_STATES = new Set([
+  'QUEUED',
+  'EXECUTING',
+  'SUCCEEDED',
+  'FAILED',
+  'PARTIALLY_SUCCEEDED',
+  'CONFLICT',
+  'RECONCILIATION_REQUIRED',
+]);
 
 export function ChangeSetPanel({
   activeGroupId,
@@ -34,328 +45,552 @@ export function ChangeSetPanel({
   context: DelegatedContext;
 }) {
   const [items, setItems] = useState<ChangeSet[]>([]);
-  const [selectedId, setSelectedId] = useState('');
-  const [title, setTitle] = useState('');
-  const [description, setDescription] = useState('');
   const [error, setError] = useState('');
-  const [busy, setBusy] = useState(false);
-  const selected = items.find((item) => item.id === selectedId);
+  const [retryingId, setRetryingId] = useState('');
+  const [detailsId, setDetailsId] = useState('');
+  const selected = items.find((item) => item.id === detailsId);
 
   useEffect(() => {
-    void loadChangeSets(activeGroupId)
-      .then((rows) => {
-        setItems(rows);
-        setSelectedId(rows[0]?.id ?? '');
-      })
-      .catch((reason: unknown) => setError(message(reason)));
+    let active = true;
+    const load = () =>
+      loadChangeSets(activeGroupId)
+        .then((rows) => {
+          if (!active) return;
+          setItems(
+            rows.filter(
+              (item) =>
+                item.access_policy_id === context.policy.id && SUBMITTED_STATES.has(item.state),
+            ),
+          );
+        })
+        .catch((reason: unknown) => {
+          if (active) setError(message(reason));
+        });
+    void load();
+    const refresh = window.setInterval(() => void load(), 3_000);
+    return () => {
+      active = false;
+      window.clearInterval(refresh);
+    };
   }, [activeGroupId, context.policy.id]);
 
-  const replace = (item: ChangeSet) => {
-    setItems((current) => [item, ...current.filter((row) => row.id !== item.id)]);
-    setSelectedId(item.id);
-  };
-  const run = async (work: () => Promise<ChangeSet>) => {
-    setBusy(true);
+  const retry = async (item: ChangeSet) => {
+    if (
+      !window.confirm(
+        `Retry ${item.title}?\n\nCurrent authorization, provider capabilities, and revisions will be checked again before it is queued.`,
+      )
+    )
+      return;
+    setRetryingId(item.id);
     setError('');
     try {
-      replace(await work());
+      const updated = await changeSetAction(item.id, activeGroupId, 'retry');
+      setItems((current) => current.map((row) => (row.id === updated.id ? updated : row)));
     } catch (reason) {
       setError(message(reason));
     } finally {
-      setBusy(false);
+      setRetryingId('');
     }
   };
 
+  const inProgress = items.filter((item) => ['QUEUED', 'EXECUTING'].includes(item.state)).length;
+  const successful = items.filter((item) => item.state === 'SUCCEEDED').length;
+  const attention = items.filter((item) =>
+    ['FAILED', 'PARTIALLY_SUCCEEDED', 'CONFLICT', 'RECONCILIATION_REQUIRED'].includes(item.state),
+  ).length;
+
   return (
-    <Card withBorder component="section" aria-labelledby="changeset-heading">
+    <Stack gap="lg">
+      <SimpleGrid cols={{ base: 1, xs: 2, lg: 4 }}>
+        <MetricCard
+          label="Submitted"
+          value={items.length}
+          detail="ChangeSets for this policy"
+          icon={<IconFileDiff size={19} />}
+        />
+        <MetricCard
+          label="In progress"
+          value={inProgress}
+          detail="Queued or executing"
+          icon={<IconLoader2 size={19} />}
+        />
+        <MetricCard
+          label="Succeeded"
+          value={successful}
+          detail="Provider writes completed"
+          icon={<IconCircleCheck size={19} />}
+        />
+        <MetricCard
+          label="Needs attention"
+          value={attention}
+          detail="Failed, conflicted, or unresolved"
+          icon={<IconAlertTriangle size={19} />}
+        />
+      </SimpleGrid>
+      <Card component="section" aria-labelledby="changeset-heading" id="changes-workflow">
+        <Group justify="space-between" align="start" mb="md">
+          <div>
+            <Title id="changeset-heading" order={2} size="h4">
+              Submitted ChangeSets
+            </Title>
+            <Text size="sm" c="dimmed">
+              Provider configuration submissions and their current execution status.
+            </Text>
+          </div>
+          <AppStatusBadge
+            value={context.provider_writable ? 'ACTIVE' : 'READ_ONLY'}
+            label={context.provider_writable ? 'Submission enabled' : 'Provider read-only'}
+          />
+        </Group>
+
+        {error && (
+          <Alert color="red" title="ChangeSet status could not be loaded" mb="md" role="alert">
+            {error}
+          </Alert>
+        )}
+
+        {!error && items.length === 0 ? (
+          <AppEmptyState
+            title="No submitted ChangeSets"
+            description="ChangeSets appear here after they are submitted for provider execution. Drafts and failed preflight attempts are not shown."
+          />
+        ) : (
+          items.length > 0 && (
+            <AppDataTable label="Submitted ChangeSets">
+              <Table.Thead>
+                <Table.Tr>
+                  <Table.Th>ChangeSet</Table.Th>
+                  <Table.Th>Operations</Table.Th>
+                  <Table.Th>Provider</Table.Th>
+                  <Table.Th>Status</Table.Th>
+                  <Table.Th>Updated</Table.Th>
+                  <Table.Th>Actions</Table.Th>
+                </Table.Tr>
+              </Table.Thead>
+              <Table.Tbody>
+                {items.map((item) => (
+                  <Table.Tr key={item.id}>
+                    <Table.Td>
+                      <Text fw={650}>{item.title}</Text>
+                      {item.description && (
+                        <Text size="xs" c="dimmed" lineClamp={1}>
+                          {item.description}
+                        </Text>
+                      )}
+                    </Table.Td>
+                    <Table.Td>{item.operations.length}</Table.Td>
+                    <Table.Td>
+                      {context.provider_name} ({context.provider_type.toUpperCase()})
+                    </Table.Td>
+                    <Table.Td>
+                      <AppStatusBadge value={item.state} />
+                    </Table.Td>
+                    <Table.Td>{new Date(item.updated_at).toLocaleString()}</Table.Td>
+                    <Table.Td>
+                      <Group gap="xs" wrap="nowrap">
+                        <Button size="xs" variant="subtle" onClick={() => setDetailsId(item.id)}>
+                          View details
+                        </Button>
+                        <Button
+                          size="xs"
+                          variant="light"
+                          loading={retryingId === item.id}
+                          disabled={!retryable(item) || Boolean(retryingId)}
+                          onClick={() => void retry(item)}
+                        >
+                          Retry
+                        </Button>
+                      </Group>
+                    </Table.Td>
+                  </Table.Tr>
+                ))}
+              </Table.Tbody>
+            </AppDataTable>
+          )
+        )}
+
+        <Dialog
+          opened={Boolean(selected)}
+          onClose={() => setDetailsId('')}
+          title="ChangeSet details"
+          size="xl"
+          centered
+          closeButtonProps={{ 'aria-label': 'Close ChangeSet details' }}
+          styles={{
+            content: { maxHeight: 'calc(100dvh - 2rem)' },
+            body: { overflowY: 'auto' },
+          }}
+        >
+          {selected && <ChangeSetDetails item={selected} context={context} />}
+        </Dialog>
+      </Card>
+    </Stack>
+  );
+}
+
+function ChangeSetDetails({ item, context }: { item: ChangeSet; context: DelegatedContext }) {
+  const failures = failureCodes(item);
+  const pendingWarnings = pendingChangeWarnings(item);
+  return (
+    <Stack gap="md">
       <Group justify="space-between" align="start">
         <div>
-          <Title id="changeset-heading" order={3} size="h4">
-            Draft ChangeSets
+          <Title order={3} size="h4">
+            {item.title}
           </Title>
-          <Text size="sm" c="dimmed">
-            Execution targets deterministic mock providers only. Production writes and deployment
-            are disabled.
-          </Text>
+          {item.description && (
+            <Text size="sm" c="dimmed" mt={4}>
+              {item.description}
+            </Text>
+          )}
         </div>
-        <Badge color="yellow">Mock execution only</Badge>
+        <AppStatusBadge value={item.state} />
       </Group>
 
-      {error && (
-        <Alert color="red" title="ChangeSet request failed" mt="md" role="alert">
-          {error}
+      <Paper withBorder p="md">
+        <Group gap="xl" align="start">
+          <Detail
+            label="Provider"
+            value={`${context.provider_name} (${context.provider_type.toUpperCase()})`}
+          />
+          <Detail label="Requested by" value={requestingUser(item)} />
+          <Detail label="Created" value={new Date(item.created_at).toLocaleString()} />
+          <Detail label="Last updated" value={new Date(item.updated_at).toLocaleString()} />
+          <Detail label="ChangeSet ID" value={item.id} code />
+        </Group>
+      </Paper>
+
+      {failures.length > 0 && (
+        <Alert color="red" title="Failure details">
+          {failures.map(humanize).join(' · ')}
         </Alert>
       )}
 
-      <SimpleGrid cols={{ base: 1, md: 2 }} mt="md">
-        <Stack gap="xs">
-          <TextInput
-            label="ChangeSet name"
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-          />
-          <Textarea
-            label="Description"
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-          />
-          <Button
-            disabled={!title.trim() || busy}
-            onClick={() =>
-              void run(() =>
-                createChangeSet(activeGroupId, context.policy.id, title.trim(), description),
-              )
-            }
-          >
-            Create draft
-          </Button>
-        </Stack>
-        <Stack gap="xs">
-          <Select
-            label="Current ChangeSet"
-            placeholder="Create or select a draft"
-            value={selectedId || null}
-            onChange={(value) => setSelectedId(value ?? '')}
-            data={items.map((item) => ({
-              value: item.id,
-              label: `${item.title} · ${item.state}`,
-            }))}
-          />
-          {selected && (
-            <Group>
-              <Badge color={selected.state === 'READY' ? 'green' : 'blue'}>{selected.state}</Badge>
-              <Text size="sm">{selected.operations.length} operations</Text>
-            </Group>
+      {pendingWarnings.length > 0 && (
+        <Alert color="yellow" title="Other provider changes are pending">
+          This ChangeSet was applied independently after re-reading its affected resources. Provider
+          deployment remains separate and may also deploy changes outside this ChangeSet.
+          {pendingWarnings.some((warning) => warning.actors.length > 0) && (
+            <Text size="xs" mt={5}>
+              Reported provider actors:{' '}
+              {[...new Set(pendingWarnings.flatMap((warning) => warning.actors))].join(', ')}
+            </Text>
           )}
-        </Stack>
-      </SimpleGrid>
-
-      {selected && (
-        <Stack mt="lg">
-          <DraftRuleForm
-            context={context}
-            disabled={busy || !editable(selected)}
-            onAdd={(rule) => void run(() => addDraftRule(selected.id, activeGroupId, rule))}
-          />
-          <DraftObjectForm
-            context={context}
-            disabled={busy || !editable(selected)}
-            onAdd={(object) => void run(() => addDraftObject(selected.id, activeGroupId, object))}
-          />
-          <Group>
-            <Button
-              variant="light"
-              disabled={busy || !editable(selected)}
-              onClick={() =>
-                void run(() => changeSetAction(selected.id, activeGroupId, 'preflight'))
-              }
-            >
-              Run preflight
-            </Button>
-            <Button
-              variant="light"
-              disabled={busy || !editable(selected)}
-              onClick={() => void run(() => changeSetAction(selected.id, activeGroupId, 'refresh'))}
-            >
-              Check provider revisions
-            </Button>
-            <Button
-              color="orange"
-              disabled={busy || selected.state !== 'READY'}
-              onClick={() => void run(() => changeSetAction(selected.id, activeGroupId, 'execute'))}
-            >
-              Execute against mock
-            </Button>
-          </Group>
-          <ChangeSetResults item={selected} />
-        </Stack>
+        </Alert>
       )}
-    </Card>
-  );
-}
 
-function DraftRuleForm({
-  context,
-  disabled,
-  onAdd,
-}: {
-  context: DelegatedContext;
-  disabled: boolean;
-  onAdd: (value: Record<string, unknown>) => void;
-}) {
-  const [name, setName] = useState('');
-  const [categoryId, setCategoryId] = useState(context.categories[0]?.id ?? '');
-  const [sourceZoneId, setSourceZoneId] = useState('');
-  const [destinationZoneId, setDestinationZoneId] = useState('');
-  const [sourceObjectId, setSourceObjectId] = useState('');
-  const [destinationObjectId, setDestinationObjectId] = useState('');
-  const canCreate = context.capabilities.includes('create_rule');
-  return (
-    <Card withBorder>
-      <Text fw={700}>Add normalized rule operation</Text>
-      <SimpleGrid cols={{ base: 1, sm: 2, lg: 3 }} mt="xs">
-        <TextInput label="Rule name" value={name} onChange={(e) => setName(e.target.value)} />
-        <Select
-          label="Authorized category"
-          value={categoryId || null}
-          onChange={(value) => setCategoryId(value ?? '')}
-          data={context.categories.map((item) => ({ value: item.id, label: item.name }))}
-        />
-        <Select
-          label="Source zone"
-          clearable
-          value={sourceZoneId || null}
-          onChange={(value) => setSourceZoneId(value ?? '')}
-          data={context.zones
-            .filter((item) => item.direction === 'SOURCE' || item.direction === 'BOTH')
-            .map((item) => ({ value: item.id, label: item.name }))}
-        />
-        <Select
-          label="Destination zone"
-          clearable
-          value={destinationZoneId || null}
-          onChange={(value) => setDestinationZoneId(value ?? '')}
-          data={context.zones
-            .filter((item) => item.direction === 'DESTINATION' || item.direction === 'BOTH')
-            .map((item) => ({ value: item.id, label: item.name }))}
-        />
-        <Select
-          label="Source network object"
-          clearable
-          value={sourceObjectId || null}
-          onChange={(value) => setSourceObjectId(value ?? '')}
-          data={context.objects
-            .filter((item) => item.object_type === 'NETWORK')
-            .map((item) => ({ value: item.id, label: item.name }))}
-        />
-        <Select
-          label="Destination network object"
-          clearable
-          value={destinationObjectId || null}
-          onChange={(value) => setDestinationObjectId(value ?? '')}
-          data={context.objects
-            .filter((item) => item.object_type === 'NETWORK')
-            .map((item) => ({ value: item.id, label: item.name }))}
-        />
-      </SimpleGrid>
-      <Button
-        mt="sm"
-        disabled={disabled || !canCreate || !name.trim() || !categoryId}
-        onClick={() =>
-          onAdd({
-            name: name.trim(),
-            action: 'ALLOW',
-            category_id: categoryId,
-            source_zone_ids: sourceZoneId ? [sourceZoneId] : [],
-            destination_zone_ids: destinationZoneId ? [destinationZoneId] : [],
-            source_object_ids: sourceObjectId ? [sourceObjectId] : [],
-            destination_object_ids: destinationObjectId ? [destinationObjectId] : [],
-          })
-        }
-      >
-        Add rule draft
-      </Button>
-    </Card>
-  );
-}
-
-function DraftObjectForm({
-  context,
-  disabled,
-  onAdd,
-}: {
-  context: DelegatedContext;
-  disabled: boolean;
-  onAdd: (value: Record<string, unknown>) => void;
-}) {
-  const options = context.object_create
-    .filter((item) => item.provider_supported)
-    .map((item) => ({ value: item.object_type, label: item.object_type }));
-  const [objectType, setObjectType] = useState(options[0]?.value ?? '');
-  const [name, setName] = useState('');
-  const [value, setValue] = useState('');
-  return (
-    <Card withBorder>
-      <Text fw={700}>Add object operation</Text>
-      <SimpleGrid cols={{ base: 1, sm: 3 }} mt="xs">
-        <Select
-          label="Permitted type"
-          data={options}
-          value={objectType || null}
-          onChange={(next) => setObjectType(next ?? '')}
-        />
-        <TextInput label="Object name" value={name} onChange={(e) => setName(e.target.value)} />
-        <TextInput
-          label="Normalized value"
-          value={value}
-          onChange={(e) => setValue(e.target.value)}
-        />
-      </SimpleGrid>
-      <Button
-        mt="sm"
-        disabled={disabled || !objectType || !name.trim() || !value.trim()}
-        onClick={() => onAdd({ name: name.trim(), object_type: objectType, value: value.trim() })}
-      >
-        Resolve and add object
-      </Button>
-    </Card>
-  );
-}
-
-function ChangeSetResults({ item }: { item: ChangeSet }) {
-  return (
-    <div style={{ overflowX: 'auto' }}>
-      <Table withTableBorder striped aria-label="ChangeSet validation and execution results">
-        <Table.Thead>
-          <Table.Tr>
-            <Table.Th>Operation</Table.Th>
-            <Table.Th>Status</Table.Th>
-            <Table.Th>Resolution / result</Table.Th>
-          </Table.Tr>
-        </Table.Thead>
-        <Table.Tbody>
-          {item.operations.length === 0 ? (
+      <div>
+        <Text fw={650} mb="xs">
+          Operations ({item.operations.length})
+        </Text>
+        <AppDataTable label={`Operations in ${item.title}`}>
+          <Table.Thead>
             <Table.Tr>
-              <Table.Td colSpan={3}>No draft operations yet.</Table.Td>
+              <Table.Th>#</Table.Th>
+              <Table.Th>Operation</Table.Th>
+              <Table.Th>Object</Table.Th>
+              <Table.Th>Value</Table.Th>
+              <Table.Th>Status</Table.Th>
+              <Table.Th>Result</Table.Th>
             </Table.Tr>
-          ) : (
-            item.operations.map((operation) => (
-              <Table.Tr key={operation.id}>
-                <Table.Td>{operation.kind}</Table.Td>
-                <Table.Td>{operation.status}</Table.Td>
-                <Table.Td>
-                  {displayValue(
-                    operation.resolution.kind ??
-                      operation.execution_result.status ??
-                      `${operation.validation_results.length} preflight checks`,
-                  )}
-                </Table.Td>
-              </Table.Tr>
-            ))
-          )}
-        </Table.Tbody>
-      </Table>
-      {Object.keys(item.failure_info).length > 0 && (
-        <Alert color="red" title="Conflict or execution failure" mt="sm">
-          {JSON.stringify(item.failure_info)}
-        </Alert>
+          </Table.Thead>
+          <Table.Tbody>
+            {[...item.operations]
+              .sort((left, right) => left.sequence - right.sequence)
+              .map((operation) => {
+                const result = providerResult(item, operation.id);
+                return (
+                  <Table.Tr key={operation.id}>
+                    <Table.Td>{operation.sequence}</Table.Td>
+                    <Table.Td>{humanize(operation.kind)}</Table.Td>
+                    <Table.Td>
+                      <Text size="sm" fw={600}>
+                        {operationName(operation.payload)}
+                      </Text>
+                      <Text size="xs" c="dimmed">
+                        {humanize(stringValue(operation.payload.object_type) || 'resource')}
+                      </Text>
+                    </Table.Td>
+                    <Table.Td>{operationValue(operation.payload, operation.resolution)}</Table.Td>
+                    <Table.Td>
+                      <AppStatusBadge value={stringValue(result.status) || operation.status} />
+                    </Table.Td>
+                    <Table.Td>
+                      <OperationResult result={result} fallback={operation.failure_info} />
+                    </Table.Td>
+                  </Table.Tr>
+                );
+              })}
+          </Table.Tbody>
+        </AppDataTable>
+      </div>
+
+      {item.transactions.length > 0 && (
+        <>
+          <Divider />
+          <div>
+            <Text fw={650} mb="xs">
+              Provider attempts ({item.transactions.length})
+            </Text>
+            <AppDataTable label={`Provider attempts for ${item.title}`}>
+              <Table.Thead>
+                <Table.Tr>
+                  <Table.Th>Status</Table.Th>
+                  <Table.Th>Updated</Table.Th>
+                  <Table.Th>Provider operation</Table.Th>
+                  <Table.Th>Reconciliation</Table.Th>
+                </Table.Tr>
+              </Table.Thead>
+              <Table.Tbody>
+                {item.transactions.map((transaction) => (
+                  <Table.Tr key={transaction.id}>
+                    <Table.Td>
+                      <AppStatusBadge value={transaction.state} />
+                    </Table.Td>
+                    <Table.Td>{new Date(transaction.updated_at).toLocaleString()}</Table.Td>
+                    <Table.Td>
+                      <Text size="xs" className="fm-code">
+                        {transaction.external_operation_id ?? 'Not assigned'}
+                      </Text>
+                    </Table.Td>
+                    <Table.Td>
+                      {transaction.reconciliation_required ? 'Required' : 'Not required'}
+                    </Table.Td>
+                  </Table.Tr>
+                ))}
+              </Table.Tbody>
+            </AppDataTable>
+          </div>
+        </>
       )}
+    </Stack>
+  );
+}
+
+function Detail({ label, value, code = false }: { label: string; value: string; code?: boolean }) {
+  return (
+    <div>
+      <Text size="xs" c="dimmed">
+        {label}
+      </Text>
+      <Text size="sm" fw={600} className={code ? 'fm-code' : undefined}>
+        {value}
+      </Text>
     </div>
   );
 }
 
-function editable(item: ChangeSet) {
-  return ['DRAFT', 'VALIDATION_FAILED', 'READY'].includes(item.state);
+function OperationResult({
+  result,
+  fallback,
+}: {
+  result: Record<string, unknown>;
+  fallback: Record<string, unknown>;
+}) {
+  const failure = record(result.failure);
+  const code = stringValue(failure.code) || stringValue(fallback.code);
+  const providerMessages = Array.isArray(failure.provider_messages)
+    ? failure.provider_messages
+        .map((item) => {
+          const message = record(item);
+          return (
+            stringValue(message.description) ||
+            stringValue(message.details) ||
+            stringValue(message.errorCode) ||
+            stringValue(message.code)
+          );
+        })
+        .filter(Boolean)
+    : [];
+  if (code)
+    return (
+      <Stack gap={2}>
+        <Text size="sm" c="red">
+          {humanize(code)}
+        </Text>
+        {providerMessages.map((message, index) => (
+          <Text key={`${message}-${index}`} size="xs" c="red">
+            {message}
+          </Text>
+        ))}
+      </Stack>
+    );
+  const warned = Array.isArray(result.warnings) && result.warnings.length > 0;
+  if (result.mutated === true)
+    return (
+      <Stack gap={2}>
+        <Text size="sm">Provider updated</Text>
+        {warned && (
+          <Text size="xs" c="yellow">
+            Other pending changes exist
+          </Text>
+        )}
+      </Stack>
+    );
+  if (result.mutated === false)
+    return (
+      <Stack gap={2}>
+        <Text size="sm" c="dimmed">
+          No provider change
+        </Text>
+        {warned && (
+          <Text size="xs" c="yellow">
+            Other pending changes exist
+          </Text>
+        )}
+      </Stack>
+    );
+  return (
+    <Text size="sm" c="dimmed">
+      No result reported
+    </Text>
+  );
+}
+
+function providerResult(item: ChangeSet, operationId: string) {
+  for (const transaction of item.transactions) {
+    const match = transaction.operation_results.find(
+      (result) => stringValue(result.operation_id) === operationId,
+    );
+    if (match) return match;
+  }
+  return {};
+}
+
+function operationName(payload: Record<string, unknown>) {
+  return (
+    stringValue(payload.name) ||
+    stringValue(payload.provider_name) ||
+    stringValue(payload.expected_provider_name) ||
+    'Unnamed resource'
+  );
+}
+
+function requestingUser(item: ChangeSet) {
+  const name = item.creator_display_name?.trim();
+  const email = item.creator_email?.trim();
+  if (name && email) return `${name} (${email})`;
+  return name || email || item.creator_id;
+}
+
+function operationValue(payload: Record<string, unknown>, resolution: Record<string, unknown>) {
+  return (
+    stringValue(resolution.normalized_value) ||
+    stringValue(payload.normalized_value) ||
+    stringValue(payload.value) ||
+    '—'
+  );
+}
+
+function record(value: unknown): Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function stringValue(value: unknown) {
+  return typeof value === 'string' ? value : '';
+}
+
+function humanize(value: string) {
+  return value
+    .toLowerCase()
+    .replaceAll('_', ' ')
+    .replace(/\b\w/g, (letter) => letter.toUpperCase())
+    .replace(/\bIp\b/g, 'IP');
+}
+
+function failureCodes(item: ChangeSet) {
+  const codes = new Set<string>();
+  const visit = (value: unknown): void => {
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+      return;
+    }
+    if (typeof value !== 'object' || value === null) return;
+    Object.entries(value).forEach(([key, nested]) => {
+      if (['code', 'error_code', 'reason'].includes(key) && typeof nested === 'string') {
+        codes.add(nested);
+      } else {
+        visit(nested);
+      }
+    });
+  };
+  visit(item.failure_info);
+  item.operations.forEach((operation) => visit(operation.failure_info));
+  item.transactions.forEach((transaction) => visit(transaction.failure_info));
+  return [...codes];
+}
+
+function pendingChangeWarnings(item: ChangeSet) {
+  const warnings: Array<{ actors: string[] }> = [];
+  item.transactions.forEach((transaction) => {
+    transaction.operation_results.forEach((result) => {
+      if (!Array.isArray(result.warnings)) return;
+      result.warnings.forEach((value) => {
+        const warning = record(value);
+        if (stringValue(warning.code) !== 'OTHER_PENDING_CHANGES_PRESENT') return;
+        warnings.push({
+          actors: Array.isArray(warning.actors)
+            ? warning.actors.filter((actor): actor is string => typeof actor === 'string')
+            : [],
+        });
+      });
+    });
+  });
+  return warnings;
+}
+
+function retryable(item: ChangeSet) {
+  const operationKinds = new Map(
+    item.operations.map((operation) => [operation.id, operation.kind]),
+  );
+  const partialCategoryRecovery =
+    item.state === 'PARTIALLY_SUCCEEDED' &&
+    item.transactions.length > 0 &&
+    item.transactions.every(
+      (transaction) =>
+        !transaction.reconciliation_required &&
+        transaction.operation_results.length > 0 &&
+        transaction.operation_results.every(
+          (result) =>
+            (result.status === 'SUCCEEDED' &&
+              result.mutated === true &&
+              operationKinds.get(stringValue(result.operation_id)) === 'ENSURE_RULE_CATEGORY') ||
+            (result.mutated === false &&
+              ['FAILED', 'CONFLICT', 'NOT_ATTEMPTED'].includes(stringValue(result.status))),
+        ),
+    );
+  const safeTransactions = item.transactions.every(
+    (transaction) =>
+      !transaction.reconciliation_required &&
+      transaction.operation_results.length > 0 &&
+      transaction.operation_results.every(
+        (result) =>
+          result.mutated === false &&
+          ['SUCCEEDED', 'FAILED', 'CONFLICT', 'NOT_ATTEMPTED'].includes(stringValue(result.status)),
+      ),
+  );
+  const interruptedIdempotentCreate =
+    item.state === 'FAILED' &&
+    stringValue(record(item.failure_info).code) === 'CHANGE_SET_EXECUTION_ERROR' &&
+    item.transactions.length > 0 &&
+    item.operations.every((operation) =>
+      ['ENSURE_RULE_CATEGORY', 'CREATE_RULE'].includes(operation.kind),
+    ) &&
+    item.transactions.every(
+      (transaction) =>
+        transaction.state === 'EXECUTING' && transaction.operation_results.length === 0,
+    );
+  return (
+    (['FAILED', 'CONFLICT'].includes(item.state) && safeTransactions) ||
+    partialCategoryRecovery ||
+    interruptedIdempotentCreate
+  );
 }
 
 function message(error: unknown) {
   return error instanceof ApiError
     ? `${error.message} Reference: ${error.correlationId}`
     : 'The request failed.';
-}
-
-function displayValue(value: unknown) {
-  return typeof value === 'string' || typeof value === 'number'
-    ? String(value)
-    : 'Result available';
 }

@@ -438,6 +438,31 @@ class ProviderConnectionService:
         )
         return self._public(result)
 
+    def set_write_enabled(  # noqa: PLR0913, PLR0917 -- explicit gate acknowledgements
+        self,
+        principal: Principal,
+        connection_id: UUID,
+        expected_revision: int,
+        enabled: bool,
+        acknowledged: bool,
+        allow_unvalidated_non_production: bool = False,
+    ) -> dict[str, object]:
+        """Apply the explicit administrator acknowledgement and independent write gate."""
+        self._require_admin(principal)
+        if enabled and not acknowledged:
+            raise InvalidInputError(
+                details={"code": "CONFIGURATION_MUTATION_ACKNOWLEDGEMENT_REQUIRED"}
+            )
+        result = self._repository.set_write_enabled(
+            principal.organization_id,
+            principal.user_id,
+            connection_id,
+            expected_revision,
+            enabled,
+            allow_unvalidated_non_production,
+        )
+        return self._public(result)
+
     def request_sync(
         self,
         principal: Principal,

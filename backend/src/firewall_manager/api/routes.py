@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from firewall_manager.api.dependencies import (
     AdministrationRepositoryDependency,
     AuthorizationRepositoryDependency,
+    ChangeSetExecutionDispatcherDependency,
     ChangeSetRepositoryDependency,
     DevelopmentIdentityRepositoryDependency,
     HealthServiceDependency,
@@ -27,6 +28,8 @@ from firewall_manager.api.schemas import (
     ChangeSetCreateRequest,
     ChangeSetMetadataUpdateRequest,
     ChangeSetResponse,
+    DefaultContextRequest,
+    DefaultContextResponse,
     DelegatedContextResponse,
     DelegatedPolicySummary,
     DevelopmentIdentityResponse,
@@ -50,19 +53,25 @@ from firewall_manager.api.schemas import (
     ProviderCredentialUpdateRequest,
     ProviderLifecycleRequest,
     ProviderStatusResponse,
+    ProviderWriteGateRequest,
     RuleResponse,
     SessionResponse,
     UserCreateRequest,
+    UserRoleUpdateRequest,
 )
 from firewall_manager.application.administration import AdministrationService
 from firewall_manager.application.changesets import ChangeSetService
 from firewall_manager.application.delegated import DelegatedPolicyService
+from firewall_manager.application.errors import ResourceOutOfScopeError
 from firewall_manager.application.inventory import InventoryService
 from firewall_manager.application.overview import OverviewService
 from firewall_manager.application.ports import ProviderFactory, ProviderReader
 from firewall_manager.application.provider_connections import ProviderConnectionService
 from firewall_manager.domain.models import ChangeOperationKind, DelegatedPolicyContext, ProviderKind
-from firewall_manager.providers.transactions import HttpMockTransactionExecutor
+from firewall_manager.providers.transactions import (
+    HttpMockTransactionExecutor,
+    ProviderTransactionExecutor,
+)
 
 router = APIRouter(prefix="/api/v1")
 dev_router = APIRouter(prefix="/api/v1/dev", tags=["development-auth"])
@@ -107,6 +116,9 @@ async def session(
     principal: PrincipalDependency,
     repository: AuthorizationRepositoryDependency,
 ) -> SessionResponse:
+    default_group_id, default_policy_id = repository.default_context_for_user(
+        principal.user_id, principal.organization_id
+    )
     return SessionResponse(
         authentication_mode="development",
         user_id=principal.user_id,
@@ -118,7 +130,25 @@ async def session(
                 principal.user_id, principal.organization_id
             )
         ],
+        default_group_id=default_group_id,
+        default_policy_id=default_policy_id,
     )
+
+
+@router.put("/session/default-context", tags=["identity"])
+async def set_default_context(
+    values: DefaultContextRequest,
+    principal: PrincipalDependency,
+    repository: AuthorizationRepositoryDependency,
+) -> DefaultContextResponse:
+    if not repository.set_default_context_for_user(
+        principal.user_id,
+        values.group_id,
+        values.policy_id,
+        principal.organization_id,
+    ):
+        raise ResourceOutOfScopeError
+    return DefaultContextResponse(group_id=values.group_id, policy_id=values.policy_id)
 
 
 @router.get("/delegated/context", tags=["delegated"])
@@ -150,9 +180,12 @@ async def delegated_policies(
 def _change_set_service(
     authorization_repository: AuthorizationRepositoryDependency,
     change_set_repository: ChangeSetRepositoryDependency,
+    executor: ProviderTransactionExecutor | None = None,
 ) -> ChangeSetService:
     return ChangeSetService(
-        authorization_repository, change_set_repository, HttpMockTransactionExecutor()
+        authorization_repository,
+        change_set_repository,
+        executor or HttpMockTransactionExecutor(),
     )
 
 
@@ -338,16 +371,38 @@ async def refresh_change_set(
     return ChangeSetResponse.model_validate(result)
 
 
-@router.post("/changesets/{change_set_id}/execute", tags=["change-sets"])
-async def execute_change_set(
+@router.post("/changesets/{change_set_id}/execute", status_code=202, tags=["change-sets"])
+async def execute_change_set(  # noqa: PLR0913, PLR0917 -- security dependencies are explicit
     change_set_id: UUID,
     body: ChangeSetActionRequest,
     principal: PrincipalDependency,
     authorization_repository: AuthorizationRepositoryDependency,
     change_set_repository: ChangeSetRepositoryDependency,
+    dispatch: ChangeSetExecutionDispatcherDependency,
 ) -> ChangeSetResponse:
-    result = await _change_set_service(authorization_repository, change_set_repository).execute(
-        principal, body.active_group_id, change_set_id
+    result = _change_set_service(authorization_repository, change_set_repository).queue_execution(
+        principal,
+        body.active_group_id,
+        change_set_id,
+        dispatch,
+    )
+    return ChangeSetResponse.model_validate(result)
+
+
+@router.post("/changesets/{change_set_id}/retry", tags=["change-sets"])
+async def retry_change_set(  # noqa: PLR0913, PLR0917 -- security dependencies are explicit
+    change_set_id: UUID,
+    body: ChangeSetActionRequest,
+    principal: PrincipalDependency,
+    authorization_repository: AuthorizationRepositoryDependency,
+    change_set_repository: ChangeSetRepositoryDependency,
+    dispatch: ChangeSetExecutionDispatcherDependency,
+) -> ChangeSetResponse:
+    result = _change_set_service(authorization_repository, change_set_repository).retry_execution(
+        principal,
+        body.active_group_id,
+        change_set_id,
+        dispatch,
     )
     return ChangeSetResponse.model_validate(result)
 
@@ -577,6 +632,31 @@ async def set_provider_connection_lifecycle(  # noqa: PLR0913, PLR0917 -- FastAP
     return ProviderConnectionResponse.model_validate(result)
 
 
+@router.put(
+    "/admin/provider-connections/{connection_id}/write-gate",
+    tags=["provider-connections"],
+)
+async def set_provider_connection_write_gate(  # noqa: PLR0913, PLR0917
+    connection_id: UUID,
+    body: ProviderWriteGateRequest,
+    principal: PrincipalDependency,
+    authorization_repository: AuthorizationRepositoryDependency,
+    connection_repository: ProviderConnectionRepositoryDependency,
+    secret_store: SecretStoreDependency,
+) -> ProviderConnectionResponse:
+    result = _provider_connection_service(
+        authorization_repository, connection_repository, secret_store
+    ).set_write_enabled(
+        principal,
+        connection_id,
+        body.expected_revision,
+        body.enabled,
+        body.acknowledge_configuration_mutation,
+        body.acknowledge_unvalidated_non_production_writes,
+    )
+    return ProviderConnectionResponse.model_validate(result)
+
+
 @router.post(
     "/admin/provider-connections/{connection_id}/sync",
     status_code=202,
@@ -636,6 +716,19 @@ async def update_enabled(  # noqa: PLR0913, PLR0917 -- FastAPI dependency signat
     return AdministrationService(
         authorization_repository, administration_repository
     ).update_enabled(principal, resource, resource_id, body.enabled, body.expected_revision)
+
+
+@router.patch("/admin/users/{user_id}/role", tags=["administration"])
+async def update_user_role(
+    user_id: UUID,
+    body: UserRoleUpdateRequest,
+    principal: PrincipalDependency,
+    authorization_repository: AuthorizationRepositoryDependency,
+    administration_repository: AdministrationRepositoryDependency,
+) -> dict[str, object]:
+    return AdministrationService(
+        authorization_repository, administration_repository
+    ).update_user_role(principal, user_id, body.role, body.expected_revision)
 
 
 @router.put("/admin/{resource}", tags=["administration"])

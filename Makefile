@@ -53,7 +53,7 @@ frontend-check:
 	cd frontend && npm run build
 
 architecture:
-	cd backend && .venv/bin/lint-imports --config importlinter.ini
+	cd backend && PYTHONPATH=src .venv/bin/lint-imports --config importlinter.ini
 
 security-check:
 	cd backend && .venv/bin/pip-audit

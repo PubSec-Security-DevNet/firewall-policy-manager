@@ -1,12 +1,18 @@
 """Provider transaction adapters used by the ChangeSet application service."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol, cast
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 import httpx
 
-from firewall_manager.application.errors import ProviderContractError, ProviderUnavailableError
+from firewall_manager.application.errors import (
+    ProductionWriteDisabledError,
+    ProviderContractError,
+    ProviderUnavailableError,
+)
+from firewall_manager.application.ports import ConnectionTestProvider
 from firewall_manager.domain.models import ProviderKind, ProviderTransactionState
 
 
@@ -56,6 +62,11 @@ class ProviderExecutionResult:
         }
 
 
+def real_transaction_operation_id(change_set_id: UUID, manager_id: UUID) -> str:
+    """Return the stable application operation ID persisted before a real mutation."""
+    return str(uuid5(NAMESPACE_URL, f"real:{manager_id}:{change_set_id}"))
+
+
 class MockTransactionProvider(Protocol):
     """Mutation portion of the deterministic mock provider contract."""
 
@@ -67,6 +78,18 @@ class MockTransactionProvider(Protocol):
         manager_id: UUID,
         operations: list[dict[str, object]],
     ) -> ProviderExecutionResult: ...
+
+
+class RealTransactionProvider(ConnectionTestProvider, MockTransactionProvider, Protocol):
+    """Guarded real provider mutation surface; no native request escape hatch."""
+
+    async def aclose(self) -> None: ...
+
+
+class TransactionSecretStore(Protocol):
+    """Minimal credential retrieval needed at the provider execution boundary."""
+
+    def retrieve(self, organization_id: UUID, secret_id: UUID, purpose: str) -> dict[str, str]: ...
 
 
 class ProviderTransactionExecutor(Protocol):
@@ -132,3 +155,55 @@ class HttpMockTransactionExecutor:
             raise ProviderUnavailableError from exc
         except (httpx.HTTPError, ValueError) as exc:
             raise ProviderUnavailableError from exc
+
+
+class GuardedProviderTransactionExecutor:
+    """Dispatch mock or explicitly enabled real writes through one normalized boundary."""
+
+    def __init__(
+        self,
+        secret_store: TransactionSecretStore,
+        provider_factory: Callable[
+            [dict[str, object], dict[str, str], dict[str, str]], RealTransactionProvider
+        ],
+    ) -> None:
+        self._mock = HttpMockTransactionExecutor()
+        self._secrets = secret_store
+        self._provider_factory = provider_factory
+
+    async def execute(
+        self,
+        target: dict[str, object],
+        change_set_id: UUID,
+        manager_id: UUID,
+        operations: list[dict[str, object]],
+    ) -> ProviderExecutionResult:
+        if target.get("is_mock") is True:
+            return await self._mock.execute(target, change_set_id, manager_id, operations)
+        if (
+            target.get("write_enabled") is not True
+            or target.get("read_only") is not False
+            or target.get("lifecycle") != "ACTIVE"
+            or target.get("connection_status") != "CONNECTED"
+            or not target.get("provider_version")
+        ):
+            raise ProductionWriteDisabledError
+        organization_id = UUID(str(target["organization_id"]))
+        connection_id = UUID(str(target["provider_connection_id"]))
+        credential = self._secrets.retrieve(
+            organization_id,
+            UUID(str(target["credential_reference"])),
+            f"provider-connection:{connection_id}",
+        )
+        raw_capabilities = target.get("capabilities", {})
+        if not isinstance(raw_capabilities, dict):
+            raise ProviderContractError
+        capabilities = {
+            str(key): str(value)
+            for key, value in cast("dict[object, object]", raw_capabilities).items()
+        }
+        provider = self._provider_factory(target, credential, capabilities)
+        try:
+            return await provider.execute_transaction(change_set_id, manager_id, operations)
+        finally:
+            await provider.aclose()

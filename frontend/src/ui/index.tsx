@@ -2,50 +2,271 @@ import {
   Alert,
   AppShell,
   Badge,
+  Burger,
+  Button,
   Card,
   Container,
+  Divider,
+  Drawer,
   Group,
   Loader,
+  Menu,
+  Modal,
+  MultiSelect,
+  Paper,
+  Progress,
+  Radio,
+  ScrollArea,
+  SegmentedControl,
+  Select,
   SimpleGrid,
+  Skeleton,
   Stack,
   Table,
   Tabs,
   Text,
-  Title,
-  Button,
-  Select,
   TextInput,
   Textarea,
+  ThemeIcon,
+  Title,
+  Tooltip,
 } from '@mantine/core';
-import type { ReactNode } from 'react';
+import type { ButtonProps, CardProps } from '@mantine/core';
+import { useDisclosure } from '@mantine/hooks';
+import {
+  IconAlertTriangle,
+  IconArrowsShuffle,
+  IconBell,
+  IconBuildingCommunity,
+  IconChevronRight,
+  IconCloudLock,
+  IconFileDiff,
+  IconHistory,
+  IconHome,
+  IconLockAccess,
+  IconPackages,
+  IconPlugConnected,
+  IconSearch,
+  IconServerCog,
+  IconShieldCheck,
+  IconShieldLock,
+  IconUsersGroup,
+  type Icon,
+} from '@tabler/icons-react';
+import type {
+  ComponentPropsWithoutRef,
+  ComponentType,
+  ElementType,
+  FormEventHandler,
+  ReactNode,
+} from 'react';
 
-import type { Inventory, ProviderSummary } from '../api/client';
+import type { Session } from '../api/client';
+
+export type AppRoute =
+  | 'home'
+  | 'policies'
+  | 'rules'
+  | 'objects'
+  | 'changes'
+  | 'providers'
+  | 'sync'
+  | 'users'
+  | 'groups'
+  | 'grants'
+  | 'audit';
+
+interface NavigationItem {
+  value: AppRoute;
+  label: string;
+  icon: Icon;
+}
+interface NavigationSection {
+  label?: string;
+  items: NavigationItem[];
+}
+
+const baseNavigation: NavigationSection[] = [
+  { items: [{ value: 'home', label: 'Home', icon: IconHome }] },
+  {
+    label: 'Firewall management',
+    items: [
+      { value: 'policies', label: 'Policies', icon: IconShieldCheck },
+      { value: 'rules', label: 'Rules', icon: IconLockAccess },
+      { value: 'objects', label: 'Objects', icon: IconPackages },
+      { value: 'changes', label: 'Changes', icon: IconFileDiff },
+    ],
+  },
+];
+const adminNavigation: NavigationSection[] = [
+  {
+    label: 'Access & delegation',
+    items: [
+      { value: 'users', label: 'Users', icon: IconUsersGroup },
+      { value: 'groups', label: 'Groups', icon: IconBuildingCommunity },
+      { value: 'grants', label: 'Access grants', icon: IconShieldLock },
+    ],
+  },
+  {
+    label: 'Infrastructure',
+    items: [
+      { value: 'providers', label: 'Provider connections', icon: IconPlugConnected },
+      { value: 'sync', label: 'Sync & drift', icon: IconArrowsShuffle },
+    ],
+  },
+  { label: 'Operations', items: [{ value: 'audit', label: 'Audit', icon: IconHistory }] },
+];
 
 export function AppLayout({
   children,
   headerActions,
+  session,
+  workingGroup,
+  workingPolicy,
+  route,
+  onRouteChange,
 }: {
   children: ReactNode;
   headerActions?: ReactNode;
+  session?: Session;
+  workingGroup?: string;
+  workingPolicy?: string;
+  route?: AppRoute;
+  onRouteChange?: (route: AppRoute) => void;
 }) {
+  const [opened, { toggle, close }] = useDisclosure(false);
+  const navigation =
+    session?.role === 'admin' ? [...baseNavigation, ...adminNavigation] : baseNavigation;
+  const navbar = (
+    <Stack h="100%" gap={0}>
+      <div className="fm-working-context">
+        <Text className="fm-working-context-label">Working Group</Text>
+        <Text className="fm-working-context-value">{workingGroup ?? 'Select a Group'}</Text>
+        <Text className="fm-working-context-label" mt={7}>
+          Access Policy
+        </Text>
+        <Text className="fm-working-context-policy">
+          {workingPolicy ?? 'Select an Access Policy'}
+        </Text>
+      </div>
+      <ScrollArea flex={1} type="auto" offsetScrollbars>
+        <div>
+          {navigation.map((section, index) => (
+            <div className="fm-nav-section" key={section.label ?? index}>
+              {section.label && <div className="fm-nav-label">{section.label}</div>}
+              {section.items.map((item) => {
+                const NavIcon = item.icon;
+                return (
+                  <button
+                    className="fm-nav-item"
+                    data-active={route === item.value}
+                    aria-current={route === item.value ? 'page' : undefined}
+                    key={item.value}
+                    onClick={() => {
+                      onRouteChange?.(item.value);
+                      close();
+                    }}
+                  >
+                    <NavIcon size={18} stroke={1.7} aria-hidden="true" />
+                    <span>{item.label}</span>
+                    {route === item.value && (
+                      <IconChevronRight
+                        size={14}
+                        style={{ marginLeft: 'auto' }}
+                        aria-hidden="true"
+                      />
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          ))}
+        </div>
+      </ScrollArea>
+      <div className="fm-nav-footer">
+        <Group gap="xs" wrap="nowrap">
+          <ThemeIcon color="teal" variant="light" size="sm">
+            <IconServerCog size={14} />
+          </ThemeIcon>
+          <div>
+            <Text size="xs" fw={650}>
+              Control plane healthy
+            </Text>
+            <Text size="10px" c="dimmed">
+              API available
+            </Text>
+          </div>
+        </Group>
+      </div>
+    </Stack>
+  );
   return (
-    <AppShell header={{ height: 64 }} padding="md">
-      <AppShell.Header>
-        <Container size="lg" h="100%">
-          <Group h="100%" justify="space-between">
-            <Title order={1} size="h3">
-              Firewall Manager
-            </Title>
-            <Group>
-              {headerActions}
-              <Badge color="yellow" variant="light">
-                Development mode
-              </Badge>
+    <AppShell
+      className="fm-shell"
+      header={{ height: 64 }}
+      navbar={{ width: 248, breakpoint: 'md', collapsed: { mobile: !opened } }}
+      padding={0}
+    >
+      <a className="fm-skip" href="#main-content">
+        Skip to main content
+      </a>
+      <AppShell.Header className="fm-topbar">
+        <Group h="100%" px={{ base: 'md', md: 'lg' }} justify="space-between" wrap="nowrap">
+          <Group gap="sm" wrap="nowrap">
+            <Burger
+              className="fm-mobile-only"
+              opened={opened}
+              onClick={toggle}
+              size="sm"
+              aria-label="Toggle navigation"
+            />
+            <Group className="fm-topbar-brand" gap="sm" wrap="nowrap">
+              <div className="fm-brand-mark" aria-hidden="true">
+                <IconShieldLock size={21} stroke={2.2} />
+              </div>
+              <div>
+                <Text fw={700} size="sm" lh={1.15}>
+                  Firewall Manager
+                </Text>
+                <Text size="10px" c="dimmed" tt="uppercase" fw={700} lts=".08em">
+                  Security control plane
+                </Text>
+              </div>
             </Group>
           </Group>
-        </Container>
+          <Group gap="sm" wrap="nowrap">
+            <Tooltip label="Global search is not yet available">
+              <Button variant="subtle" color="gray" px={8} aria-label="Search">
+                <IconSearch size={18} />
+              </Button>
+            </Tooltip>
+            <Tooltip label="No new notifications">
+              <Button variant="subtle" color="gray" px={8} aria-label="Notifications">
+                <IconBell size={18} />
+              </Button>
+            </Tooltip>
+            {session && (
+              <div>
+                <Text size="xs" fw={650} ta="right">
+                  {session.email}
+                </Text>
+                <Text size="10px" c="dimmed" ta="right" tt="uppercase">
+                  {session.role}
+                </Text>
+              </div>
+            )}
+            {headerActions}
+          </Group>
+        </Group>
       </AppShell.Header>
-      <AppShell.Main>{children}</AppShell.Main>
+      <AppShell.Navbar className="fm-navbar" aria-label="Primary navigation">
+        {navbar}
+      </AppShell.Navbar>
+      <AppShell.Main>
+        <div id="main-content" className="fm-content">
+          {children}
+        </div>
+      </AppShell.Main>
     </AppShell>
   );
 }
@@ -53,236 +274,322 @@ export function AppLayout({
 export function AppPage({
   title,
   description,
+  eyebrow,
+  actions,
   children,
 }: {
   title: string;
-  description: string;
+  description?: string;
+  eyebrow?: string;
+  actions?: ReactNode;
   children: ReactNode;
 }) {
   return (
-    <Container component="main" size="lg">
-      <Stack gap="lg">
-        <header>
-          <Title order={2}>{title}</Title>
-          <Text c="dimmed">{description}</Text>
-        </header>
-        {children}
-      </Stack>
-    </Container>
+    <Stack gap="lg">
+      <header className="fm-page-header">
+        <div>
+          {eyebrow && (
+            <Text className="fm-eyebrow" mb={4}>
+              {eyebrow}
+            </Text>
+          )}
+          <Title order={1} size="h2">
+            {title}
+          </Title>
+          {description && (
+            <Text c="dimmed" size="sm" maw={760} mt={4}>
+              {description}
+            </Text>
+          )}
+        </div>
+        {actions && <Group>{actions}</Group>}
+      </header>
+      {children}
+    </Stack>
+  );
+}
+
+export function AppSection({
+  title,
+  description,
+  actions,
+  children,
+}: {
+  title: string;
+  description?: string;
+  actions?: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <section aria-labelledby={`section-${slug(title)}`}>
+      <Group className="fm-section-header" justify="space-between" align="start">
+        <div>
+          <Title id={`section-${slug(title)}`} order={2} size="h4">
+            {title}
+          </Title>
+          {description && (
+            <Text c="dimmed" size="xs" mt={2}>
+              {description}
+            </Text>
+          )}
+        </div>
+        {actions}
+      </Group>
+      {children}
+    </section>
   );
 }
 
 export function AppLoadingState({ label }: { label: string }) {
   return (
-    <Group role="status" aria-live="polite">
-      <Loader size="sm" />
-      <Text>{label}</Text>
-    </Group>
+    <Card className="fm-card" p="xl">
+      <Stack role="status" aria-live="polite" align="center" gap="sm">
+        <Loader size="sm" />
+        <Text size="sm">{label}</Text>
+        <Skeleton w="70%" h={8} />
+      </Stack>
+    </Card>
   );
 }
-
-export function AppErrorState({ message, reference }: { message: string; reference?: string }) {
-  return (
-    <Alert color="red" title="Unable to load the overview" role="alert">
-      {message}
-      {reference ? ` Reference: ${reference}` : ''}
-    </Alert>
-  );
-}
-
-export function AppIdentityNotice({ email, role }: { email: string; role: string }) {
-  return (
-    <Alert color="yellow" title="Isolated development authentication">
-      Signed in locally as {email} with the {role} role. This adapter cannot be enabled in
-      production.
-    </Alert>
-  );
-}
-
-export function AppMetricGrid({ values }: { values: Record<string, number> }) {
-  return (
-    <SimpleGrid cols={{ base: 2, sm: 5 }} aria-label="Seeded inventory counts">
-      {Object.entries(values).map(([name, value]) => (
-        <Card component="section" withBorder key={name} padding="md">
-          <Text size="xl" fw={700}>
-            {value}
-          </Text>
-          <Text size="sm" c="dimmed">
-            {name.replace('_', ' ')}
-          </Text>
-        </Card>
-      ))}
-    </SimpleGrid>
-  );
-}
-
-export function AppProviderGrid({ providers }: { providers: ProviderSummary[] }) {
-  return (
-    <section aria-labelledby="provider-heading">
-      <Title id="provider-heading" order={3} mb="sm">
-        Mock provider discovery
-      </Title>
-      <SimpleGrid cols={{ base: 1, sm: 2 }}>
-        {providers.map((provider) => (
-          <Card component="article" withBorder key={provider.provider} padding="lg">
-            <Group justify="space-between" align="start">
-              <div>
-                <Text fw={700}>{provider.display_name}</Text>
-                <Text size="sm" c="dimmed">
-                  {provider.provider.toUpperCase()} · {provider.provider_version}
-                </Text>
-              </div>
-              <Badge color="blue">Read only</Badge>
-            </Group>
-            <Text mt="md">
-              {provider.policy_count} policies · {provider.object_count} objects
-            </Text>
-          </Card>
-        ))}
-      </SimpleGrid>
-    </section>
-  );
-}
-
-function StatusBadge({ value }: { value: string | null }) {
-  const color = value === 'COMPLETED' || value === 'OBSERVED' ? 'green' : 'yellow';
-  return <Badge color={color}>{value ?? 'Not synchronized'}</Badge>;
-}
-
-function EmptyRow({ columns }: { columns: number }) {
-  return (
-    <Table.Tr>
-      <Table.Td colSpan={columns}>
-        <Text c="dimmed">No resources were discovered in this scope.</Text>
-      </Table.Td>
-    </Table.Tr>
-  );
-}
-
-export function AppInventoryBrowser({ inventory }: { inventory: Inventory }) {
-  return (
-    <section aria-labelledby="inventory-heading">
-      <Title id="inventory-heading" order={3} mb="sm">
-        Synchronized inventory
-      </Title>
-      <Tabs defaultValue="managers">
-        <Tabs.List aria-label="Inventory resource type">
-          <Tabs.Tab value="managers">Managers</Tabs.Tab>
-          <Tabs.Tab value="policies">Policies</Tabs.Tab>
-          <Tabs.Tab value="rules">Rules</Tabs.Tab>
-          <Tabs.Tab value="objects">Objects</Tabs.Tab>
-        </Tabs.List>
-        <Tabs.Panel value="managers" pt="md">
-          <div style={{ overflowX: 'auto' }}>
-            <Table striped withTableBorder>
-              <Table.Thead>
-                <Table.Tr>
-                  <Table.Th>Name</Table.Th>
-                  <Table.Th>Provider</Table.Th>
-                  <Table.Th>Version</Table.Th>
-                  <Table.Th>Sync</Table.Th>
-                </Table.Tr>
-              </Table.Thead>
-              <Table.Tbody>
-                {inventory.managers.length === 0 && <EmptyRow columns={4} />}
-                {inventory.managers.map((manager) => {
-                  const status = inventory.statuses.find((item) => item.manager_id === manager.id);
-                  return (
-                    <Table.Tr key={manager.id}>
-                      <Table.Td>{manager.display_name}</Table.Td>
-                      <Table.Td>{manager.provider.toUpperCase()}</Table.Td>
-                      <Table.Td>{manager.provider_version ?? 'Unknown'}</Table.Td>
-                      <Table.Td>
-                        <StatusBadge value={status?.sync_status ?? null} />
-                      </Table.Td>
-                    </Table.Tr>
-                  );
-                })}
-              </Table.Tbody>
-            </Table>
-          </div>
-        </Tabs.Panel>
-        <Tabs.Panel value="policies" pt="md">
-          <ResourceTable
-            rows={inventory.policies.map((item) => ({
-              id: item.id,
-              name: item.name,
-              detail: `Revision ${item.revision}`,
-              state: item.management_state,
-            }))}
-          />
-        </Tabs.Panel>
-        <Tabs.Panel value="rules" pt="md">
-          <ResourceTable
-            rows={inventory.rules.map((item) => ({
-              id: item.id,
-              name: item.name,
-              detail: `${item.action} · position ${item.position}`,
-              state: item.management_state,
-            }))}
-          />
-        </Tabs.Panel>
-        <Tabs.Panel value="objects" pt="md">
-          <ResourceTable
-            rows={inventory.objects.map((item) => ({
-              id: item.id,
-              name: item.name,
-              detail: `${item.object_type} · ${item.sharing_mode}`,
-              state: item.management_state,
-            }))}
-          />
-        </Tabs.Panel>
-      </Tabs>
-    </section>
-  );
-}
-
-function ResourceTable({
-  rows,
+export function AppErrorState({
+  message,
+  reference,
+  title = 'Unable to load this view',
 }: {
-  rows: Array<{ id: string; name: string; detail: string; state: string }>;
+  message: string;
+  reference?: string;
+  title?: string;
 }) {
   return (
-    <div style={{ overflowX: 'auto' }}>
-      <Table striped withTableBorder>
-        <Table.Thead>
-          <Table.Tr>
-            <Table.Th>Name</Table.Th>
-            <Table.Th>Details</Table.Th>
-            <Table.Th>Management status</Table.Th>
-          </Table.Tr>
-        </Table.Thead>
-        <Table.Tbody>
-          {rows.length === 0 && <EmptyRow columns={3} />}
-          {rows.map((row) => (
-            <Table.Tr key={row.id}>
-              <Table.Td>{row.name}</Table.Td>
-              <Table.Td>{row.detail}</Table.Td>
-              <Table.Td>
-                <StatusBadge value={row.state} />
-              </Table.Td>
-            </Table.Tr>
-          ))}
-        </Table.Tbody>
+    <Alert
+      color="red"
+      variant="light"
+      title={title}
+      icon={<IconAlertTriangle size={18} />}
+      role="alert"
+    >
+      {message}
+      {reference ? (
+        <Text size="xs" mt={6}>
+          Reference: <span className="fm-code">{reference}</span>
+        </Text>
+      ) : null}
+    </Alert>
+  );
+}
+export function AppEmptyState({
+  title,
+  description,
+  action,
+}: {
+  title: string;
+  description: string;
+  action?: ReactNode;
+}) {
+  return (
+    <Paper className="fm-subtle-panel" p="xl" ta="center">
+      <IconCloudLock size={30} color="var(--fm-text-muted)" aria-hidden="true" />
+      <Text fw={650} mt="sm">
+        {title}
+      </Text>
+      <Text size="sm" c="dimmed" maw={520} mx="auto" mt={4}>
+        {description}
+      </Text>
+      {action && (
+        <Group justify="center" mt="md">
+          {action}
+        </Group>
+      )}
+    </Paper>
+  );
+}
+export function AppIdentityNotice({ email, role }: { email: string; role: string }) {
+  return (
+    <Alert
+      color="yellow"
+      variant="light"
+      title="Development identity"
+      icon={<IconAlertTriangle size={18} />}
+    >
+      Requests use the real authorization path as <b>{email}</b> ({role}). Runtime switching is
+      browser-session scoped and unavailable in production.
+    </Alert>
+  );
+}
+
+const statusColors: Record<string, string> = {
+  HEALTHY: 'teal',
+  CONNECTED: 'teal',
+  COMPLETED: 'teal',
+  SUCCESS: 'teal',
+  READY: 'teal',
+  OBSERVED: 'blue',
+  ACTIVE: 'blue',
+  OWNED: 'blue',
+  ASSIGNED: 'teal',
+  AVAILABLE: 'yellow',
+  COUNT: 'cyan',
+  WARNING: 'yellow',
+  ATTENTION: 'yellow',
+  PENDING: 'yellow',
+  DRAFT: 'gray',
+  READ_ONLY: 'gray',
+  PROVIDER: 'gray',
+  SHARED: 'violet',
+  FAILED: 'red',
+  ERROR: 'red',
+  DRIFTED: 'orange',
+  DISABLED: 'gray',
+  RETIRED: 'gray',
+  UNSUPPORTED: 'gray',
+};
+export function AppStatusBadge({
+  value,
+  label,
+  size = 'sm',
+}: {
+  value: string | null | undefined;
+  label?: string;
+  size?: 'xs' | 'sm' | 'md' | 'lg';
+}) {
+  const key = (value ?? 'UNKNOWN').toUpperCase();
+  return (
+    <Badge size={size} color={statusColors[key] ?? 'gray'} variant="light" tt="none">
+      {label ?? key.replaceAll('_', ' ')}
+    </Badge>
+  );
+}
+export function AppActionButton({
+  intent = 'secondary',
+  className,
+  ...props
+}: Omit<ButtonProps, 'color' | 'size' | 'variant'> &
+  Omit<ComponentPropsWithoutRef<'button'>, 'color' | 'size'> & {
+    intent?: 'secondary' | 'quiet' | 'success' | 'danger' | 'quiet-success' | 'quiet-danger';
+  }) {
+  return (
+    <Button
+      {...props}
+      className={`fm-action-button fm-action-${intent}${className ? ` ${className}` : ''}`}
+      color="gray"
+      size="xs"
+      variant="light"
+    />
+  );
+}
+export function AppProviderBadge({ provider }: { provider: string }) {
+  return (
+    <Badge color={provider.toLowerCase() === 'fmc' ? 'indigo' : 'cyan'} variant="outline">
+      {provider.toUpperCase()}
+    </Badge>
+  );
+}
+export function AppDataTable({ children, label }: { children: ReactNode; label?: string }) {
+  return (
+    <div className="fm-table-wrap" role="region" aria-label={label} tabIndex={0}>
+      <Table className="fm-table" verticalSpacing="sm" horizontalSpacing="md" highlightOnHover>
+        {children}
       </Table>
     </div>
   );
 }
+type SemanticCardProps = CardProps & {
+  component?: ElementType;
+  id?: string;
+  onSubmit?: FormEventHandler<HTMLFormElement>;
+  'aria-labelledby'?: string;
+};
+const SemanticCard = Card as unknown as ComponentType<SemanticCardProps>;
+export function AppCard({
+  children,
+  interactive = false,
+  className,
+  ...props
+}: {
+  children: ReactNode;
+  interactive?: boolean;
+  component?: ElementType;
+  id?: string;
+  onSubmit?: FormEventHandler<HTMLFormElement>;
+  'aria-labelledby'?: string;
+} & Omit<CardProps, 'children'>) {
+  return (
+    <SemanticCard
+      className={`fm-card${className ? ` ${className}` : ''}`}
+      data-interactive={interactive}
+      withBorder={false}
+      p="lg"
+      {...props}
+    >
+      {children}
+    </SemanticCard>
+  );
+}
+export function MetricCard({
+  label,
+  value,
+  detail,
+  icon,
+}: {
+  label: string;
+  value: string | number;
+  detail?: string;
+  icon?: ReactNode;
+}) {
+  return (
+    <AppCard className="fm-card fm-metric">
+      <Group justify="space-between" align="start">
+        <div>
+          <Text size="xs" c="dimmed" tt="uppercase" fw={700} lts=".05em">
+            {label}
+          </Text>
+          <Text size="30px" fw={700} lh={1.2} mt={7}>
+            {value}
+          </Text>
+          {detail && (
+            <Text size="xs" c="dimmed" mt={6}>
+              {detail}
+            </Text>
+          )}
+        </div>
+        {icon && (
+          <ThemeIcon variant="light" color="blue" size="lg">
+            {icon}
+          </ThemeIcon>
+        )}
+      </Group>
+    </AppCard>
+  );
+}
 
-// Semantic aliases keep feature code independent of Mantine import paths while the component
-// catalog grows. Behavior, labels, and authorization remain in feature/view-model code.
+function slug(value: string) {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+}
+
 export {
   Alert as AppAlert,
   Badge as AppBadge,
   Button as AppButton,
-  Card as AppCard,
+  Container as AppContainer,
+  Divider as AppDivider,
+  Drawer as AppDrawer,
   Group as AppGroup,
+  Menu as AppMenu,
+  Modal as AppDialog,
+  MultiSelect as AppMultiSelect,
+  Paper as AppPaper,
+  Progress as AppProgress,
+  Radio as AppRadio,
+  SegmentedControl as AppSegmentedControl,
   Select as AppSelect,
   SimpleGrid as AppSimpleGrid,
   Stack as AppStack,
   Table as AppTable,
+  Tabs as AppTabs,
   Text as AppText,
   TextInput as AppTextInput,
   Textarea as AppTextarea,
+  ThemeIcon as AppThemeIcon,
   Title as AppTitle,
+  Tooltip as AppTooltip,
 };

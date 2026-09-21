@@ -135,18 +135,12 @@ class AuthorizationService:
                 interface,
                 correlation_id,
             )
-        manager_id, policy_resource_state, policy_revision = policy
+        manager_id, _policy_resource_state, policy_revision = policy
         revision = max(revision, policy_revision)
-        if policy_resource_state == "DRIFTED" and action is not Action.READ:
-            return self._decision(
-                context,
-                action,
-                resource,
-                AuthorizationReason.STALE_AUTHORIZATION_CONTEXT,
-                revision,
-                interface,
-                correlation_id,
-            )
+        # Policy fingerprint drift is a warning about pending provider state, not a direct
+        # conflict with every delegated write. Each affected rule, object, position, grant,
+        # and provider revision is checked below and again by ChangeSet preflight/execution.
+        # MISSING and CONFLICT policies still fail closed above.
         capabilities, grant_revision, group_delegated = self._repository.policy_capabilities(
             principal.user_id,
             context.active_group_id,
@@ -372,20 +366,6 @@ class AuthorizationService:
             )
             if state is None or state[0] != manager_id:
                 return AuthorizationReason.ACTION_NOT_GRANTED, state[2] if state else 0
-            if resource.element:
-                equivalent_id = self._repository.equivalent_object_id(
-                    state[0], resource.value, resource.element, organization_id
-                )
-                if equivalent_id is not None:
-                    existing = self._repository.object_grant_state(
-                        context.active_group_id,
-                        context.access_policy_id,
-                        equivalent_id,
-                        organization_id,
-                    )
-                    if existing is None or "use" not in existing[2]:
-                        return AuthorizationReason.RESOURCE_NOT_USABLE, state[2]
-                    return AuthorizationReason.EQUIVALENT_OBJECT_EXISTS, state[2]
             provider_capability = _OBJECT_CREATE_CAPABILITY.get(resource.value)
             if provider_capability is None or state[1].get(provider_capability) != "SUPPORTED":
                 return AuthorizationReason.PROVIDER_CAPABILITY_UNAVAILABLE, state[2]

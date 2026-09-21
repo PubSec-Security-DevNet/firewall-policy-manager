@@ -17,11 +17,13 @@ from sqlalchemy.orm import Session
 
 from firewall_manager.application.errors import (
     InvalidChangeSetStateError,
+    InvalidInputError,
     ResourceOutOfScopeError,
     StaleWriteError,
 )
 from firewall_manager.application.provider_connections import ProviderConnectionService
 from firewall_manager.domain.models import CapabilityStatus, Principal, ProviderCapability
+from firewall_manager.persistence.changesets import SqlChangeSetRepository
 from firewall_manager.persistence.models import (
     AuditEvent,
     Base,
@@ -192,6 +194,303 @@ def test_connection_flushes_parent_before_manager_foreign_key(tmp_path: Path) ->
     )
     assert connection_stage < manager_stage
     assert FirewallManager not in flush_stages[connection_stage]
+
+
+def test_real_write_gate_requires_acknowledgement_and_tested_version_evidence(
+    tmp_path: Path,
+) -> None:
+    session = _session(tmp_path / "write-gate.sqlite")
+    service = _service(session)
+    principal = _principal(ADMIN, ORG, "admin")
+    created = service.create(
+        principal,
+        {
+            "provider_type": "fmc",
+            "display_name": "Guarded FMC",
+            "base_endpoint": "https://fmc-write.example.test",
+            "username": "api-write",
+            "password": "write-only-test-password",
+        },
+    )
+    connection_id = UUID(str(created["id"]))
+    connection = session.get(ProviderConnection, connection_id)
+    assert connection is not None
+    manager = session.scalar(
+        select(FirewallManager).where(FirewallManager.provider_connection_id == connection_id)
+    )
+    assert manager is not None
+    connection.lifecycle = "ACTIVE"
+    connection.connection_status = "CONNECTED"
+    connection.provider_version = "7.7.0-test"
+    session.add_all(
+        [
+            ProviderCapabilityEvidence(
+                organization_id=ORG,
+                connection_id=connection_id,
+                provider_version="7.7.0-test",
+                capability=capability.value,
+                status="SUPPORTED",
+                evidence_level="TESTED",
+                evidence_summary="Approved isolated non-production contract test.",
+                tested_at=datetime.now(UTC),
+            )
+            for capability in (
+                ProviderCapability.ACCESS_RULE_CREATE,
+                ProviderCapability.PENDING_CHANGE_INSPECTION,
+            )
+        ]
+    )
+    session.commit()
+
+    with pytest.raises(InvalidInputError):
+        service.set_write_enabled(
+            principal, connection_id, connection.revision, True, acknowledged=False
+        )
+    enabled = service.set_write_enabled(
+        principal, connection_id, connection.revision, True, acknowledged=True
+    )
+    assert enabled["write_enabled"] is True
+    assert manager.read_only is False
+    session.commit()
+    disabled = service.set_write_enabled(
+        principal, connection_id, int(str(enabled["revision"])), False, acknowledged=False
+    )
+    assert disabled["write_enabled"] is False
+    assert manager.read_only is True
+
+
+def test_successful_live_mutation_promotes_version_specific_write_evidence(  # noqa: PLR0915
+    tmp_path: Path,
+) -> None:
+    session = _session(tmp_path / "live-write-evidence.sqlite")
+    service = _service(session)
+    principal = _principal(ADMIN, ORG, "admin")
+    created = service.create(
+        principal,
+        {
+            "provider_type": "scc",
+            "display_name": "Validated SCC",
+            "region": "us",
+            "token": "write-only-test-token",
+        },
+    )
+    connection_id = UUID(str(created["id"]))
+    connection = session.get(ProviderConnection, connection_id)
+    manager = session.scalar(
+        select(FirewallManager).where(FirewallManager.provider_connection_id == connection_id)
+    )
+    assert connection is not None
+    assert manager is not None
+    connection.lifecycle = "ACTIVE"
+    connection.connection_status = "CONNECTED"
+    connection.provider_version = "10.0-test"
+    connection.write_enabled = True
+    manager.provider_version = connection.provider_version
+    manager.read_only = False
+    session.add_all(
+        ProviderCapabilityEvidence(
+            organization_id=ORG,
+            connection_id=connection_id,
+            provider_version=connection.provider_version,
+            capability=capability,
+            status="PARTIAL",
+            evidence_level="NOT_STARTED",
+            evidence_summary="Awaiting live validation.",
+        )
+        for capability in ("access_rule_create", "pending_change_inspection")
+    )
+    session.flush()
+
+    operation_id = uuid4()
+    promoted = SqlChangeSetRepository(session).record_successful_write_evidence(
+        {"id": uuid4()},
+        principal,
+        manager.id,
+        [{"id": operation_id, "kind": "CREATE_RULE", "payload": {}}],
+        [{"operation_id": str(operation_id), "status": "SUCCEEDED", "mutated": True}],
+    )
+    session.commit()
+
+    assert promoted == {"access_rule_create", "pending_change_inspection"}
+    visible = service.get(principal, connection_id)
+    assert visible["write_validation_mode"] is False
+    assert manager.capabilities["access_rule_create"] == "SUPPORTED"
+    assert session.scalar(
+        select(AuditEvent).where(AuditEvent.reason_code == "live_write_capabilities_tested")
+    )
+
+    sibling = service.create(
+        principal,
+        {
+            "provider_type": "scc",
+            "display_name": "Second SCC",
+            "region": "eu",
+            "token": "second-write-only-token",
+        },
+    )
+    sibling_row = session.get(ProviderConnection, UUID(str(sibling["id"])))
+    assert sibling_row is not None
+    sibling_row.lifecycle = "ACTIVE"
+    sibling_row.connection_status = "CONNECTED"
+    sibling_row.provider_version = "10.0.200"
+    session.commit()
+    sibling_visible = service.get(principal, sibling_row.id)
+    assert sibling_visible["version_family_tested"] is True
+    assert sibling_visible["compatibility_warning"] is None
+
+    SqlProviderConnectionRepository(session).record_connection_test(
+        ORG,
+        ADMIN,
+        connection_id,
+        {"status": "CONNECTED", "provider_version": "10.0.97 (build 2)"},
+        {
+            "access_rule_create": "PARTIAL",
+            "pending_change_inspection": "PARTIAL",
+        },
+        [],
+    )
+    session.commit()
+    retained = list(
+        session.scalars(
+            select(ProviderCapabilityEvidence).where(
+                ProviderCapabilityEvidence.connection_id == connection_id,
+                ProviderCapabilityEvidence.provider_version == "10.0.97 (build 2)",
+            )
+        )
+    )
+    assert {(item.capability, item.status, item.evidence_level) for item in retained} == {
+        ("access_rule_create", "SUPPORTED", "TESTED"),
+        ("pending_change_inspection", "SUPPORTED", "TESTED"),
+    }
+    assert connection.write_enabled is True
+    assert manager.read_only is False
+    assert service.get(principal, connection_id)["write_validation_mode"] is False
+
+    SqlProviderConnectionRepository(session).record_connection_test(
+        ORG,
+        ADMIN,
+        connection_id,
+        {"status": "CONNECTED", "provider_version": "10.1.0"},
+        {
+            "access_rule_create": "PARTIAL",
+            "pending_change_inspection": "PARTIAL",
+        },
+        [],
+    )
+    session.commit()
+    assert connection.write_enabled is True
+    assert manager.read_only is False
+    unsupported_family = service.get(principal, connection_id)
+    assert unsupported_family["version_family_tested"] is False
+    assert "10.1.x has not been write-tested" in str(unsupported_family["compatibility_warning"])
+    new_family = list(
+        session.scalars(
+            select(ProviderCapabilityEvidence).where(
+                ProviderCapabilityEvidence.connection_id == connection_id,
+                ProviderCapabilityEvidence.provider_version == "10.1.0",
+            )
+        )
+    )
+    assert {(item.status, item.evidence_level) for item in new_family} == {
+        ("PARTIAL", "NOT_STARTED")
+    }
+
+
+def test_production_write_gate_allows_an_untested_provider_version_with_warning(
+    tmp_path: Path,
+) -> None:
+    session = _session(tmp_path / "validation-write-gate.sqlite")
+    service = _service(session)
+    principal = _principal(ADMIN, ORG, "admin")
+    created = service.create(
+        principal,
+        {
+            "provider_type": "fmc",
+            "display_name": "Non-production FMC",
+            "base_endpoint": "https://fmc-validation.example.test",
+            "username": "api-validation",
+            "password": "validation-only-test-password",
+        },
+    )
+    connection_id = UUID(str(created["id"]))
+    connection = session.get(ProviderConnection, connection_id)
+    assert connection is not None
+    manager = session.scalar(
+        select(FirewallManager).where(FirewallManager.provider_connection_id == connection_id)
+    )
+    assert manager is not None
+    connection.lifecycle = "ACTIVE"
+    connection.connection_status = "CONNECTED"
+    connection.provider_version = "7.7.0-validation"
+    manager.capabilities = {
+        ProviderCapability.ACCESS_RULE_CREATE.value: "PARTIAL",
+        ProviderCapability.PENDING_CHANGE_INSPECTION.value: "PARTIAL",
+    }
+    session.add_all(
+        [
+            ProviderCapabilityEvidence(
+                organization_id=ORG,
+                connection_id=connection_id,
+                provider_version="7.7.0-validation",
+                capability=capability.value,
+                status="PARTIAL",
+                evidence_level="NOT_STARTED",
+                evidence_summary="Implemented but not validated against this provider version.",
+            )
+            for capability in (
+                ProviderCapability.ACCESS_RULE_CREATE,
+                ProviderCapability.PENDING_CHANGE_INSPECTION,
+            )
+        ]
+    )
+    session.commit()
+
+    enabled = service.set_write_enabled(
+        principal,
+        connection_id,
+        connection.revision,
+        True,
+        acknowledged=True,
+    )
+
+    assert enabled["write_enabled"] is True
+    assert enabled["write_validation_mode"] is False
+    assert enabled["version_family_tested"] is False
+    assert "7.7.x has not been write-tested" in str(enabled["compatibility_warning"])
+    assert manager.read_only is False
+    assert manager.capabilities[ProviderCapability.ACCESS_RULE_CREATE.value] == "PARTIAL"
+    assert session.scalar(
+        select(AuditEvent.id).where(
+            AuditEvent.resource_id == connection_id,
+            AuditEvent.reason_code == "provider_writes_enabled",
+        )
+    )
+    change_sets = SqlChangeSetRepository(session)
+    assert (
+        change_sets.provider_capability_state(
+            manager.id,
+            ProviderCapability.ACCESS_RULE_CREATE.value,
+            ORG,
+        )
+        == "SUPPORTED"
+    )
+    session.commit()
+    disabled = service.set_write_enabled(
+        principal,
+        connection_id,
+        int(str(enabled["revision"])),
+        False,
+        acknowledged=False,
+    )
+    assert disabled["write_enabled"] is False
+    assert (
+        change_sets.provider_capability_state(
+            manager.id,
+            ProviderCapability.ACCESS_RULE_CREATE.value,
+            ORG,
+        )
+        == "PARTIAL"
+    )
 
 
 @pytest.mark.asyncio

@@ -2,6 +2,7 @@
 
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -16,7 +17,12 @@ from firewall_manager.application.errors import (
     ProviderTlsValidationError,
     ProviderUnavailableError,
 )
-from firewall_manager.domain.models import CapabilityStatus, PageRequest, ProviderCapability
+from firewall_manager.domain.models import (
+    CapabilityStatus,
+    PageRequest,
+    ProviderCapability,
+    ProviderTransactionState,
+)
 from firewall_manager.providers.fmc import RealFmcProvider
 from firewall_manager.providers.real import normalize_fmc_endpoint
 from firewall_manager.providers.scc import RealSccProvider
@@ -174,6 +180,135 @@ async def test_real_provider_operation_layer_rejects_configuration_post() -> Non
     )
     with pytest.raises(ProductionWriteDisabledError):
         await provider.attempt_configuration_post()
+    await provider.aclose()
+
+
+def _write_capabilities() -> dict[str, CapabilityStatus]:
+    values = _capabilities()
+    values[ProviderCapability.ACCESS_RULE_CREATE.value] = CapabilityStatus.SUPPORTED
+    values[ProviderCapability.PENDING_CHANGE_INSPECTION.value] = CapabilityStatus.SUPPORTED
+    return values
+
+
+def _create_rule_operation() -> list[dict[str, object]]:
+    return [
+        {
+            "id": str(uuid4()),
+            "kind": "CREATE_RULE",
+            "provider_payload": {
+                "domain_native_id": "domain-1",
+                "policy_native_id": "policy-1",
+                "expected_policy_version": "1",
+                "category_native_id": "category-1",
+                "category_provider_name": "FINANCE",
+                "name": "FINANCE__allow-web",
+                "action": "ALLOW",
+                "source_object_native_ids": ["network-1"],
+            },
+        }
+    ]
+
+
+def test_real_object_payload_maps_network_hosts_subnets_and_ranges() -> None:
+    payload = {"object_type": "NETWORK", "provider_name": "FINANCE__example"}
+
+    assert RealFmcProvider._object_payload(  # pyright: ignore[reportPrivateUsage]
+        {**payload, "normalized_value": "10.10.10.1"}
+    ) == ("hosts", {"type": "Host", "name": "FINANCE__example", "value": "10.10.10.1"})
+    assert RealFmcProvider._object_payload(  # pyright: ignore[reportPrivateUsage]
+        {**payload, "normalized_value": "10.10.10.0/24"}
+    ) == (
+        "networks",
+        {"type": "Network", "name": "FINANCE__example", "value": "10.10.10.0/24"},
+    )
+    assert RealFmcProvider._object_payload(  # pyright: ignore[reportPrivateUsage]
+        {**payload, "normalized_value": "10.10.10.1-10.10.20.30"}
+    ) == (
+        "ranges",
+        {
+            "type": "Range",
+            "name": "FINANCE__example",
+            "value": "10.10.10.1-10.10.20.30",
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_real_fmc_rule_create_is_guarded_and_normalized() -> None:
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/auth/generatetoken"):
+            return httpx.Response(204, headers={"X-auth-access-token": "token"})
+        if request.url.path.endswith("/policy/accesspolicies/policy-1"):
+            return httpx.Response(200, json={"id": "policy-1", "version": "1"})
+        if request.url.path.endswith("/deployment/deployabledevices"):
+            return _collection([])
+        if request.url.path.endswith("/pendingchanges"):
+            return _collection([])
+        if request.method == "GET" and request.url.path.endswith("/accessrules"):
+            return _collection([])
+        if request.method == "POST" and request.url.path.endswith("/accessrules"):
+            body = request.content.decode()
+            assert "FINANCE__allow-web" in body
+            assert "network-1" in body
+            return httpx.Response(
+                201,
+                json={"id": "rule-created", "version": "2", "name": "FINANCE__allow-web"},
+            )
+        raise AssertionError(f"unexpected request: {request.method} {request.url.path}")
+
+    provider = RealFmcProvider(
+        endpoint="https://fmc.example.test",
+        display_name="FMC write test",
+        username="api-user",
+        password=_test_credential("fmc-write"),
+        capabilities=_write_capabilities(),
+        transport=httpx.MockTransport(handler),
+        validate_network_target=False,
+        writable=True,
+    )
+    result = await provider.execute_transaction(uuid4(), uuid4(), _create_rule_operation())
+    assert result.state is ProviderTransactionState.SUCCEEDED
+    assert result.operation_results[0]["provider_resource_id"] == "rule-created"
+    assert [request.method for request in requests].count("POST") == 2
+    await provider.aclose()
+
+
+@pytest.mark.asyncio
+async def test_real_mutation_timeout_is_ambiguous_and_never_retried() -> None:
+    mutation_attempts = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal mutation_attempts
+        if request.url.path.endswith("/auth/generatetoken"):
+            return httpx.Response(204, headers={"X-auth-access-token": "token"})
+        if request.url.path.endswith("/policy/accesspolicies/policy-1"):
+            return httpx.Response(200, json={"id": "policy-1", "version": "1"})
+        if request.url.path.endswith("/deployment/deployabledevices"):
+            return _collection([])
+        if request.url.path.endswith("/pendingchanges"):
+            return _collection([])
+        if request.method == "GET" and request.url.path.endswith("/accessrules"):
+            return _collection([])
+        mutation_attempts += 1
+        raise httpx.ReadTimeout("result unknown", request=request)
+
+    provider = RealFmcProvider(
+        endpoint="https://fmc.example.test",
+        display_name="FMC ambiguous test",
+        username="api-user",
+        password=_test_credential("fmc-ambiguous"),
+        capabilities=_write_capabilities(),
+        transport=httpx.MockTransport(handler),
+        validate_network_target=False,
+        writable=True,
+    )
+    result = await provider.execute_transaction(uuid4(), uuid4(), _create_rule_operation())
+    assert result.state is ProviderTransactionState.RECONCILIATION_REQUIRED
+    assert result.operation_results[0]["status"] == "AMBIGUOUS"
+    assert mutation_attempts == 1
     await provider.aclose()
 
 

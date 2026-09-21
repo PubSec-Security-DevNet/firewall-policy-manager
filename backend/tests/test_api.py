@@ -372,6 +372,7 @@ def test_delegated_context_is_server_scoped_to_exact_active_group() -> None:
         app.dependency_overrides.pop(get_authorization_repository)
     assert finance.status_code == 200
     assert finance.json()["objects"][0]["name"] == "FINANCE-SERVERS"
+    assert finance.json()["provider_writable"] is False
     assert engineering.json()["objects"][0]["name"] == "ENGINEERING-SERVERS"
     assert tampered.status_code == 403
     assert tampered.json()["error"]["code"] == "RESOURCE_OUT_OF_SCOPE"
@@ -399,6 +400,7 @@ def test_normal_user_cannot_administer_grants_but_enabled_admin_can() -> None:
         app.dependency_overrides.pop(get_administration_repository)
     assert denied.status_code == 403
     assert allowed.status_code == 200
+    assert allowed.json()["audit_events"] == []
 
 
 def test_grant_revocation_is_admin_only_and_revision_checked_at_contract() -> None:

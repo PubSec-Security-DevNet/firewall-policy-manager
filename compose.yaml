@@ -167,13 +167,23 @@ services:
     ports:
       - "5173:5173"
     volumes:
-      - ./frontend:/app
-      - frontend-node-modules:/app/node_modules
+      # Keep live source/config editing without masking the image's lockfile-matched dependencies.
+      - ./frontend/src:/app/src:ro
+      - ./frontend/index.html:/app/index.html:ro
+      - ./frontend/vite.config.ts:/app/vite.config.ts:ro
     depends_on:
       backend:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:5173/"]
+      test:
+        [
+          "CMD",
+          "wget",
+          "--quiet",
+          "--tries=1",
+          "--output-document=/dev/null",
+          "http://127.0.0.1:5173/src/features/overview/OverviewPage.tsx",
+        ]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -187,4 +197,3 @@ networks:
 volumes:
   postgres-data:
   redis-data:
-  frontend-node-modules:

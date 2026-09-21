@@ -85,6 +85,14 @@ class AuthorizationRepository(Protocol):
         self, user_id: UUID, organization_id: UUID
     ) -> list[dict[str, object]]: ...
 
+    def default_context_for_user(
+        self, user_id: UUID, organization_id: UUID
+    ) -> tuple[UUID | None, UUID | None]: ...
+
+    def set_default_context_for_user(
+        self, user_id: UUID, group_id: UUID, policy_id: UUID, organization_id: UUID
+    ) -> bool: ...
+
     def delegated_context_view(
         self, user_id: UUID, group_id: UUID, policy_id: UUID, organization_id: UUID
     ) -> dict[str, object] | None: ...
@@ -114,6 +122,15 @@ class AdministrationRepository(Protocol):
         resource: str,
         resource_id: UUID,
         enabled: bool,
+        expected_revision: int,
+    ) -> dict[str, object]: ...
+
+    def update_user_role(
+        self,
+        organization_id: UUID,
+        actor_user_id: UUID,
+        user_id: UUID,
+        role: str,
         expected_revision: int,
     ) -> dict[str, object]: ...
 
@@ -204,6 +221,16 @@ class ProviderConnectionRepository(Protocol):
         connection_id: UUID,
         expected_revision: int,
         lifecycle: str,
+    ) -> dict[str, object]: ...
+
+    def set_write_enabled(
+        self,
+        organization_id: UUID,
+        actor_user_id: UUID,
+        connection_id: UUID,
+        expected_revision: int,
+        enabled: bool,
+        allow_unvalidated_non_production: bool,
     ) -> dict[str, object]: ...
 
     def request_sync(
@@ -323,6 +350,18 @@ class ChangeSetRepository(Protocol):
         external_operation_id: str | None,
     ) -> dict[str, object]: ...
 
+    def commit_provider_transaction_intent(self) -> None: ...
+
+    def queue_execution(
+        self, principal: Principal, group_id: UUID, change_set_id: UUID
+    ) -> dict[str, object]: ...
+
+    def commit_change_set_queue(self) -> None: ...
+
+    def claim_queued_execution(
+        self, principal: Principal, group_id: UUID, change_set_id: UUID
+    ) -> bool: ...
+
     def manager_execution_target(
         self, manager_id: UUID, organization_id: UUID
     ) -> dict[str, object] | None: ...
@@ -351,6 +390,15 @@ class ChangeSetRepository(Protocol):
         operations: list[dict[str, object]],
         operation_results: list[dict[str, object]],
     ) -> None: ...
+
+    def record_successful_write_evidence(
+        self,
+        change_set: dict[str, object],
+        principal: Principal,
+        manager_id: UUID,
+        operations: list[dict[str, object]],
+        operation_results: list[dict[str, object]],
+    ) -> set[str]: ...
 
     def group_provider_slug(self, group_id: UUID, organization_id: UUID) -> str | None: ...
 
@@ -465,6 +513,14 @@ class ProviderSyncDispatcher(Protocol):
     """Queue publisher injected at the delivery composition boundary."""
 
     def __call__(self, connection_id: UUID) -> object: ...
+
+
+class ChangeSetExecutionDispatcher(Protocol):
+    """Queue publisher for one immutable ChangeSet security context."""
+
+    def __call__(
+        self, change_set_id: UUID, principal_id: UUID, group_id: UUID, organization_id: UUID
+    ) -> object: ...
 
 
 class SyncRepository(Protocol):

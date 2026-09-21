@@ -3,12 +3,14 @@
 # ruff: noqa: PLR0913, PLR0917 -- writes retain explicit actor and scope arguments.
 
 import hashlib
+import ipaddress
 import json
 from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import UUID, uuid4
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
 from firewall_manager.application.errors import (
@@ -28,11 +30,41 @@ from firewall_manager.persistence.models import (
     FirewallObject,
     Group,
     GroupPolicyCategoryMapping,
+    ObjectReference,
     ObjectUseGrant,
+    ProviderCapabilityEvidence,
+    ProviderConnection,
+    ProviderDomain,
     ProviderTransaction,
     RuleCategory,
+    RuleZoneReference,
     SecurityZone,
+    User,
 )
+from firewall_manager.providers.capabilities import (
+    VALIDATION_WRITE_CAPABILITIES,
+    effective_write_capabilities,
+)
+
+_WRITE_CAPABILITY_BY_OPERATION = {
+    "CREATE_RULE": "access_rule_create",
+    "MODIFY_RULE": "access_rule_update",
+    "DELETE_RULE": "access_rule_delete",
+    "MOVE_RULE": "rule_ordering",
+    "ENSURE_RULE_CATEGORY": "rule_category_mutation",
+}
+
+_OBJECT_CAPABILITY_BY_OPERATION = {
+    ("CREATE_OBJECT", "NETWORK"): "network_object_create",
+    ("CREATE_OBJECT", "PORT_SERVICE"): "port_service_object_create",
+    ("CREATE_OBJECT", "URL"): "url_object_create",
+    ("MODIFY_OBJECT", "NETWORK"): "network_object_mutation",
+    ("MODIFY_OBJECT", "PORT_SERVICE"): "port_service_object_mutation",
+    ("MODIFY_OBJECT", "URL"): "url_object_mutation",
+    ("DELETE_OBJECT", "NETWORK"): "network_object_mutation",
+    ("DELETE_OBJECT", "PORT_SERVICE"): "port_service_object_mutation",
+    ("DELETE_OBJECT", "URL"): "url_object_mutation",
+}
 
 _EDITABLE_STATES = {
     ChangeSetState.DRAFT.value,
@@ -327,6 +359,8 @@ class SqlChangeSetRepository:
             ("source_object_ids", FirewallObject, "object"),
             ("destination_object_ids", FirewallObject, "object"),
             ("port_object_ids", FirewallObject, "object"),
+            ("source_port_object_ids", FirewallObject, "object"),
+            ("destination_port_object_ids", FirewallObject, "object"),
             ("application_object_ids", FirewallObject, "object"),
             ("url_object_ids", FirewallObject, "object"),
         ):
@@ -621,37 +655,127 @@ class SqlChangeSetRepository:
         self._session.flush()
         return self._transaction_dict(row)
 
+    def commit_provider_transaction_intent(self) -> None:
+        """Durably record a real transaction before any external mutation can occur."""
+        self._session.commit()
+
+    def queue_execution(
+        self, principal: Principal, group_id: UUID, change_set_id: UUID
+    ) -> dict[str, object]:
+        """Claim a validated ChangeSet once before publishing its worker message."""
+        row = self._owned_row(principal, group_id, change_set_id)
+        if (
+            row is None
+            or row.state != ChangeSetState.READY.value
+            or row.validated_revision != row.revision
+        ):
+            raise InvalidChangeSetStateError
+        row.state = ChangeSetState.QUEUED.value
+        row.revision += 1
+        row.validated_revision = row.revision
+        self._session.flush()
+        return self._change_set_dict(row)
+
+    def commit_change_set_queue(self) -> None:
+        """Commit the unique queue claim before a fast worker can consume it."""
+        self._session.commit()
+
+    def claim_queued_execution(
+        self, principal: Principal, group_id: UUID, change_set_id: UUID
+    ) -> bool:
+        """Atomically allow only one worker delivery to execute provider writes."""
+        claimed = self._session.execute(
+            update(ChangeSet)
+            .where(
+                ChangeSet.id == change_set_id,
+                ChangeSet.organization_id == principal.organization_id,
+                ChangeSet.acting_group_id == group_id,
+                ChangeSet.principal_id == principal.user_id,
+                ChangeSet.state == ChangeSetState.QUEUED.value,
+            )
+            .values(state=ChangeSetState.EXECUTING.value, updated_at=datetime.now(UTC))
+            .execution_options(synchronize_session=False)
+        )
+        self._session.commit()
+        # The worker preloads the ChangeSet for scope validation. Refresh that
+        # identity-map entry so subsequent reads see the atomically claimed state.
+        self._session.expire_all()
+        return bool(cast("CursorResult[Any]", claimed).rowcount)
+
     def manager_execution_target(
         self, manager_id: UUID, organization_id: UUID
     ) -> dict[str, object] | None:
-        row = self._session.scalar(
-            select(FirewallManager).where(
+        manager = self._session.scalar(
+            select(FirewallManager)
+            .where(
                 FirewallManager.id == manager_id,
                 FirewallManager.organization_id == organization_id,
             )
+            .with_for_update()
         )
-        if row is None:
+        if manager is None:
             return None
+        connection = None
+        if manager.provider_connection_id is not None:
+            connection = self._session.scalar(
+                select(ProviderConnection)
+                .where(
+                    ProviderConnection.id == manager.provider_connection_id,
+                    ProviderConnection.organization_id == organization_id,
+                )
+                .with_for_update()
+            )
         return {
-            "id": row.id,
-            "provider": row.provider,
-            "native_id": row.native_id,
-            "base_url": row.base_url,
-            "is_mock": row.is_mock,
-            "read_only": row.read_only,
+            "id": manager.id,
+            "organization_id": manager.organization_id,
+            "provider": manager.provider,
+            "native_id": manager.native_id,
+            "base_url": manager.base_url,
+            "is_mock": manager.is_mock,
+            "read_only": manager.read_only,
+            "provider_type": connection.provider_type if connection else manager.provider,
+            "provider_connection_id": connection.id if connection else None,
+            "credential_reference": connection.credential_reference if connection else None,
+            "display_name": connection.display_name if connection else manager.display_name,
+            "region": connection.region if connection else None,
+            "base_endpoint": connection.base_endpoint if connection else manager.base_url,
+            "write_enabled": connection.write_enabled if connection else manager.is_mock,
+            "lifecycle": connection.lifecycle if connection else "ACTIVE",
+            "connection_status": connection.connection_status if connection else "CONNECTED",
+            "provider_version": (
+                connection.provider_version if connection else manager.provider_version
+            ),
+            "capabilities": effective_write_capabilities(
+                dict(manager.capabilities),
+                validation_writes_enabled=bool(
+                    connection and connection.write_enabled and not manager.is_mock
+                ),
+            ),
         }
 
     def provider_capability_state(
         self, manager_id: UUID, capability: str, organization_id: UUID
     ) -> str | None:
-        capabilities = self._session.scalar(
-            select(FirewallManager.capabilities).where(
+        row = self._session.execute(
+            select(FirewallManager, ProviderConnection)
+            .outerjoin(
+                ProviderConnection,
+                ProviderConnection.id == FirewallManager.provider_connection_id,
+            )
+            .where(
                 FirewallManager.id == manager_id,
                 FirewallManager.organization_id == organization_id,
             )
-        )
-        if not isinstance(capabilities, dict):
+        ).one_or_none()
+        if row is None:
             return None
+        manager, connection = row
+        capabilities = effective_write_capabilities(
+            dict(manager.capabilities),
+            validation_writes_enabled=bool(
+                connection and connection.write_enabled and not manager.is_mock
+            ),
+        )
         value = capabilities.get(capability)
         return str(value) if value is not None else None
 
@@ -680,18 +804,19 @@ class SqlChangeSetRepository:
         )
         if category is None:
             return None
-        next_position = self._session.scalar(
-            select(func.min(RuleCategory.position)).where(
-                RuleCategory.policy_id == policy_id,
-                RuleCategory.organization_id == organization_id,
-                RuleCategory.position > category.position,
-                RuleCategory.management_state != "MISSING",
+        bounds = self._session.execute(
+            select(func.min(AccessRule.position), func.max(AccessRule.position)).where(
+                AccessRule.policy_id == policy_id,
+                AccessRule.category_id == category.id,
+                AccessRule.organization_id == organization_id,
+                AccessRule.management_state != "MISSING",
             )
-        )
-        upper = int(next_position) - 1 if next_position is not None else 2**31 - 1
-        return int(category.position), upper
+        ).one()
+        if bounds[0] is None or bounds[1] is None:
+            return None
+        return int(bounds[0]), int(bounds[1])
 
-    def prepare_provider_operations(
+    def prepare_provider_operations(  # noqa: PLR0912, PLR0915 -- explicit adapter-edge mapping
         self, operations: list[dict[str, object]], organization_id: UUID
     ) -> list[dict[str, object]]:
         """Resolve application UUIDs to normalized provider identities at the adapter edge."""
@@ -708,24 +833,40 @@ class SqlChangeSetRepository:
                 raise ResourceOutOfScopeError
             provider_payload = dict(payload)
             provider_payload["policy_native_id"] = policy.native_id
-            provider_payload["expected_policy_version"] = policy.provider_version
+            domain = self._native_resource(ProviderDomain, policy.domain_id, organization_id)
+            provider_payload["domain_native_id"] = domain.native_id
+            provider_payload["expected_revisions"] = dict(
+                _as_str_dict(operation.get("expected_revisions", {}))
+            )
             if payload.get("category_id"):
                 category = self._native_resource(
                     RuleCategory, UUID(str(payload["category_id"])), organization_id
                 )
                 provider_payload["category_native_id"] = category.native_id
+                provider_payload["expected_category_name"] = category.name
+                if category.provider_version:
+                    provider_payload["expected_category_version"] = category.provider_version
             if payload.get("rule_id"):
                 rule = self._native_resource(
                     AccessRule, UUID(str(payload["rule_id"])), organization_id
                 )
                 provider_payload["rule_native_id"] = rule.native_id
-                provider_payload["expected_rule_version"] = rule.provider_version
+                provider_payload["expected_rule_name"] = rule.name
+                provider_payload["expected_rule_action"] = rule.action
+                if rule.provider_version:
+                    provider_payload["expected_rule_version"] = rule.provider_version
+            if payload.get("anchor_rule_id"):
+                anchor_rule = self._native_resource(
+                    AccessRule, UUID(str(payload["anchor_rule_id"])), organization_id
+                )
+                provider_payload["anchor_rule_native_id"] = anchor_rule.native_id
             if payload.get("object_id"):
                 item = self._native_resource(
                     FirewallObject, UUID(str(payload["object_id"])), organization_id
                 )
                 provider_payload["object_native_id"] = item.native_id
-                provider_payload["expected_object_version"] = item.provider_version
+                if item.provider_version:
+                    provider_payload["expected_object_version"] = item.provider_version
                 provider_payload["expected_provider_name"] = item.expected_provider_name
             for source, target, model in (
                 ("source_zone_ids", "source_zone_native_ids", SecurityZone),
@@ -733,13 +874,21 @@ class SqlChangeSetRepository:
                 ("source_object_ids", "source_object_native_ids", FirewallObject),
                 ("destination_object_ids", "destination_object_native_ids", FirewallObject),
                 ("port_object_ids", "port_object_native_ids", FirewallObject),
+                ("source_port_object_ids", "source_port_object_native_ids", FirewallObject),
+                (
+                    "destination_port_object_ids",
+                    "destination_port_object_native_ids",
+                    FirewallObject,
+                ),
                 ("application_object_ids", "application_object_native_ids", FirewallObject),
                 ("url_object_ids", "url_object_native_ids", FirewallObject),
             ):
                 values = payload.get(source, [])
                 if isinstance(values, list):
                     provider_payload[target] = [
-                        self._native_resource(model, UUID(str(value)), organization_id).native_id
+                        self._provider_reference(
+                            self._native_resource(model, UUID(str(value)), organization_id)
+                        )
                         for value in cast("list[object]", values)
                     ]
             resolution = dict(_as_dict(operation.get("resolution", {})))
@@ -762,7 +911,19 @@ class SqlChangeSetRepository:
                         RuleCategory, UUID(str(category_id)), organization_id
                     )
                     provider_payload["category_native_id"] = category.native_id
-                    provider_payload["expected_category_version"] = category.provider_version
+                    if category.provider_version:
+                        provider_payload["expected_category_version"] = category.provider_version
+            elif str(operation["kind"]) == "CREATE_RULE":
+                provider_payload["name"] = resolution.get("provider_name", payload.get("name"))
+                provider_payload["category_provider_name"] = resolution.get(
+                    "category_provider_name"
+                )
+                category_id = resolution.get("category_id")
+                if category_id:
+                    category = self._native_resource(
+                        RuleCategory, UUID(str(category_id)), organization_id
+                    )
+                    provider_payload["category_native_id"] = category.native_id
             prepared.append(
                 {
                     "id": str(operation["id"]),
@@ -772,7 +933,32 @@ class SqlChangeSetRepository:
             )
         return prepared
 
-    def reconcile_successful_operations(
+    @staticmethod
+    def _provider_reference(row: Any) -> dict[str, str]:
+        """Build the typed object reference required by FMC/cdFMC rule payloads."""
+        if isinstance(row, SecurityZone):
+            provider_type = "SecurityZone"
+        elif isinstance(row, FirewallObject):
+            provider_type = {
+                "NETWORK_GROUP": "NetworkGroup",
+                "PORT_SERVICE": "ProtocolPortObject",
+                "URL": "Url",
+                "APPLICATION": "Application",
+                "APPLICATION_FILTER": "ApplicationFilter",
+            }.get(row.object_type, "Network")
+            if row.object_type == "NETWORK" and row.normalized_value:
+                if row.normalized_value.count("-") == 1:
+                    provider_type = "Range"
+                else:
+                    parsed = ipaddress.ip_network(row.normalized_value, strict=False)
+                    provider_type = (
+                        "Host" if parsed.prefixlen == parsed.max_prefixlen else "Network"
+                    )
+        else:
+            provider_type = type(row).__name__
+        return {"id": str(row.native_id), "name": str(row.name), "type": provider_type}
+
+    def reconcile_successful_operations(  # noqa: PLR0912, PLR0915 -- typed operation reducer
         self,
         change_set: dict[str, object],
         principal: Principal,
@@ -885,7 +1071,263 @@ class SqlChangeSetRepository:
                         revision=1,
                     )
                 )
+            elif kind == "CREATE_RULE":
+                category = None
+                category_id = payload.get("category_id") or resolution.get("category_id")
+                if category_id:
+                    category = self._native_resource(
+                        RuleCategory, UUID(str(category_id)), principal.organization_id
+                    )
+                if category is None:
+                    mapping = self._session.scalar(
+                        select(GroupPolicyCategoryMapping).where(
+                            GroupPolicyCategoryMapping.organization_id == principal.organization_id,
+                            GroupPolicyCategoryMapping.group_id == group_id,
+                            GroupPolicyCategoryMapping.policy_id == policy.id,
+                            GroupPolicyCategoryMapping.sync_state == "SYNCED",
+                        )
+                    )
+                    if mapping is not None:
+                        category = self._native_resource(
+                            RuleCategory, mapping.category_id, principal.organization_id
+                        )
+                native_id = str(result["provider_resource_id"])
+                provider_name = str(resolution.get("provider_name", payload["name"]))
+                rule = self._session.scalar(
+                    select(AccessRule).where(
+                        AccessRule.organization_id == principal.organization_id,
+                        AccessRule.policy_id == policy.id,
+                        AccessRule.native_id == native_id,
+                    )
+                )
+                if rule is not None and (
+                    rule.owner_group_id != group_id or rule.name != provider_name
+                ):
+                    raise StaleWriteError
+                if rule is None:
+                    rule = AccessRule(
+                        organization_id=principal.organization_id,
+                        manager_id=policy.manager_id,
+                        policy_id=policy.id,
+                        native_id=native_id,
+                        name=provider_name,
+                        native_metadata={},
+                        revision=1,
+                        created_by_user_id=principal.user_id,
+                    )
+                    self._session.add(rule)
+                rule.category_id = category.id if category else None
+                rule.provider_version = str(provider_resource.get("native_version", ""))
+                rule.provider_fingerprint = str(provider_resource["fingerprint"])
+                rule.management_state = "MANAGED"
+                rule.owner_group_id = group_id
+                rule.modified_by_user_id = principal.user_id
+                rule.action = str(payload["action"])
+                rule.position = int(
+                    str(payload.get("position", provider_resource.get("position", 0)))
+                )
+                self._session.flush()
+                self._replace_rule_references(rule, payload, principal.organization_id)
+            elif kind in {"MODIFY_RULE", "MOVE_RULE"}:
+                rule = self._native_resource(
+                    AccessRule, UUID(str(payload["rule_id"])), principal.organization_id
+                )
+                if payload.get("category_id"):
+                    category = self._native_resource(
+                        RuleCategory,
+                        UUID(str(payload["category_id"])),
+                        principal.organization_id,
+                    )
+                    rule.category_id = category.id
+                if kind == "MODIFY_RULE":
+                    rule.name = str(payload.get("name", rule.name))
+                    rule.action = str(payload.get("action", rule.action))
+                    self._replace_rule_references(rule, payload, principal.organization_id)
+                if kind == "MOVE_RULE" and result.get("provider_resource_id"):
+                    rule.native_id = str(result["provider_resource_id"])
+                if payload.get("position") is not None:
+                    rule.position = int(str(payload["position"]))
+                rule.provider_version = str(provider_resource.get("native_version", ""))
+                rule.provider_fingerprint = str(provider_resource["fingerprint"])
+                rule.modified_by_user_id = principal.user_id
+                rule.management_state = "MANAGED"
+                rule.revision += 1
+            elif kind == "DELETE_RULE":
+                rule = self._native_resource(
+                    AccessRule, UUID(str(payload["rule_id"])), principal.organization_id
+                )
+                self._session.execute(
+                    delete(ObjectReference).where(ObjectReference.source_rule_id == rule.id)
+                )
+                self._session.execute(
+                    delete(RuleZoneReference).where(RuleZoneReference.rule_id == rule.id)
+                )
+                rule.management_state = "MISSING"
+                rule.modified_by_user_id = principal.user_id
+                rule.revision += 1
         self._session.flush()
+
+    def record_successful_write_evidence(
+        self,
+        change_set: dict[str, object],
+        principal: Principal,
+        manager_id: UUID,
+        operations: list[dict[str, object]],
+        operation_results: list[dict[str, object]],
+    ) -> set[str]:
+        """Promote only capabilities proven by successful live provider mutations."""
+        manager = self._session.scalar(
+            select(FirewallManager)
+            .where(
+                FirewallManager.id == manager_id,
+                FirewallManager.organization_id == principal.organization_id,
+                FirewallManager.is_mock.is_(False),
+            )
+            .with_for_update()
+        )
+        if manager is None or manager.provider_connection_id is None:
+            return set()
+        connection = self._session.scalar(
+            select(ProviderConnection)
+            .where(
+                ProviderConnection.id == manager.provider_connection_id,
+                ProviderConnection.organization_id == principal.organization_id,
+            )
+            .with_for_update()
+        )
+        if connection is None or not connection.provider_version:
+            return set()
+
+        results = {str(item.get("operation_id")): item for item in operation_results}
+        proven = {
+            "pending_change_inspection"
+            for result in results.values()
+            if result.get("status") == OperationStatus.SUCCEEDED.value
+        }
+        for operation in operations:
+            result = results.get(str(operation["id"]))
+            if (
+                result is None
+                or result.get("status") != OperationStatus.SUCCEEDED.value
+                or result.get("mutated") is not True
+            ):
+                continue
+            kind = str(operation["kind"])
+            capability = _WRITE_CAPABILITY_BY_OPERATION.get(kind)
+            if capability is None:
+                payload = _as_dict(operation.get("payload", {}))
+                object_type = str(payload.get("object_type", ""))
+                if not object_type and payload.get("object_id"):
+                    owned_object = self._session.get(
+                        FirewallObject, UUID(str(payload["object_id"]))
+                    )
+                    object_type = owned_object.object_type if owned_object is not None else ""
+                capability = _OBJECT_CAPABILITY_BY_OPERATION.get((kind, object_type))
+            if capability in VALIDATION_WRITE_CAPABILITIES:
+                proven.add(capability)
+
+        now = datetime.now(UTC)
+        promoted: set[str] = set()
+        for capability in proven:
+            evidence = self._session.scalar(
+                select(ProviderCapabilityEvidence).where(
+                    ProviderCapabilityEvidence.connection_id == connection.id,
+                    ProviderCapabilityEvidence.provider_version == connection.provider_version,
+                    ProviderCapabilityEvidence.capability == capability,
+                )
+            )
+            if evidence is None:
+                evidence = ProviderCapabilityEvidence(
+                    organization_id=principal.organization_id,
+                    connection_id=connection.id,
+                    provider_version=connection.provider_version,
+                    capability=capability,
+                )
+                self._session.add(evidence)
+            if evidence.status == "SUPPORTED" and evidence.evidence_level == "TESTED":
+                continue
+            evidence.status = "SUPPORTED"
+            evidence.evidence_level = "TESTED"
+            evidence.evidence_summary = (
+                f"Live provider operation succeeded in ChangeSet {change_set['id']}."
+            )
+            evidence.tested_at = now
+            promoted.add(capability)
+
+        if promoted:
+            manager.capabilities = {
+                **manager.capabilities,
+                **dict.fromkeys(promoted, "SUPPORTED"),
+            }
+            manager.revision += 1
+            self._session.add(
+                AuditEvent(
+                    organization_id=principal.organization_id,
+                    actor_user_id=principal.user_id,
+                    action="manage_providers",
+                    resource_type="provider_connection",
+                    resource_id=connection.id,
+                    decision="SUCCESS",
+                    reason_code="live_write_capabilities_tested",
+                    interface="worker",
+                    details={
+                        "provider": connection.provider_type,
+                        "provider_version": connection.provider_version,
+                        "change_set_id": str(change_set["id"]),
+                        "capabilities": sorted(promoted),
+                    },
+                )
+            )
+            self._session.flush()
+        return promoted
+
+    def _replace_rule_references(
+        self, rule: AccessRule, payload: dict[str, object], organization_id: UUID
+    ) -> None:
+        """Replace normalized rule elements only after an unambiguous provider success."""
+        self._session.execute(
+            delete(ObjectReference).where(ObjectReference.source_rule_id == rule.id)
+        )
+        self._session.execute(delete(RuleZoneReference).where(RuleZoneReference.rule_id == rule.id))
+        for key, element in (
+            ("source_object_ids", "SOURCE_NETWORK"),
+            ("destination_object_ids", "DESTINATION_NETWORK"),
+            ("port_object_ids", "PORT_SERVICE"),
+            ("source_port_object_ids", "SOURCE_PORT"),
+            ("destination_port_object_ids", "DESTINATION_PORT"),
+            ("application_object_ids", "APPLICATION"),
+            ("url_object_ids", "URL"),
+        ):
+            values = payload.get(key, [])
+            if isinstance(values, list):
+                for value in cast("list[object]", values):
+                    item = self._native_resource(FirewallObject, UUID(str(value)), organization_id)
+                    self._session.add(
+                        ObjectReference(
+                            organization_id=organization_id,
+                            manager_id=rule.manager_id,
+                            source_rule_id=rule.id,
+                            target_object_id=item.id,
+                            element_type=element,
+                        )
+                    )
+        for key, element in (
+            ("source_zone_ids", "SOURCE"),
+            ("destination_zone_ids", "DESTINATION"),
+        ):
+            values = payload.get(key, [])
+            if isinstance(values, list):
+                for value in cast("list[object]", values):
+                    zone = self._native_resource(SecurityZone, UUID(str(value)), organization_id)
+                    self._session.add(
+                        RuleZoneReference(
+                            organization_id=organization_id,
+                            manager_id=rule.manager_id,
+                            rule_id=rule.id,
+                            zone_id=zone.id,
+                            element_type=element,
+                        )
+                    )
 
     def group_provider_slug(self, group_id: UUID, organization_id: UUID) -> str | None:
         return self._session.scalar(
@@ -942,7 +1384,20 @@ class SqlChangeSetRepository:
                 action=action,
                 resource_type="change_set",
                 resource_id=change_set_id,
-                decision="ALLOW" if result in {"ALLOW", "SUCCEEDED", "READY"} else "DENY",
+                decision=(
+                    "ALLOW"
+                    if result
+                    in {
+                        "ALLOW",
+                        "SUCCEEDED",
+                        "READY",
+                        "QUEUED",
+                        "EXECUTING",
+                        "PARTIALLY_SUCCEEDED",
+                        "RECONCILIATION_REQUIRED",
+                    }
+                    else "DENY"
+                ),
                 reason_code=result,
                 interface="application",
                 details=details,
@@ -988,10 +1443,18 @@ class SqlChangeSetRepository:
         )
 
     def _change_set_dict(self, row: ChangeSet) -> dict[str, object]:
+        creator = self._session.scalar(
+            select(User).where(
+                User.id == row.principal_id,
+                User.organization_id == row.organization_id,
+            )
+        )
         return {
             "id": row.id,
             "organization_id": row.organization_id,
             "creator_id": row.principal_id,
+            "creator_display_name": creator.display_name if creator else None,
+            "creator_email": creator.email if creator else None,
             "active_group_id": row.acting_group_id,
             "access_policy_id": row.access_policy_id,
             "target_policy_ids": row.target_policy_ids,

@@ -376,7 +376,12 @@ def upsert_authorization_seed_row(session: Session, row: Base) -> None:
 def seed_authorization_scenarios(session: Session) -> None:
     """Seed deterministic Group-isolation grants after provider inventory synchronization."""
     policies = list(
-        session.scalars(select(AccessPolicy).where(AccessPolicy.organization_id == IDS["org"]))
+        session.scalars(
+            select(AccessPolicy).where(
+                AccessPolicy.organization_id == IDS["org"],
+                AccessPolicy.manager_id.in_((IDS["fmc"], IDS["scc"])),
+            )
+        )
     )
     for policy in policies:
         manager_prefix = "fmc" if policy.manager_id == IDS["fmc"] else "scc"

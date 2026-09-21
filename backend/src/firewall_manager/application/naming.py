@@ -2,10 +2,10 @@
 
 import re
 from dataclasses import asdict, dataclass
-from ipaddress import ip_address, ip_network
 from uuid import UUID
 
 from firewall_manager.domain.models import FirewallObjectType, NamingResolutionKind, ProviderKind
+from firewall_manager.domain.networks import normalize_ip_value
 
 _SAFE_COMPONENT = re.compile(r"[^A-Za-z0-9_.-]+")
 _PORT = re.compile(r"^(tcp|udp)/(\d{1,5})(?:-(\d{1,5}))?$", re.IGNORECASE)
@@ -43,23 +43,20 @@ class ProviderObjectNamingService:
         kind = FirewallObjectType(object_type)
         stripped = value.strip()
         if kind is FirewallObjectType.NETWORK:
-            return (
-                str(ip_network(stripped, strict=False))
-                if "/" in stripped
-                else str(ip_address(stripped))
-            )
+            return normalize_ip_value(stripped)
         if kind is FirewallObjectType.PORT_SERVICE:
             match = _PORT.fullmatch(stripped)
             if match is None:
                 msg = "port service must use protocol/port or protocol/start-end"
                 raise ValueError(msg)
+            protocol = match.group(1).lower()
             start = int(match.group(2))
             end = int(match.group(3) or start)
             if not 1 <= start <= end <= 65535:
                 msg = "port range must be between 1 and 65535"
                 raise ValueError(msg)
             suffix = str(start) if start == end else f"{start}-{end}"
-            return f"{match.group(1).lower()}/{suffix}"
+            return f"{protocol}/{suffix}"
         if kind is FirewallObjectType.URL:
             return stripped.rstrip("/").casefold()
         if kind in {FirewallObjectType.APPLICATION, FirewallObjectType.APPLICATION_FILTER}:
@@ -131,22 +128,6 @@ class ProviderObjectNamingService:
                 normalized,
                 same_name.object_id,
                 "SAME_NAME_DIFFERENT_CONTENT",
-            )
-        equivalent = next(
-            (
-                item
-                for item in candidates
-                if item.object_type == object_type and item.normalized_value == normalized
-            ),
-            None,
-        )
-        if equivalent is not None:
-            return NamingResolution(
-                NamingResolutionKind.EQUIVALENT_REUSE,
-                requested_name,
-                equivalent.name,
-                normalized,
-                equivalent.object_id,
             )
         return NamingResolution(
             NamingResolutionKind.NEW_OBJECT_REQUIRED,

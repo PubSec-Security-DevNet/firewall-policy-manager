@@ -22,7 +22,9 @@ trap cleanup_on_exit 0
 docker compose --project-name "$project" up --build --remove-orphans -d
 
 until curl --fail --silent "${base_url}/api/v1/health/ready" >/dev/null \
-  && curl --fail --silent "${frontend_url}/" >/dev/null; do
+  && curl --fail --silent "${frontend_url}/" >/dev/null \
+  && curl --fail --silent \
+    "${frontend_url}/src/features/overview/OverviewPage.tsx" >/dev/null; do
   attempt=$((attempt + 1))
   if [ "$attempt" -ge 60 ]; then
     docker compose --project-name "$project" ps
@@ -37,7 +39,7 @@ session="$(curl --fail --silent -H 'X-Dev-User: viewer@example.test' "${base_url
 managers="$(curl --fail --silent -H 'X-Dev-User: viewer@example.test' "${base_url}/api/v1/firewall-managers")"
 policies="$(curl --fail --silent -H 'X-Dev-User: viewer@example.test' "${base_url}/api/v1/policies")"
 rules="$(curl --fail --silent -H 'X-Dev-User: viewer@example.test' "${base_url}/api/v1/rules")"
-objects="$(curl --fail --silent -H 'X-Dev-User: viewer@example.test' "${base_url}/api/v1/objects")"
+objects="$(curl --fail --silent -H 'X-Dev-User: viewer@example.test' "${base_url}/api/v1/objects?manager_id=40000000-0000-0000-0000-000000000001&limit=100")"
 provider_status="$(curl --fail --silent -H 'X-Dev-User: viewer@example.test' "${base_url}/api/v1/providers/status")"
 isolated_managers="$(curl --fail --silent -H 'X-Dev-User: other-viewer@example.test' "${base_url}/api/v1/firewall-managers")"
 finance_policies="$(curl --fail --silent -H 'X-Dev-User: viewer@example.test' "${base_url}/api/v1/delegated/policies?active_group_id=20000000-0000-0000-0000-000000000001")"
@@ -57,6 +59,21 @@ provider_admin_connections="$(curl --fail --silent -H 'X-Dev-User: admin@example
 provider_viewer_denial="$(curl --silent --output /dev/null --write-out '%{http_code}' -H 'X-Dev-User: viewer@example.test' "${base_url}/api/v1/admin/provider-connections")"
 provider_group_admin_denial="$(curl --silent --output /dev/null --write-out '%{http_code}' -H 'X-Dev-User: group-admin@example.test' "${base_url}/api/v1/admin/provider-connections")"
 
+mock_capability_count() {
+  printf '%s' "$provider_status" | python3 -c '
+import json
+import sys
+
+capability, expected = sys.argv[1:]
+rows = json.load(sys.stdin)
+print(sum(
+    row.get("evidence_profile") == "mock"
+    and row.get("capabilities", {}).get(capability) == expected
+    for row in rows
+))
+' "$1" "$2"
+}
+
 printf '%s' "$overview" | grep -q 'Example Organization'
 printf '%s' "$overview" | grep -q 'Local FMC Mock'
 printf '%s' "$overview" | grep -q 'Local SCC Mock'
@@ -69,14 +86,14 @@ printf '%s' "$rules" | grep -q 'Allow application web'
 printf '%s' "$objects" | grep -q 'shared-dns'
 printf '%s' "$provider_status" | grep -q 'COMPLETED'
 test "$(printf '%s' "$provider_status" | grep -o '"evidence_profile":"mock"' | wc -l | tr -d ' ')" = "2"
-test "$(printf '%s' "$provider_status" | grep -o '"access_rule_create":"SUPPORTED"' | wc -l | tr -d ' ')" = "2"
-test "$(printf '%s' "$provider_status" | grep -o '"rule_ordering":"SUPPORTED"' | wc -l | tr -d ' ')" = "2"
-test "$(printf '%s' "$provider_status" | grep -o '"rule_category_mutation":"SUPPORTED"' | wc -l | tr -d ' ')" = "2"
-test "$(printf '%s' "$provider_status" | grep -o '"network_object_mutation":"SUPPORTED"' | wc -l | tr -d ' ')" = "2"
-test "$(printf '%s' "$provider_status" | grep -o '"port_service_object_mutation":"SUPPORTED"' | wc -l | tr -d ' ')" = "2"
-test "$(printf '%s' "$provider_status" | grep -o '"url_object_mutation":"SUPPORTED"' | wc -l | tr -d ' ')" = "2"
-test "$(printf '%s' "$provider_status" | grep -o '"application_object_mutation":"NOT_STARTED"' | wc -l | tr -d ' ')" = "2"
-test "$(printf '%s' "$provider_status" | grep -o '"application_object_create":"PARTIAL"' | wc -l | tr -d ' ')" = "2"
+test "$(mock_capability_count access_rule_create SUPPORTED)" = "2"
+test "$(mock_capability_count rule_ordering SUPPORTED)" = "2"
+test "$(mock_capability_count rule_category_mutation SUPPORTED)" = "2"
+test "$(mock_capability_count network_object_mutation SUPPORTED)" = "2"
+test "$(mock_capability_count port_service_object_mutation SUPPORTED)" = "2"
+test "$(mock_capability_count url_object_mutation SUPPORTED)" = "2"
+test "$(mock_capability_count application_object_mutation NOT_STARTED)" = "2"
+test "$(mock_capability_count application_object_create PARTIAL)" = "2"
 printf '%s' "$isolated_managers" | grep -q 'Isolated FMC Mock'
 if printf '%s' "$isolated_managers" | grep -q 'Local SCC Mock'; then
   echo "Cross-organization manager data leaked into the isolated scope." >&2
@@ -119,7 +136,16 @@ printf '%s' "$admin_session" | grep -q 'admin@example.test'
 printf '%s' "$provider_admin_connections" | grep -q '"items":'
 test "$provider_viewer_denial" = "403"
 test "$provider_group_admin_denial" = "403"
-docker compose --project-name "$project" exec -T worker python -m firewall_manager.worker.health
+attempt=0
+until docker compose --project-name "$project" exec -T worker \
+  python -m firewall_manager.worker.health; do
+  attempt=$((attempt + 1))
+  if [ "$attempt" -ge 30 ]; then
+    docker compose --project-name "$project" logs --tail=100 worker
+    exit 1
+  fi
+  sleep 2
+done
 docker compose --project-name "$project" ps --format json | grep -q 'healthy'
 
 echo "Local stack smoke test passed."

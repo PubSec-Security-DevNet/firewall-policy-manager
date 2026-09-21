@@ -41,6 +41,12 @@ from firewall_manager.providers.transactions import ProviderExecutionResult
 T = TypeVar("T")
 
 
+def _mock_reference_id(value: object) -> str:
+    if isinstance(value, dict):
+        return str(cast("dict[str, object]", value).get("id"))
+    return str(value)
+
+
 class MockScenario(StrEnum):
     """Read-path faults/state transitions available to contract and sync tests."""
 
@@ -162,7 +168,7 @@ class DeterministicMockProvider:
                 object_references=(
                     DiscoveredObjectReference(private_object, RuleObjectElement.SOURCE_NETWORK),
                     DiscoveredObjectReference(shared_object, RuleObjectElement.DESTINATION_NETWORK),
-                    DiscoveredObjectReference(service_object, RuleObjectElement.PORT_SERVICE),
+                    DiscoveredObjectReference(service_object, RuleObjectElement.DESTINATION_PORT),
                     DiscoveredObjectReference(application_object, RuleObjectElement.APPLICATION),
                 ),
                 zone_references=(
@@ -626,10 +632,52 @@ class DeterministicMockProvider:
     def _create_rule(
         self, policy: DiscoveredPolicy, payload: dict[str, object], resource_id: str
     ) -> tuple[str, bool]:
-        category = self._category(str(payload["category_native_id"]), policy.native_id)
-        position = self._validated_position(
-            category, int(str(payload.get("position", category.position)))
+        category = None
+        if payload.get("category_native_id"):
+            category = self._category(str(payload["category_native_id"]), policy.native_id)
+        elif payload.get("category_provider_name"):
+            category = next(
+                (
+                    item
+                    for item in self._categories
+                    if item.policy_native_id == policy.native_id
+                    and item.name == str(payload["category_provider_name"])
+                ),
+                None,
+            )
+            if category is None:
+                raise ValueError("PROVIDER_RULE_CATEGORY_NOT_FOUND")
+        requested_name = str(payload.get("name", ""))
+        if any(
+            item.policy_native_id == policy.native_id and item.name == requested_name
+            for item in self._rules
+        ):
+            raise ValueError("PROVIDER_RULE_NAME_CONFLICT")
+        default_position = (
+            max(
+                (
+                    item.position
+                    for item in self._rules
+                    if item.policy_native_id == policy.native_id
+                    and item.category_native_id == category.native_id
+                ),
+                default=category.position - 1,
+            )
+            + 1
+            if category is not None
+            else max(
+                (
+                    item.position
+                    for item in self._rules
+                    if item.policy_native_id == policy.native_id
+                ),
+                default=0,
+            )
+            + 1
         )
+        position = int(str(payload.get("position", default_position)))
+        if category is not None:
+            position = self._validated_position(category, position)
         self._rules.append(
             self._rule_from_payload(resource_id, policy, category, payload, None, position)
         )
@@ -640,7 +688,7 @@ class DeterministicMockProvider:
         self,
         native_id: str,
         policy: DiscoveredPolicy,
-        category: DiscoveredCategory,
+        category: DiscoveredCategory | None,
         payload: dict[str, object],
         existing: DiscoveredRule | None,
         position: int | None = None,
@@ -650,13 +698,15 @@ class DeterministicMockProvider:
             ("source_object_native_ids", RuleObjectElement.SOURCE_NETWORK),
             ("destination_object_native_ids", RuleObjectElement.DESTINATION_NETWORK),
             ("port_object_native_ids", RuleObjectElement.PORT_SERVICE),
+            ("source_port_object_native_ids", RuleObjectElement.SOURCE_PORT),
+            ("destination_port_object_native_ids", RuleObjectElement.DESTINATION_PORT),
             ("application_object_native_ids", RuleObjectElement.APPLICATION),
             ("url_object_native_ids", RuleObjectElement.URL),
         ):
             values = payload.get(key, [])
             if isinstance(values, list):
                 object_references.extend(
-                    DiscoveredObjectReference(str(value), element)
+                    DiscoveredObjectReference(_mock_reference_id(value), element)
                     for value in cast("list[object]", values)
                 )
         zone_references: list[DiscoveredZoneReference] = []
@@ -667,7 +717,7 @@ class DeterministicMockProvider:
             values = payload.get(key, [])
             if isinstance(values, list):
                 zone_references.extend(
-                    DiscoveredZoneReference(str(value), element)
+                    DiscoveredZoneReference(_mock_reference_id(value), element)
                     for value in cast("list[object]", values)
                 )
         version = str(int(existing.native_version or "0") + 1) if existing else "1"
@@ -677,12 +727,17 @@ class DeterministicMockProvider:
             native_version=version,
             fingerprint=f"{self.kind}-rule-{native_id}-{version}",
             policy_native_id=policy.native_id,
-            category_native_id=category.native_id,
+            category_native_id=category.native_id if category else None,
             action=str(payload.get("action", existing.action if existing else "ALLOW")),
             position=position
             if position is not None
             else int(
-                str(payload.get("position", existing.position if existing else category.position))
+                str(
+                    payload.get(
+                        "position",
+                        existing.position if existing else (category.position if category else 0),
+                    )
+                )
             ),
             object_references=tuple(object_references)
             if object_references
@@ -709,11 +764,6 @@ class DeterministicMockProvider:
         normalized_value = str(payload["normalized_value"])
         if any(item.name == name for item in self._objects):
             raise ValueError("PROVIDER_OBJECT_NAME_CONFLICT")
-        if any(
-            item.object_type is object_type and item.normalized_value == normalized_value
-            for item in self._objects
-        ):
-            raise ValueError("PROVIDER_EQUIVALENT_OBJECT_CONFLICT")
         self._objects.append(
             DiscoveredObject(
                 native_id=resource_id,
@@ -802,15 +852,15 @@ class DeterministicMockProvider:
         ):
             raise ValueError("PROVIDER_CATEGORY_NAME_CONFLICT")
         position = (
-            max(
+            min(
                 (
                     item.position
                     for item in self._categories
                     if item.policy_native_id == policy.native_id
                 ),
-                default=0,
+                default=10,
             )
-            + 10
+            - 10
         )
         self._categories.append(
             DiscoveredCategory(

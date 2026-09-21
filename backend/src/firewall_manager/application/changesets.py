@@ -1,8 +1,9 @@
-"""ChangeSet orchestration: authorization, drift checks, and mock-only execution."""
+"""ChangeSet orchestration: authorization, drift checks, and guarded execution."""
 
 # ruff: noqa: PLR0913, PLR0917 -- orchestration retains explicit security context.
 
 from collections import defaultdict
+from collections.abc import Callable
 from typing import cast
 from uuid import UUID
 
@@ -31,7 +32,10 @@ from firewall_manager.domain.models import (
     ProviderKind,
     ProviderTransactionState,
 )
-from firewall_manager.providers.transactions import ProviderTransactionExecutor
+from firewall_manager.providers.transactions import (
+    ProviderTransactionExecutor,
+    real_transaction_operation_id,
+)
 
 _RULE_ACTIONS = {"ALLOW", "BLOCK", "TRUST", "MONITOR"}
 _TERMINAL_NAMING_CONFLICTS = {
@@ -222,6 +226,25 @@ class ChangeSetService:
         results = [
             self._evaluate_operation(principal, active_group_id, item) for item in operations
         ]
+        seen_rule_names: set[str] = set()
+        for operation, result in zip(operations, results, strict=True):
+            if str(operation["kind"]) != ChangeOperationKind.CREATE_RULE.value:
+                continue
+            resolution = cast("dict[str, object]", result.get("resolution", {}))
+            provider_name = str(resolution.get("provider_name", "")).casefold()
+            if provider_name and provider_name in seen_rule_names:
+                result["status"] = OperationStatus.INVALID.value
+                cast("list[dict[str, object]]", result["checks"]).append(
+                    {
+                        "operation": ChangeOperationKind.CREATE_RULE.value,
+                        "element_type": "rule_name",
+                        "element": "NOT_DISCLOSED",
+                        "permission": "unique_provider_name",
+                        "allowed": False,
+                        "reason": "DUPLICATE_RULE_NAME_IN_CHANGE_SET",
+                    }
+                )
+            seen_rule_names.add(provider_name)
         valid = bool(results) and all(
             item["status"] == OperationStatus.READY.value for item in results
         )
@@ -264,12 +287,179 @@ class ChangeSetService:
             return result
         return self.preflight(principal, active_group_id, change_set_id)
 
-    async def execute(
-        self, principal: Principal, active_group_id: UUID, change_set_id: UUID
+    def queue_execution(
+        self,
+        principal: Principal,
+        active_group_id: UUID,
+        change_set_id: UUID,
+        dispatch: Callable[[UUID, UUID, UUID, UUID], object],
     ) -> dict[str, object]:
+        """Durably claim a validated ChangeSet and publish its security context."""
         change_set = self._load(principal, active_group_id, change_set_id)
         if (
             change_set["state"] != ChangeSetState.READY.value
+            or change_set["validated_revision"] != change_set["revision"]
+        ):
+            raise InvalidChangeSetStateError(details={"required_state": ChangeSetState.READY.value})
+        queued = self._repository.queue_execution(principal, active_group_id, change_set_id)
+        self._audit_for(change_set, principal, "change_set_submitted", "QUEUED")
+        self._repository.commit_change_set_queue()
+        try:
+            dispatch(change_set_id, principal.user_id, active_group_id, principal.organization_id)
+        except Exception as exc:
+            self._repository.set_execution_state(
+                principal,
+                active_group_id,
+                change_set_id,
+                ChangeSetState.FAILED.value,
+                {},
+                {"code": "QUEUE_PUBLISH_FAILED"},
+            )
+            self._audit_for(change_set, principal, "change_set_queue_failed", "FAILED")
+            self._repository.commit_change_set_queue()
+            raise InvalidChangeSetStateError(details={"code": "QUEUE_PUBLISH_FAILED"}) from exc
+        return queued
+
+    def retry_execution(
+        self,
+        principal: Principal,
+        active_group_id: UUID,
+        change_set_id: UUID,
+        dispatch: Callable[[UUID, UUID, UUID, UUID], object],
+    ) -> dict[str, object]:
+        """Revalidate and requeue a failed submission only after a known non-mutating attempt."""
+        change_set = self._load(principal, active_group_id, change_set_id)
+        retryable_state = change_set["state"] in {
+            ChangeSetState.FAILED.value,
+            ChangeSetState.CONFLICT.value,
+        }
+        transactions = _as_dict_list(change_set.get("transactions", []))
+        provider_attempted = bool(transactions)
+        retry_safe = not provider_attempted or all(
+            transaction.get("reconciliation_required") is False
+            and bool(_as_dict_list(transaction.get("operation_results", [])))
+            and all(
+                result.get("mutated") is False
+                and result.get("status") in {"SUCCEEDED", "FAILED", "CONFLICT", "NOT_ATTEMPTED"}
+                for result in _as_dict_list(transaction.get("operation_results", []))
+            )
+            for transaction in transactions
+        )
+        operation_kinds = {
+            str(operation["kind"]) for operation in _as_dict_list(change_set.get("operations", []))
+        }
+        interrupted_idempotent_create = (
+            change_set["state"] == ChangeSetState.FAILED.value
+            and _as_dict(change_set.get("failure_info", {})).get("code")
+            == "CHANGE_SET_EXECUTION_ERROR"
+            and bool(transactions)
+            and operation_kinds
+            <= {
+                ChangeOperationKind.ENSURE_RULE_CATEGORY.value,
+                ChangeOperationKind.CREATE_RULE.value,
+            }
+            and all(
+                transaction.get("state") == ProviderTransactionState.EXECUTING.value
+                and not _as_dict_list(transaction.get("operation_results", []))
+                for transaction in transactions
+            )
+        )
+        if interrupted_idempotent_create:
+            retry_safe = True
+        # A category followed by a rejected rule is recoverable. Re-preflight resolves
+        # the now-existing authoritative category, so the successful category operation
+        # becomes a verified no-op and only the non-mutating rule create is attempted.
+        if change_set["state"] == ChangeSetState.PARTIALLY_SUCCEEDED.value:
+            operation_kinds = {
+                str(operation["id"]): str(operation["kind"])
+                for operation in _as_dict_list(change_set.get("operations", []))
+            }
+            results = [
+                result
+                for transaction in transactions
+                for result in _as_dict_list(transaction.get("operation_results", []))
+            ]
+            retryable_state = bool(results) and all(
+                (
+                    result.get("status") == "SUCCEEDED"
+                    and result.get("mutated") is True
+                    and operation_kinds.get(str(result.get("operation_id")))
+                    == ChangeOperationKind.ENSURE_RULE_CATEGORY.value
+                )
+                or (
+                    result.get("status") in {"FAILED", "CONFLICT", "NOT_ATTEMPTED"}
+                    and result.get("mutated") is False
+                )
+                for result in results
+            )
+            retry_safe = retryable_state
+        if not retryable_state or not retry_safe:
+            self._audit_for(
+                change_set,
+                principal,
+                "change_set_retry_denied",
+                "DENY",
+                {
+                    "state": change_set["state"],
+                    "provider_attempted": provider_attempted,
+                    "retry_safe": retry_safe,
+                },
+            )
+            raise InvalidChangeSetStateError(
+                details={
+                    "code": "CHANGE_SET_RETRY_UNSAFE",
+                    "provider_attempted": provider_attempted,
+                    "retry_safe": retry_safe,
+                }
+            )
+
+        self._repository.set_execution_state(
+            principal,
+            active_group_id,
+            change_set_id,
+            ChangeSetState.DRAFT.value,
+            {},
+            {},
+        )
+        self._audit_for(change_set, principal, "change_set_retry_requested", "ALLOW")
+        validated = self.preflight(principal, active_group_id, change_set_id)
+        if validated["state"] != ChangeSetState.READY.value:
+            failed = self._repository.set_execution_state(
+                principal,
+                active_group_id,
+                change_set_id,
+                ChangeSetState.FAILED.value,
+                {},
+                {
+                    "code": "RETRY_PREFLIGHT_FAILED",
+                    "validation_results": validated["validation_results"],
+                },
+            )
+            self._audit_for(change_set, principal, "change_set_retry_failed", "DENY")
+            return failed
+        return self.queue_execution(
+            principal,
+            active_group_id,
+            change_set_id,
+            dispatch,
+        )
+
+    async def execute(  # noqa: PLR0912, PLR0915 -- explicit transaction outcome state machine
+        self,
+        principal: Principal,
+        active_group_id: UUID,
+        change_set_id: UUID,
+        *,
+        queued: bool = False,
+    ) -> dict[str, object]:
+        if queued and not self._repository.claim_queued_execution(
+            principal, active_group_id, change_set_id
+        ):
+            raise InvalidChangeSetStateError(details={"code": "CHANGE_SET_ALREADY_CLAIMED"})
+        change_set = self._load(principal, active_group_id, change_set_id)
+        if (
+            change_set["state"]
+            != (ChangeSetState.EXECUTING.value if queued else ChangeSetState.READY.value)
             or change_set["validated_revision"] != change_set["revision"]
         ):
             raise InvalidChangeSetStateError(
@@ -297,7 +487,7 @@ class ChangeSetService:
             )
             raise ChangeSetConflictError(details={"conflicts": conflicts})
 
-        # Grants and every element are re-evaluated immediately before the first mock mutation.
+        # Grants and every element are re-evaluated immediately before the first mutation.
         operations = _as_dict_list(change_set["operations"])
         authorization_results = [
             self._evaluate_operation(principal, active_group_id, item) for item in operations
@@ -310,7 +500,7 @@ class ChangeSetService:
                 principal,
                 active_group_id,
                 change_set_id,
-                ChangeSetState.VALIDATION_FAILED.value,
+                ChangeSetState.FAILED.value,
                 {},
                 {"code": "EXECUTION_REAUTHORIZATION_FAILED", "operations": denied},
             )
@@ -331,7 +521,17 @@ class ChangeSetService:
             target = self._repository.manager_execution_target(
                 manager_id, principal.organization_id
             )
-            if target is None or target.get("is_mock") is not True:
+            real_write_blocked = (
+                target is not None
+                and target.get("is_mock") is not True
+                and (
+                    target.get("write_enabled") is not True
+                    or target.get("read_only") is not False
+                    or target.get("lifecycle") != "ACTIVE"
+                    or target.get("connection_status") != "CONNECTED"
+                )
+            )
+            if target is None or real_write_blocked:
                 self._audit_for(
                     change_set,
                     principal,
@@ -342,19 +542,52 @@ class ChangeSetService:
                 raise ProductionWriteDisabledError
             targets[manager_id] = target
 
-        self._repository.set_execution_state(
-            principal,
-            active_group_id,
-            change_set_id,
-            ChangeSetState.EXECUTING.value,
-            {},
-            {},
-        )
+        if not queued:
+            self._repository.set_execution_state(
+                principal,
+                active_group_id,
+                change_set_id,
+                ChangeSetState.EXECUTING.value,
+                {},
+                {},
+            )
         transactions: list[dict[str, object]] = []
         for manager_id, operations in grouped.items():
             provider_operations = self._repository.prepare_provider_operations(
                 operations, principal.organization_id
             )
+            if targets[manager_id].get("is_mock") is not True:
+                pending = self._repository.upsert_provider_transaction(
+                    change_set,
+                    manager_id,
+                    ProviderTransactionState.EXECUTING.value,
+                    [],
+                    {},
+                    False,
+                    real_transaction_operation_id(change_set_id, manager_id),
+                )
+                self._audit_for(
+                    change_set,
+                    principal,
+                    "provider_transaction_created",
+                    ProviderTransactionState.EXECUTING.value,
+                    {
+                        "manager_id": str(manager_id),
+                        "transaction_id": str(pending["id"]),
+                    },
+                )
+                self._repository.commit_provider_transaction_intent()
+                current_target = self._repository.manager_execution_target(
+                    manager_id, principal.organization_id
+                )
+                if current_target is None or (
+                    current_target.get("write_enabled") is not True
+                    or current_target.get("read_only") is not False
+                    or current_target.get("lifecycle") != "ACTIVE"
+                    or current_target.get("connection_status") != "CONNECTED"
+                ):
+                    raise ProductionWriteDisabledError
+                targets[manager_id] = current_target
             outcome = await self._executor.execute(
                 targets[manager_id], change_set_id, manager_id, provider_operations
             )
@@ -365,6 +598,14 @@ class ChangeSetService:
                 operations,
                 outcome.operation_results,
             )
+            if targets[manager_id].get("is_mock") is not True:
+                self._repository.record_successful_write_evidence(
+                    change_set,
+                    principal,
+                    manager_id,
+                    operations,
+                    outcome.operation_results,
+                )
             transaction = self._repository.upsert_provider_transaction(
                 change_set,
                 manager_id,
@@ -387,6 +628,28 @@ class ChangeSetService:
                     "actor_user_id": str(principal.user_id),
                 },
             )
+            operation_kinds = {str(item["id"]): str(item["kind"]) for item in operations}
+            for operation_result in outcome.operation_results:
+                operation_id = str(operation_result.get("operation_id", ""))
+                kind = operation_kinds.get(operation_id, "UNKNOWN")
+                lifecycle_event = {
+                    ChangeOperationKind.ENSURE_RULE_CATEGORY.value: "category_creation",
+                    ChangeOperationKind.MOVE_RULE.value: "rule_reorder",
+                    ChangeOperationKind.MODIFY_OBJECT.value: "owned_object_mutation",
+                    ChangeOperationKind.DELETE_OBJECT.value: "owned_object_mutation",
+                }.get(kind, "provider_operation_result")
+                self._audit_for(
+                    change_set,
+                    principal,
+                    lifecycle_event,
+                    str(operation_result.get("status", "UNKNOWN")),
+                    {
+                        "manager_id": str(manager_id),
+                        "transaction_id": str(transaction["id"]),
+                        "operation_id": operation_id,
+                        "operation_kind": kind,
+                    },
+                )
         transaction_states = {str(item["state"]) for item in transactions}
         if ProviderTransactionState.RECONCILIATION_REQUIRED.value in transaction_states:
             overall = ChangeSetState.RECONCILIATION_REQUIRED
@@ -525,7 +788,6 @@ class ChangeSetService:
         elif kind is ChangeOperationKind.ENSURE_RULE_CATEGORY:
             resolution = self._evaluate_category(context, kind, checks)
         else:
-            resolution = {}
             self._append_decision(
                 checks,
                 kind,
@@ -537,7 +799,7 @@ class ChangeSetService:
                     AuthorizationResource(AuthorizationResourceType.POLICY, policy_id),
                 ),
             )
-            self._evaluate_rule(context, kind, payload, checks)
+            resolution = self._evaluate_rule(context, kind, payload, checks)
         expected = self._repository.current_revision_snapshot(operation, principal.organization_id)
         valid = bool(checks) and all(bool(item["allowed"]) for item in checks)
         if resolution and resolution.get("kind") in {
@@ -553,13 +815,13 @@ class ChangeSetService:
             "expected_revisions": expected,
         }
 
-    def _evaluate_rule(
+    def _evaluate_rule(  # noqa: PLR0912 -- explicit per-element authorization decisions
         self,
         context: DelegatedPolicyContext,
         kind: ChangeOperationKind,
         payload: dict[str, object],
         checks: list[dict[str, object]],
-    ) -> None:
+    ) -> dict[str, object]:
         if kind in {
             ChangeOperationKind.MODIFY_RULE,
             ChangeOperationKind.DELETE_RULE,
@@ -583,42 +845,76 @@ class ChangeSetService:
                 ),
             )
         if kind is ChangeOperationKind.DELETE_RULE:
-            return
-        category_id = self._required_uuid(payload, "category_id")
-        self._append_decision(
-            checks,
-            kind,
-            "rule_category",
-            str(category_id),
-            self._authorization.authorize(
-                context,
-                Action.USE,
-                AuthorizationResource(AuthorizationResourceType.CATEGORY, category_id),
-            ),
+            return {}
+        resolution: dict[str, object] = {}
+        if kind is ChangeOperationKind.CREATE_RULE:
+            data = self._repository.category_ensure_context(
+                context.access_policy_id,
+                context.active_group_id,
+                context.principal.organization_id,
+            )
+            if data is None:
+                raise ResourceOutOfScopeError
+            provider = ProviderKind(str(data["provider"]))
+            group_slug = str(data["group_slug"])
+            requested_name = str(payload.get("name", "")).strip()
+            prefix = f"{group_slug}__"
+            if requested_name.startswith(prefix):
+                requested_name = requested_name[len(prefix) :]
+            provider_name = self._naming.provider_name(provider, group_slug, requested_name)
+            category_provider_name = self._naming.category_name(provider, group_slug)
+            allowed = provider_name is not None and category_provider_name is not None
+            checks.append(
+                {
+                    "operation": kind.value,
+                    "element_type": "rule_name",
+                    "element": provider_name if allowed else "NOT_DISCLOSED",
+                    "permission": "provider_naming",
+                    "allowed": allowed,
+                    "reason": "ALLOWED" if allowed else "PROVIDER_NAME_RESTRICTION",
+                }
+            )
+            if allowed:
+                resolution = {
+                    "provider_name": provider_name,
+                    "category_provider_name": category_provider_name,
+                }
+                mapping = data.get("mapping")
+                if isinstance(mapping, dict) and mapping.get("category_id"):
+                    typed_mapping = cast("dict[str, object]", mapping)
+                    resolution["category_id"] = str(typed_mapping["category_id"])
+        category_id = (
+            self._required_uuid(payload, "category_id") if payload.get("category_id") else None
         )
-        if payload.get("position") is not None and kind is ChangeOperationKind.CREATE_RULE:
+        if category_id is not None:
             self._append_decision(
                 checks,
                 kind,
-                "rule_position",
-                str(payload["position"]),
+                "rule_category",
+                str(category_id),
                 self._authorization.authorize(
                     context,
-                    Action.REORDER,
-                    AuthorizationResource(
-                        AuthorizationResourceType.POLICY, context.access_policy_id
-                    ),
+                    Action.USE,
+                    AuthorizationResource(AuthorizationResourceType.CATEGORY, category_id),
                 ),
             )
+        # Choosing the initial position of a new rule is part of CREATE.  REORDER
+        # authorization is reserved for moving a rule that already exists.  The
+        # ordering-boundary check below still confines creation to this group's
+        # authoritative category and validates the requested anchor/position.
         if kind is ChangeOperationKind.MOVE_RULE or (
             kind is ChangeOperationKind.CREATE_RULE and payload.get("position") is not None
         ):
             position = payload.get("position")
-            bounds = self._repository.rule_ordering_bounds(
-                context.active_group_id,
-                context.access_policy_id,
-                category_id,
-                context.principal.organization_id,
+            bounds = (
+                self._repository.rule_ordering_bounds(
+                    context.active_group_id,
+                    context.access_policy_id,
+                    category_id,
+                    context.principal.organization_id,
+                )
+                if category_id is not None
+                else None
             )
             allowed = (
                 isinstance(position, int)
@@ -658,6 +954,8 @@ class ChangeSetService:
             ("source_object_ids", "SOURCE_NETWORK"),
             ("destination_object_ids", "DESTINATION_NETWORK"),
             ("port_object_ids", "PORT_SERVICE"),
+            ("source_port_object_ids", "PORT_SERVICE"),
+            ("destination_port_object_ids", "PORT_SERVICE"),
             ("application_object_ids", "APPLICATION"),
             ("url_object_ids", "URL"),
         ):
@@ -719,6 +1017,7 @@ class ChangeSetService:
                     "reason": "ALLOWED" if allowed else "UNSUPPORTED_RULE_ACTION",
                 }
             )
+        return resolution
 
     def _evaluate_object(
         self,
