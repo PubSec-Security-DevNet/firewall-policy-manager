@@ -59,6 +59,13 @@ class ProviderObjectNamingService:
             return f"{protocol}/{suffix}"
         if kind is FirewallObjectType.URL:
             return stripped.rstrip("/").casefold()
+        if kind in {
+            FirewallObjectType.NETWORK_GROUP,
+            FirewallObjectType.PORT_SERVICE_GROUP,
+            FirewallObjectType.URL_GROUP,
+        }:
+            # Groups are validated by their selected member objects, not a scalar value.
+            return stripped
         if kind in {FirewallObjectType.APPLICATION, FirewallObjectType.APPLICATION_FILTER}:
             return " ".join(stripped.casefold().split())
         msg = "object type does not support delegated creation"

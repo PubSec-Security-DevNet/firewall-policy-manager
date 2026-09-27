@@ -41,7 +41,7 @@ def test_development_auth_cannot_be_enabled_in_production() -> None:
 
 def test_production_requires_a_valid_external_secret_store_key() -> None:
     without_key = _production_values()
-    without_key.pop("APP_SECRET_KEY")
+    without_key["APP_SECRET_KEY"] = None
     with pytest.raises(ValidationError, match="APP_SECRET_KEY is required"):
         Settings.model_validate(without_key)
     with pytest.raises(ValidationError, match="base64-encoded 32-byte key"):
@@ -73,10 +73,10 @@ def test_provider_capability_document_separates_mock_and_real_evidence() -> None
         assert mock["rule_ordering"] is CapabilityStatus.SUPPORTED
         assert mock["application_object_create"] is CapabilityStatus.PARTIAL
         assert real["access_rule_read"] is CapabilityStatus.NOT_STARTED
-        assert real["access_rule_create"] is CapabilityStatus.PARTIAL
+        assert real["access_rule_create"] is CapabilityStatus.SUPPORTED
         assert real["pending_change_inspection"] is CapabilityStatus.PARTIAL
         assert real["application_object_create"] is CapabilityStatus.NOT_STARTED
-        assert CapabilityStatus.SUPPORTED not in real.values()
+        assert CapabilityStatus.SUPPORTED in real.values()
 
 
 @pytest.mark.parametrize("provider", list(ProviderKind))

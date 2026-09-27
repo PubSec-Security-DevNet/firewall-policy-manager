@@ -30,18 +30,24 @@ def normalize_ip_network(value: str) -> str:
 
 def network_is_contained(requested: str, authorized: str) -> bool:
     """Return true only when the complete requested host/network fits in the grant."""
-    authorized_network = ip_network(normalize_ip_network(authorized), strict=True)
-    normalized_requested = normalize_ip_value(requested)
-    if normalized_requested.count("-") == 1:
-        start_text, end_text = normalized_requested.split("-", 1)
-        endpoints: tuple[IpAddress, IpAddress] = (ip_address(start_text), ip_address(end_text))
-        return all(
-            endpoint.version == authorized_network.version and endpoint in authorized_network
-            for endpoint in endpoints
-        )
-    requested_network = ip_network(normalize_ip_network(normalized_requested), strict=True)
-    if isinstance(requested_network, IPv4Network) and isinstance(authorized_network, IPv4Network):
-        return requested_network.subnet_of(authorized_network)
-    if isinstance(requested_network, IPv6Network) and isinstance(authorized_network, IPv6Network):
-        return requested_network.subnet_of(authorized_network)
-    return False
+
+    def bounds(value: str) -> tuple[int, int, int]:
+        normalized = normalize_ip_value(value)
+        if normalized.count("-") == 1:
+            start_text, end_text = normalized.split("-", 1)
+            start = ip_address(start_text)
+            end = ip_address(end_text)
+            return start.version, int(start), int(end)
+        network = ip_network(normalized, strict=True)
+        return network.version, int(network.network_address), int(network.broadcast_address)
+
+    try:
+        requested_version, requested_start, requested_end = bounds(requested)
+        authorized_version, authorized_start, authorized_end = bounds(authorized)
+    except ValueError:
+        return False
+    return (
+        requested_version == authorized_version
+        and authorized_start <= requested_start
+        and requested_end <= authorized_end
+    )

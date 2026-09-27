@@ -424,8 +424,8 @@ function AccessGrantsPage({
       types.includes(objectTypes.get(String(grant.object_id)) ?? ''),
     );
   const networkObjectGrants = objectUseRows(['NETWORK', 'NETWORK_GROUP']);
-  const portObjectGrants = objectUseRows(['PORT_SERVICE', 'PORT_OBJECT_GROUP']);
-  const urlObjectGrants = objectUseRows(['URL']);
+  const portObjectGrants = objectUseRows(['PORT_SERVICE', 'PORT_SERVICE_GROUP']);
+  const urlObjectGrants = objectUseRows(['URL', 'URL_GROUP']);
   const applicationObjectGrants = objectUseRows(['APPLICATION', 'APPLICATION_FILTER']);
   const boundaryGrants = snapshot.zone_grants.length + snapshot.ip_range_grants.length;
   const creationAndMappings =
@@ -563,7 +563,7 @@ function AccessGrantsPage({
                     onAdd={() =>
                       setEditor({
                         kind: 'object-use-grants',
-                        objectTypes: ['PORT_SERVICE', 'PORT_OBJECT_GROUP'],
+                        objectTypes: ['PORT_SERVICE', 'PORT_SERVICE_GROUP'],
                       })
                     }
                     onRevoke={onRevoke}
@@ -1352,8 +1352,8 @@ function GrantForm({
         {kind === 'ip-range-grants' && (
           <TextInput
             label="Authorized network"
-            description="Enter a canonical IPv4 or IPv6 CIDR boundary."
-            placeholder="10.20.0.0/16"
+            description="Enter an IPv4 or IPv6 host, CIDR subnet, or ordered range."
+            placeholder="10.20.0.0/16, 2001:db8::/32, or 2001:db8::1-2001:db8::ff"
             value={value}
             onChange={(event) => setValue(event.currentTarget.value)}
             disabled={editing}
@@ -1770,6 +1770,9 @@ function initials(value: string) {
 }
 
 function errorMessage(error: unknown) {
+  if (error instanceof ApiError && error.code === 'NETWORK_OBJECT_OUTSIDE_ASSIGNED_IP_RANGES') {
+    return 'This network object is outside the Group’s assigned IP ranges and cannot be assigned.';
+  }
   return error instanceof Error ? error.message : 'The record could not be saved.';
 }
 

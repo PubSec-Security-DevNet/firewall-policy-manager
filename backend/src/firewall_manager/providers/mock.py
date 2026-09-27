@@ -2,6 +2,7 @@
 
 # ruff: noqa: PLR0912, PLR0913, PLR0917 -- provider commands keep explicit normalized fields.
 
+import json
 from dataclasses import replace
 from enum import StrEnum
 from typing import TypeVar, cast
@@ -17,10 +18,13 @@ from firewall_manager.domain.models import (
     DiscoveredCategory,
     DiscoveredDevice,
     DiscoveredDomain,
+    DiscoveredFilePolicy,
+    DiscoveredIntrusionPolicy,
     DiscoveredObject,
     DiscoveredObjectReference,
     DiscoveredPolicy,
     DiscoveredRule,
+    DiscoveredVariableSet,
     DiscoveredZone,
     DiscoveredZoneReference,
     FirewallObjectType,
@@ -89,6 +93,58 @@ class DeterministicMockProvider:
                 f"{prefix}-policy-fp-3",
                 domain_native_id=domain,
             )
+        ]
+        default_variable_set = f"{prefix}-variable-set-default"
+        self._variable_sets = [
+            DiscoveredVariableSet(
+                default_variable_set,
+                "Default Variable Set",
+                "1",
+                f"{prefix}-variable-set-fp-1",
+                domain_native_id=domain,
+                is_default=True,
+            ),
+            DiscoveredVariableSet(
+                f"{prefix}-variable-set-custom",
+                "Application Variable Set",
+                "1",
+                f"{prefix}-variable-set-fp-2",
+                domain_native_id=domain,
+            ),
+        ]
+        self._intrusion_policies = [
+            DiscoveredIntrusionPolicy(
+                f"{prefix}-intrusion-balanced",
+                "Balanced Protection",
+                "1",
+                f"{prefix}-intrusion-fp-1",
+                domain_native_id=domain,
+                default_variable_set_native_id=default_variable_set,
+            ),
+            DiscoveredIntrusionPolicy(
+                f"{prefix}-intrusion-strict",
+                "Strict Protection",
+                "1",
+                f"{prefix}-intrusion-fp-2",
+                domain_native_id=domain,
+                default_variable_set_native_id=default_variable_set,
+            ),
+        ]
+        self._file_policies = [
+            DiscoveredFilePolicy(
+                f"{prefix}-file-policy-default",
+                "Default File Policy",
+                "1",
+                f"{prefix}-file-policy-fp-1",
+                domain_native_id=domain,
+            ),
+            DiscoveredFilePolicy(
+                f"{prefix}-file-policy-strict",
+                "Strict File Protection",
+                "1",
+                f"{prefix}-file-policy-fp-2",
+                domain_native_id=domain,
+            ),
         ]
         finance_category = f"{prefix}-category-finance"
         engineering_category = f"{prefix}-category-engineering"
@@ -164,6 +220,8 @@ class DeterministicMockProvider:
                 policy_native_id=policy,
                 category_native_id=finance_category,
                 action="ALLOW",
+                intrusion_policy_native_id=f"{prefix}-intrusion-balanced",
+                variable_set_native_id=default_variable_set,
                 position=10,
                 object_references=(
                     DiscoveredObjectReference(private_object, RuleObjectElement.SOURCE_NETWORK),
@@ -275,6 +333,15 @@ class DeterministicMockProvider:
                 normalized_value="tcp/9443",
             ),
             DiscoveredObject(
+                f"{prefix}-object-service-group",
+                "Web services",
+                "1",
+                f"{prefix}-service-group-fp-1",
+                domain_native_id=domain,
+                object_type=FirewallObjectType.PORT_SERVICE_GROUP,
+                referenced_object_native_ids=(service_object,),
+            ),
+            DiscoveredObject(
                 f"{prefix}-object-url",
                 "Corporate portal URL",
                 "1",
@@ -291,6 +358,15 @@ class DeterministicMockProvider:
                 domain_native_id=domain,
                 object_type=FirewallObjectType.URL,
                 normalized_value="finance.example.test",
+            ),
+            DiscoveredObject(
+                f"{prefix}-object-url-group",
+                "Corporate web destinations",
+                "1",
+                f"{prefix}-url-group-fp-1",
+                domain_native_id=domain,
+                object_type=FirewallObjectType.URL_GROUP,
+                referenced_object_native_ids=(f"{prefix}-object-url",),
             ),
             DiscoveredObject(
                 application_object,
@@ -311,6 +387,28 @@ class DeterministicMockProvider:
                 object_type=FirewallObjectType.APPLICATION_FILTER,
                 normalized_value="category=business",
             ),
+            *[
+                DiscoveredObject(
+                    f"{prefix}-system-filter-{kind}",
+                    f"{label}: {value}",
+                    "1",
+                    f"{prefix}-system-filter-{kind}-{value.lower().replace(' ', '-')}",
+                    domain_native_id=domain,
+                    object_type=FirewallObjectType.APPLICATION_FILTER,
+                    normalized_value=json.dumps(
+                        {"criterion": kind, "id": value, "name": value},
+                        separators=(",", ":"),
+                    ),
+                    sharing_mode="shared_use",
+                )
+                for kind, label, value in (
+                    ("type", "Type", "WEBAPP"),
+                    ("risk", "Risk", "HIGH"),
+                    ("productivity", "Productivity", "VERY_HIGH"),
+                    ("category", "Category", "Social Networking"),
+                    ("tag", "Tag", "SSL Protocol"),
+                )
+            ],
         ]
         self._transactions: dict[str, ProviderExecutionResult] = {}
 
@@ -377,6 +475,7 @@ class DeterministicMockProvider:
             len(self._policies),
             len(self._objects),
             True,
+            ProviderEvidenceProfile.MOCK,
         )
 
     async def domains(self, page: PageRequest) -> ProviderPage[DiscoveredDomain]:
@@ -403,15 +502,53 @@ class DeterministicMockProvider:
             [x for x in self._categories if x.policy_native_id == policy_native_id], page
         )
 
+    async def intrusion_policies(
+        self, domain_native_id: str, page: PageRequest
+    ) -> ProviderPage[DiscoveredIntrusionPolicy]:
+        return self._page(
+            [x for x in self._intrusion_policies if x.domain_native_id == domain_native_id], page
+        )
+
+    async def variable_sets(
+        self, domain_native_id: str, page: PageRequest
+    ) -> ProviderPage[DiscoveredVariableSet]:
+        return self._page(
+            [x for x in self._variable_sets if x.domain_native_id == domain_native_id], page
+        )
+
+    async def file_policies(
+        self, domain_native_id: str, page: PageRequest
+    ) -> ProviderPage[DiscoveredFilePolicy]:
+        return self._page(
+            [x for x in self._file_policies if x.domain_native_id == domain_native_id], page
+        )
+
     async def rules(self, policy_native_id: str, page: PageRequest) -> ProviderPage[DiscoveredRule]:
         return self._page([x for x in self._rules if x.policy_native_id == policy_native_id], page)
 
     async def objects(
-        self, domain_native_id: str, page: PageRequest
+        self,
+        domain_native_id: str,
+        page: PageRequest,
+        *,
+        applications_only: bool = False,
+        include_applications: bool = True,
     ) -> ProviderPage[DiscoveredObject]:
-        return self._page(
-            [x for x in self._objects if x.domain_native_id == domain_native_id], page
-        )
+        objects = [x for x in self._objects if x.domain_native_id == domain_native_id]
+        if applications_only:
+            objects = [
+                x
+                for x in objects
+                if x.object_type
+                in {FirewallObjectType.APPLICATION, FirewallObjectType.APPLICATION_FILTER}
+            ]
+        elif not include_applications:
+            objects = [
+                x
+                for x in objects
+                if x.object_type is not FirewallObjectType.APPLICATION
+            ]
+        return self._page(objects, page)
 
     async def zones(self, domain_native_id: str, page: PageRequest) -> ProviderPage[DiscoveredZone]:
         return self._page([x for x in self._zones if x.domain_native_id == domain_native_id], page)
@@ -565,16 +702,22 @@ class DeterministicMockProvider:
             object_type = FirewallObjectType(str(payload["object_type"]))
             required = {
                 FirewallObjectType.NETWORK: "network_object_create",
+                FirewallObjectType.NETWORK_GROUP: "network_object_create",
                 FirewallObjectType.PORT_SERVICE: "port_service_object_create",
+                FirewallObjectType.PORT_SERVICE_GROUP: "port_service_object_create",
                 FirewallObjectType.URL: "url_object_create",
+                FirewallObjectType.URL_GROUP: "url_object_create",
                 FirewallObjectType.APPLICATION: "application_object_create",
                 FirewallObjectType.APPLICATION_FILTER: "application_object_create",
             }[object_type]
             if kind is not ChangeOperationKind.CREATE_OBJECT:
                 required = {
                     FirewallObjectType.NETWORK: "network_object_mutation",
+                    FirewallObjectType.NETWORK_GROUP: "network_object_mutation",
                     FirewallObjectType.PORT_SERVICE: "port_service_object_mutation",
+                    FirewallObjectType.PORT_SERVICE_GROUP: "port_service_object_mutation",
                     FirewallObjectType.URL: "url_object_mutation",
+                    FirewallObjectType.URL_GROUP: "url_object_mutation",
                     FirewallObjectType.APPLICATION: "application_object_mutation",
                     FirewallObjectType.APPLICATION_FILTER: "application_object_mutation",
                 }[object_type]
@@ -762,6 +905,7 @@ class DeterministicMockProvider:
         object_type = FirewallObjectType(str(payload["object_type"]))
         name = str(payload["provider_name"])
         normalized_value = str(payload["normalized_value"])
+        member_ids = tuple(str(item) for item in payload.get("member_object_native_ids", []))
         if any(item.name == name for item in self._objects):
             raise ValueError("PROVIDER_OBJECT_NAME_CONFLICT")
         self._objects.append(
@@ -773,6 +917,7 @@ class DeterministicMockProvider:
                 domain_native_id=policy.domain_native_id,
                 object_type=object_type,
                 normalized_value=normalized_value,
+                referenced_object_native_ids=member_ids,
             )
         )
         self._bump_policy(policy)

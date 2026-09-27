@@ -85,6 +85,36 @@ class FakeSyncRepository:
     ) -> UUID:
         return self._upsert("category", run_id, item)
 
+    def upsert_intrusion_policy(
+        self,
+        organization_id: UUID,
+        manager_id: UUID,
+        domain_id: UUID,
+        run_id: UUID,
+        item: Any,
+    ) -> UUID:
+        return self._upsert("intrusion_policy", run_id, item)
+
+    def upsert_variable_set(
+        self,
+        organization_id: UUID,
+        manager_id: UUID,
+        domain_id: UUID,
+        run_id: UUID,
+        item: Any,
+    ) -> UUID:
+        return self._upsert("variable_set", run_id, item)
+
+    def upsert_file_policy(
+        self,
+        organization_id: UUID,
+        manager_id: UUID,
+        domain_id: UUID,
+        run_id: UUID,
+        item: Any,
+    ) -> UUID:
+        return self._upsert("file_policy", run_id, item)
+
     def upsert_rule(  # noqa: PLR0913, PLR0917
         self,
         organization_id: UUID,
@@ -124,6 +154,9 @@ class FakeSyncRepository:
     ) -> None:
         pass
 
+    def refresh_rule_application_snapshot(self, organization_id: UUID, rule_id: UUID) -> None:
+        pass
+
     def replace_object_references(
         self,
         organization_id: UUID,
@@ -133,7 +166,13 @@ class FakeSyncRepository:
     ) -> None:
         pass
 
-    def complete_sync(self, run_id: UUID, manager_id: UUID, resources_seen: int) -> SyncResult:
+    def complete_sync(
+        self,
+        run_id: UUID,
+        manager_id: UUID,
+        resources_seen: int,
+        applications_only: bool = False,
+    ) -> SyncResult:
         for item in self.resources.values():
             if item["run_id"] != run_id:
                 item["state"] = ResourceState.MISSING
@@ -166,7 +205,7 @@ async def test_initial_discovery_is_observed_and_complete_for_both_providers(
         repo.manager_id, DeterministicMockProvider(kind)
     )
     assert result.status is SyncStatus.COMPLETED
-    assert result.resources_seen == 26
+    assert result.resources_seen == 38
     assert {item["state"] for item in repo.resources.values()} == {ResourceState.OBSERVED}
     assert all("owner" not in item for item in repo.resources.values())
     assert len([key for key in repo.resources if key[0] == "zone"]) == 4

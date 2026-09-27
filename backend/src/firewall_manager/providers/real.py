@@ -33,10 +33,13 @@ from firewall_manager.domain.models import (
     DiscoveredCategory,
     DiscoveredDevice,
     DiscoveredDomain,
+    DiscoveredFilePolicy,
+    DiscoveredIntrusionPolicy,
     DiscoveredObject,
     DiscoveredObjectReference,
     DiscoveredPolicy,
     DiscoveredRule,
+    DiscoveredVariableSet,
     DiscoveredZone,
     DiscoveredZoneReference,
     FirewallObjectType,
@@ -82,8 +85,36 @@ _OBJECT_ENDPOINTS: tuple[tuple[str, FirewallObjectType], ...] = (
     ("ranges", FirewallObjectType.NETWORK),
     ("networkgroups", FirewallObjectType.NETWORK_GROUP),
     ("protocolportobjects", FirewallObjectType.PORT_SERVICE),
+    ("portobjectgroups", FirewallObjectType.PORT_SERVICE_GROUP),
     ("urls", FirewallObjectType.URL),
+    ("urlgroups", FirewallObjectType.URL_GROUP),
+    ("applicationtypes", FirewallObjectType.APPLICATION_FILTER),
+    ("applicationrisks", FirewallObjectType.APPLICATION_FILTER),
+    ("applicationproductivities", FirewallObjectType.APPLICATION_FILTER),
+    ("applicationcategories", FirewallObjectType.APPLICATION_FILTER),
+    ("applicationtags", FirewallObjectType.APPLICATION_FILTER),
+    # Fetch filters before the large system application catalog.  A catalog
+    # sync can be slow or retry, but filters must be available to rule forms
+    # without waiting for thousands of application records to finish.
+    ("applicationfilters", FirewallObjectType.APPLICATION_FILTER),
+    ("applications", FirewallObjectType.APPLICATION),
 )
+_SYSTEM_APPLICATION_FILTER_ENDPOINTS = frozenset(
+    {
+        "applicationtypes",
+        "applicationrisks",
+        "applicationproductivities",
+        "applicationcategories",
+        "applicationtags",
+    }
+)
+_SYSTEM_APPLICATION_FILTER_CRITERIA = {
+    "applicationtypes": "type",
+    "applicationrisks": "risk",
+    "applicationproductivities": "productivity",
+    "applicationcategories": "category",
+    "applicationtags": "tag",
+}
 
 
 class _ProviderMutationConflictError(Exception):
@@ -183,6 +214,22 @@ def _native_id(payload: Mapping[str, Any]) -> str:
     return str(value)
 
 
+def _reference_native_id(value: object) -> str | None:
+    if isinstance(value, dict):
+        candidate = value.get("id") or value.get("uuid")
+        return str(candidate) if candidate is not None else None
+    return str(value) if value is not None else None
+
+
+def _first_reference_native_id(payload: Mapping[str, Any], *keys: str) -> str | None:
+    """Read a provider reference using the field names used by FMC/cdFMC versions."""
+    for key in keys:
+        native_id = _reference_native_id(payload.get(key))
+        if native_id is not None:
+            return native_id
+    return None
+
+
 def _name(payload: Mapping[str, Any], fallback: str) -> str:
     return str(payload.get("name") or payload.get("hostname") or fallback)
 
@@ -215,7 +262,8 @@ def _metadata(payload: Mapping[str, Any]) -> dict[str, str]:
 def _objects(container: object) -> list[Mapping[str, Any]]:
     if not isinstance(container, dict):
         return []
-    values = cast("dict[str, Any]", container).get("objects", [])
+    typed_container = cast("dict[str, Any]", container)
+    values = typed_container.get("objects", typed_container.get("applications", []))
     if not isinstance(values, list):
         return []
     return [cast("Mapping[str, Any]", item) for item in values if isinstance(item, dict)]
@@ -278,7 +326,7 @@ class CiscoReadOnlyProvider:
     def _build_client(self, ssl_context: ssl.SSLContext) -> httpx.AsyncClient:
         return httpx.AsyncClient(
             verify=ssl_context,
-            timeout=httpx.Timeout(connect=5.0, read=30.0, write=5.0, pool=5.0),
+            timeout=httpx.Timeout(connect=5.0, read=120.0, write=10.0, pool=10.0),
             follow_redirects=False,
             transport=self._transport,
         )
@@ -317,6 +365,7 @@ class CiscoReadOnlyProvider:
             policy_count,
             object_count,
             self._writable,
+            ProviderEvidenceProfile.REAL,
         )
 
     async def domains(self, page: PageRequest) -> ProviderPage[DiscoveredDomain]:
@@ -405,6 +454,77 @@ class CiscoReadOnlyProvider:
             next_cursor,
         )
 
+    async def intrusion_policies(
+        self, domain_native_id: str, page: PageRequest
+    ) -> ProviderPage[DiscoveredIntrusionPolicy]:
+        items, next_cursor = await self._page(
+            self._config_path(domain_native_id, "policy/intrusionpolicies"), page
+        )
+        return ProviderPage(
+            tuple(
+                DiscoveredIntrusionPolicy(
+                    native_id=_native_id(item),
+                    name=_name(item, _native_id(item)),
+                    native_version=_version(item),
+                    fingerprint=_fingerprint(item),
+                    native_metadata=_metadata(item),
+                    domain_native_id=domain_native_id,
+                    default_variable_set_native_id=_reference_native_id(
+                        item.get("defaultVariableSet") or item.get("variableSet")
+                    ),
+                )
+                for item in items
+            ),
+            next_cursor,
+        )
+
+    async def variable_sets(
+        self, domain_native_id: str, page: PageRequest
+    ) -> ProviderPage[DiscoveredVariableSet]:
+        items, next_cursor = await self._page(
+            self._config_path(domain_native_id, "object/variablesets"), page
+        )
+        return ProviderPage(
+            tuple(
+                DiscoveredVariableSet(
+                    native_id=_native_id(item),
+                    name=_name(item, _native_id(item)),
+                    native_version=_version(item),
+                    fingerprint=_fingerprint(item),
+                    native_metadata=_metadata(item),
+                    domain_native_id=domain_native_id,
+                    is_default=bool(
+                        item.get("isDefault")
+                        or item.get("defaultVariableSet")
+                        or str(item.get("name", "")).lower() in {"default", "default set"}
+                    ),
+                )
+                for item in items
+            ),
+            next_cursor,
+        )
+
+    async def file_policies(
+        self, domain_native_id: str, page: PageRequest
+    ) -> ProviderPage[DiscoveredFilePolicy]:
+        items, next_cursor = await self._page(
+            self._config_path(domain_native_id, "policy/filepolicies"), page
+        )
+        return ProviderPage(
+            tuple(
+                DiscoveredFilePolicy(
+                    native_id=_native_id(item),
+                    name=_name(item, _native_id(item)),
+                    native_version=_version(item),
+                    fingerprint=_fingerprint(item),
+                    native_metadata=_metadata(item),
+                    domain_native_id=domain_native_id,
+                )
+                for item in items
+            ),
+            next_cursor,
+        )
+
     async def rules(self, policy_native_id: str, page: PageRequest) -> ProviderPage[DiscoveredRule]:
         domain_id = self._policy_domain(policy_native_id)
         items, next_cursor = await self._page(
@@ -416,14 +536,43 @@ class CiscoReadOnlyProvider:
         )
 
     async def objects(
-        self, domain_native_id: str, page: PageRequest
+        self,
+        domain_native_id: str,
+        page: PageRequest,
+        *,
+        applications_only: bool = False,
+        include_applications: bool = True,
     ) -> ProviderPage[DiscoveredObject]:
         endpoint_index, offset = self._object_cursor(page.cursor)
-        endpoint, object_type = _OBJECT_ENDPOINTS[endpoint_index]
+        while endpoint_index < len(_OBJECT_ENDPOINTS):
+            endpoint, object_type = _OBJECT_ENDPOINTS[endpoint_index]
+            is_application = object_type is FirewallObjectType.APPLICATION
+            is_application_catalog = object_type in {
+                FirewallObjectType.APPLICATION,
+                FirewallObjectType.APPLICATION_FILTER,
+            }
+            if (applications_only and not is_application_catalog) or (
+                not applications_only and not include_applications and is_application
+            ):
+                endpoint_index += 1
+                offset = 0
+                continue
+            break
+        if endpoint_index >= len(_OBJECT_ENDPOINTS):
+            return ProviderPage((), None)
+        page_params: dict[str, str | int | bool] = {}
+        if endpoint == "applicationfilters":
+            # FMC/SCC do not include the system-maintained filter catalog in
+            # the default application-filter listing.  Request it explicitly
+            # so rule forms can offer the provider's built-in filters.
+            page_params["filter"] = "issystemdefined:true"
         items, native_next = await self._page(
             self._config_path(domain_native_id, f"object/{endpoint}"),
             PageRequest(limit=page.limit, cursor=str(offset)),
+            extra_params=page_params,
         )
+        if endpoint in _SYSTEM_APPLICATION_FILTER_ENDPOINTS:
+            items = [self._system_filter_item(item, endpoint) for item in items]
         if native_next is not None:
             next_cursor = f"{endpoint_index}:{native_next}"
         elif endpoint_index + 1 < len(_OBJECT_ENDPOINTS):
@@ -901,6 +1050,10 @@ class CiscoReadOnlyProvider:
                     raise _ProviderMutationConflictError("OBJECT_STATE_UNKNOWN")
                 candidate = cast("Mapping[str, Any]", item)
                 if _name(candidate, "") == str(body["name"]):
+                    if self._object_payload_matches(candidate, body):
+                        # A prior attempt may have committed at the provider and failed
+                        # before local reconciliation. Re-adopt the matching resource.
+                        return self._provider_resource(candidate), True
                     raise _ProviderMutationConflictError("PROVIDER_OBJECT_NAME_CONFLICT")
             response = await self._mutate_json("POST", base, body)
             return self._provider_resource(response), True
@@ -1082,13 +1235,23 @@ class CiscoReadOnlyProvider:
         if kind is ChangeOperationKind.CREATE_OBJECT:
             return {
                 FirewallObjectType.NETWORK: ProviderCapability.NETWORK_OBJECT_CREATE,
+                FirewallObjectType.NETWORK_GROUP: ProviderCapability.NETWORK_OBJECT_CREATE,
                 FirewallObjectType.PORT_SERVICE: ProviderCapability.PORT_SERVICE_OBJECT_CREATE,
+                FirewallObjectType.PORT_SERVICE_GROUP: (
+                    ProviderCapability.PORT_SERVICE_OBJECT_CREATE
+                ),
                 FirewallObjectType.URL: ProviderCapability.URL_OBJECT_CREATE,
+                FirewallObjectType.URL_GROUP: ProviderCapability.URL_OBJECT_CREATE,
             }.get(object_type, ProviderCapability.APPLICATION_OBJECT_CREATE)
         return {
             FirewallObjectType.NETWORK: ProviderCapability.NETWORK_OBJECT_MUTATION,
+            FirewallObjectType.NETWORK_GROUP: ProviderCapability.NETWORK_OBJECT_MUTATION,
             FirewallObjectType.PORT_SERVICE: ProviderCapability.PORT_SERVICE_OBJECT_MUTATION,
+            FirewallObjectType.PORT_SERVICE_GROUP: (
+                ProviderCapability.PORT_SERVICE_OBJECT_MUTATION
+            ),
             FirewallObjectType.URL: ProviderCapability.URL_OBJECT_MUTATION,
+            FirewallObjectType.URL_GROUP: ProviderCapability.URL_OBJECT_MUTATION,
         }.get(object_type, ProviderCapability.APPLICATION_OBJECT_MUTATION)
 
     @staticmethod
@@ -1108,9 +1271,21 @@ class CiscoReadOnlyProvider:
             "action": str(payload.get("action", "ALLOW")),
             "enabled": bool(payload.get("enabled", True)),
         }
+        logging_mode = str(payload.get("logging", "NONE")).upper()
+        body["logBegin"] = logging_mode == "BEGIN"
+        body["logEnd"] = logging_mode == "END"
         category = payload.get("category_native_id")
         if category:
             body["category"] = {"id": str(category), "type": "Category"}
+        intrusion_policy = payload.get("intrusion_policy_native_id")
+        if intrusion_policy:
+            body["ipsPolicy"] = {"id": str(intrusion_policy), "type": "IntrusionPolicy"}
+        variable_set = payload.get("variable_set_native_id")
+        if variable_set:
+            body["variableSet"] = {"id": str(variable_set), "type": "VariableSet"}
+        file_policy = payload.get("file_policy_native_id")
+        if file_policy:
+            body["filePolicy"] = {"id": str(file_policy), "type": "FilePolicy"}
         for source, target in (
             ("source_zone_native_ids", "sourceZones"),
             ("destination_zone_native_ids", "destinationZones"),
@@ -1119,7 +1294,6 @@ class CiscoReadOnlyProvider:
             ("port_object_native_ids", "destinationPorts"),
             ("source_port_object_native_ids", "sourcePorts"),
             ("destination_port_object_native_ids", "destinationPorts"),
-            ("application_object_native_ids", "applications"),
             ("url_object_native_ids", "urls"),
         ):
             values = payload.get(source)
@@ -1129,13 +1303,69 @@ class CiscoReadOnlyProvider:
                         _provider_reference_payload(item) for item in cast("list[object]", values)
                     ]
                 }
+        application_values = payload.get("application_object_native_ids")
+        if isinstance(application_values, list) and (application_values or include_empty):
+            application_objects: list[dict[str, object]] = []
+            application_filters: list[dict[str, object]] = []
+            for value in cast("list[object]", application_values):
+                reference = CiscoReadOnlyProvider._application_reference_payload(value)
+                if reference.get("type") == "ApplicationFilter":
+                    application_filters.append(reference)
+                else:
+                    application_objects.append(reference)
+            body["applications"] = {
+                "objects": application_objects,
+                "applicationFilters": application_filters,
+            }
         return body
 
     @staticmethod
-    def _object_payload(payload: dict[str, object]) -> tuple[str, dict[str, object]]:
+    def _application_reference_payload(value: object) -> dict[str, object]:
+        """Build FMC's split application/application-filter rule container entries."""
+        reference = _provider_reference_payload(value)
+        if reference.get("type") != "ApplicationFilter":
+            return reference
+        raw_value = value.get("normalized_value") if isinstance(value, dict) else None
+        if isinstance(raw_value, str):
+            try:
+                criterion = json.loads(raw_value)
+            except ValueError:
+                criterion = None
+            if isinstance(criterion, dict) and criterion.get("criterion"):
+                key = {
+                    "type": "applicationTypes",
+                    "risk": "risks",
+                    "productivity": "productivities",
+                    "category": "categories",
+                    "tag": "tags",
+                }.get(str(criterion["criterion"]))
+                if key:
+                    return {
+                        "appConditions": [
+                            {
+                                key: [
+                                    {
+                                        "id": str(criterion.get("id", "")),
+                                        "name": str(criterion.get("name", "")),
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+        return reference
+
+    @staticmethod
+    def _object_payload(  # noqa: PLR0911 -- one provider payload per object type
+        payload: dict[str, object],
+    ) -> tuple[str, dict[str, object]]:
         object_type = FirewallObjectType(str(payload["object_type"]))
         value = str(payload.get("normalized_value", ""))
         name = str(payload.get("provider_name") or payload.get("expected_provider_name") or "")
+        member_references = payload.get("member_object_references")
+        if not isinstance(member_references, list):
+            member_references = [
+                {"id": str(item)} for item in payload.get("member_object_native_ids", [])
+            ]
         if object_type is FirewallObjectType.NETWORK:
             if value.count("-") == 1:
                 start, end = value.split("-", 1)
@@ -1146,6 +1376,12 @@ class CiscoReadOnlyProvider:
             if parsed.prefixlen == parsed.max_prefixlen:
                 return "hosts", {"type": "Host", "name": name, "value": str(parsed.network_address)}
             return "networks", {"type": "Network", "name": name, "value": str(parsed)}
+        if object_type is FirewallObjectType.NETWORK_GROUP:
+            return "networkgroups", {
+                "type": "NetworkGroup",
+                "name": name,
+                "objects": [_provider_reference_payload(item) for item in member_references],
+            }
         if object_type is FirewallObjectType.PORT_SERVICE:
             protocol, port = value.split("/", maxsplit=1)
             return "protocolportobjects", {
@@ -1154,8 +1390,20 @@ class CiscoReadOnlyProvider:
                 "protocol": protocol.upper(),
                 "port": port,
             }
+        if object_type is FirewallObjectType.PORT_SERVICE_GROUP:
+            return "portobjectgroups", {
+                "type": "PortObjectGroup",
+                "name": name,
+                "objects": [_provider_reference_payload(item) for item in member_references],
+            }
         if object_type is FirewallObjectType.URL:
             return "urls", {"type": "Url", "name": name, "url": value}
+        if object_type is FirewallObjectType.URL_GROUP:
+            return "urlgroups", {
+                "type": "UrlGroup",
+                "name": name,
+                "objects": [_provider_reference_payload(item) for item in member_references],
+            }
         raise _ProviderMutationConflictError("PROVIDER_CAPABILITY_UNAVAILABLE")
 
     @staticmethod
@@ -1169,6 +1417,31 @@ class CiscoReadOnlyProvider:
             ),
             "position": CiscoReadOnlyProvider._position(value) if value else 0,
         }
+
+    @staticmethod
+    def _object_payload_matches(candidate: Mapping[str, Any], desired: Mapping[str, Any]) -> bool:
+        """Compare a discovered provider object with a retry's intended payload."""
+        if str(candidate.get("type", "")) != str(desired.get("type", "")):
+            return False
+        object_type = str(desired.get("type", ""))
+        if object_type in {"NetworkGroup", "PortObjectGroup", "UrlGroup"}:
+
+            def ids(value: object) -> set[str]:
+                if not isinstance(value, list):
+                    return set()
+                return {
+                    str(item.get("id") or item.get("uuid"))
+                    for item in value
+                    if isinstance(item, dict) and (item.get("id") or item.get("uuid"))
+                }
+
+            return ids(candidate.get("objects", candidate.get("members", []))) == ids(
+                desired.get("objects", desired.get("members", []))
+            )
+        for key in ("value", "url", "protocol", "port"):
+            if key in desired and str(candidate.get(key, "")) != str(desired.get(key, "")):
+                return False
+        return True
 
     @staticmethod
     def _operation_result(  # noqa: PLR0913 -- normalized provider-result constructor
@@ -1334,7 +1607,10 @@ class CiscoReadOnlyProvider:
         return parsed.fingerprint(hashes.SHA256()) in self._exact_pin_fingerprints
 
     async def _page(
-        self, path: str, page: PageRequest
+        self,
+        path: str,
+        page: PageRequest,
+        extra_params: dict[str, str | int | bool] | None = None,
     ) -> tuple[list[Mapping[str, Any]], str | None]:
         try:
             offset = int(page.cursor or "0")
@@ -1343,9 +1619,14 @@ class CiscoReadOnlyProvider:
         if offset < 0 or offset > 100_000:
             raise ProviderContractError
         await self._ensure_identity()
-        payload = await self._get_with_params(
-            path, {"offset": offset, "limit": page.limit, "expanded": True}
-        )
+        params: dict[str, str | int | bool] = {
+            "offset": offset,
+            "limit": page.limit,
+            "expanded": True,
+        }
+        if extra_params:
+            params.update(extra_params)
+        payload = await self._get_with_params(path, params)
         if not isinstance(payload, dict):
             raise ProviderContractError
         items = payload.get("items", [])
@@ -1492,7 +1773,7 @@ class CiscoReadOnlyProvider:
             raise ProviderContractError
         return endpoint, offset
 
-    def _rule(self, item: Mapping[str, Any], policy_id: str) -> DiscoveredRule:
+    def _rule(self, item: Mapping[str, Any], policy_id: str) -> DiscoveredRule:  # noqa: PLR0912 -- provider payload compatibility branches
         object_references: list[DiscoveredObjectReference] = []
         for field, element in (
             ("sourceNetworks", RuleObjectElement.SOURCE_NETWORK),
@@ -1507,6 +1788,16 @@ class CiscoReadOnlyProvider:
                 for reference in _objects(item.get(field))
                 if reference.get("id") or reference.get("uuid")
             )
+        application_container = item.get("applications")
+        if isinstance(application_container, dict):
+            filter_references = application_container.get("applicationFilters", [])
+            if isinstance(filter_references, list):
+                object_references.extend(
+                    DiscoveredObjectReference(_native_id(reference), RuleObjectElement.APPLICATION)
+                    for reference in filter_references
+                    if isinstance(reference, Mapping)
+                    and (reference.get("id") or reference.get("uuid"))
+                )
         zone_references: list[DiscoveredZoneReference] = []
         for field, element in (
             ("sourceZones", ZoneElement.SOURCE),
@@ -1528,6 +1819,27 @@ class CiscoReadOnlyProvider:
             and (typed_category.get("id") or typed_category.get("uuid"))
             else None
         )
+        category_name: str | None = None
+        if isinstance(typed_category, Mapping):
+            raw_category_name = typed_category.get("name")
+            if raw_category_name is not None:
+                category_name = str(raw_category_name)
+        elif isinstance(category, str):
+            category_name = category
+        if category_name is None:
+            for key in ("categoryName", "category_name"):
+                raw_category_name = item.get(key)
+                if raw_category_name is not None:
+                    category_name = str(raw_category_name)
+                    break
+        if category_name is None and isinstance(metadata, dict):
+            metadata_category = cast("dict[str, Any]", metadata).get("category")
+            if isinstance(metadata_category, dict):
+                raw_category_name = cast("dict[str, Any]", metadata_category).get("name")
+                if raw_category_name is not None:
+                    category_name = str(raw_category_name)
+            elif isinstance(metadata_category, str):
+                category_name = metadata_category
         native_id = _native_id(item)
         return DiscoveredRule(
             native_id=native_id,
@@ -1537,7 +1849,19 @@ class CiscoReadOnlyProvider:
             native_metadata=_metadata(item),
             policy_native_id=policy_id,
             category_native_id=category_id,
+            category_name=category_name,
             action=str(item.get("action", "UNKNOWN")),
+            enabled=bool(item.get("enabled", True)),
+            log_begin=bool(item.get("logBegin", False)),
+            log_end=bool(item.get("logEnd", False)),
+            # FMC calls the IPS attachment ``ipsPolicy``.  Keep the older
+            # ``intrusionPolicy`` spelling as a compatibility fallback for
+            # older FMC/cdFMC responses and the mock adapter.
+            intrusion_policy_native_id=_first_reference_native_id(
+                item, "ipsPolicy", "intrusionPolicy", "ips_policy", "intrusion_policy"
+            ),
+            variable_set_native_id=_first_reference_native_id(item, "variableSet", "variable_set"),
+            file_policy_native_id=_first_reference_native_id(item, "filePolicy", "file_policy"),
             position=self._position(item),
             object_references=tuple(object_references),
             zone_references=tuple(zone_references),
@@ -1562,11 +1886,18 @@ class CiscoReadOnlyProvider:
         return isinstance(category, str) and category == category_name
 
     @classmethod
-    def _rule_create_matches(cls, item: Mapping[str, Any], payload: dict[str, object]) -> bool:
+    def _rule_create_matches(  # noqa: PLR0911 -- exact provider duplicate matching
+        cls, item: Mapping[str, Any], payload: dict[str, object]
+    ) -> bool:
         """Recognize an exact prior create after a duplicate worker delivery."""
         if str(item.get("action", "")).upper() != str(payload.get("action", "")).upper():
             return False
         if bool(item.get("enabled", True)) != bool(payload.get("enabled", True)):
+            return False
+        logging_mode = str(payload.get("logging", "NONE")).upper()
+        if bool(item.get("logBegin", False)) != (logging_mode == "BEGIN"):
+            return False
+        if bool(item.get("logEnd", False)) != (logging_mode == "END"):
             return False
         if not cls._rule_category_matches(
             item,
@@ -1615,13 +1946,13 @@ class CiscoReadOnlyProvider:
     ) -> DiscoveredObject:
         native_id = _native_id(item)
         referenced_ids: list[str] = []
-        for key in ("objects", "members"):
+        for key in ("objects", "members", "applications"):
             values = item.get(key)
             if isinstance(values, list):
                 referenced_ids.extend(
-                    _native_id(cast("Mapping[str, Any]", value))
+                    reference_id
                     for value in values
-                    if isinstance(value, dict) and (value.get("id") or value.get("uuid"))
+                    if (reference_id := _reference_native_id(value)) is not None
                 )
         value = item.get("value")
         if object_type is FirewallObjectType.PORT_SERVICE:
@@ -1646,6 +1977,25 @@ class CiscoReadOnlyProvider:
             sharing_mode="provider",
             referenced_object_native_ids=tuple(referenced_ids),
         )
+
+    @staticmethod
+    def _system_filter_item(item: Mapping[str, Any], endpoint: str) -> Mapping[str, Any]:
+        """Normalize a Cisco system criterion as a read-only selectable filter."""
+        native_id = _native_id(item)
+        criterion = _SYSTEM_APPLICATION_FILTER_CRITERIA[endpoint]
+        return {
+            **item,
+            "id": f"system-filter:{criterion}:{native_id}",
+            "name": f"{criterion.title()}: {_name(item, native_id)}",
+            "value": json.dumps(
+                {
+                    "criterion": criterion,
+                    "id": native_id,
+                    "name": _name(item, native_id),
+                },
+                separators=(",", ":"),
+            ),
+        }
 
     def compatibility_scopes(self, domains: tuple[DiscoveredDomain, ...]) -> list[dict[str, str]]:
         scopes = [
@@ -1672,7 +2022,11 @@ def _provider_reference_payload(value: object) -> dict[str, str]:
     if not isinstance(value, dict):
         return {"id": str(value)}
     item = cast("dict[str, object]", value)
-    return {key: str(item[key]) for key in ("id", "name", "type") if key in item}
+    return {
+        key: str(item[key])
+        for key in ("id", "name", "type", "object_type", "normalized_value")
+        if key in item
+    }
 
 
 def _provider_reference_has_id(value: object) -> bool:

@@ -69,6 +69,7 @@ class ProviderSummary(BaseModel):
     display_name: str
     provider_version: str
     policy_count: int
+    rule_count: int = 0
     object_count: int
     writable: bool
 
@@ -125,6 +126,7 @@ class PageResponse[ItemT](BaseModel):
 
 class ProviderStatusResponse(BaseModel):
     manager_id: UUID
+    connection_id: UUID | None = None
     provider: Literal["fmc", "scc"]
     display_name: str
     provider_version: str | None
@@ -136,6 +138,36 @@ class ProviderStatusResponse(BaseModel):
     resources_seen: int
     last_sync_at: datetime | None
     error_code: str | None
+
+
+class SynchronizationDiscrepancyResponse(BaseModel):
+    id: UUID
+    manager_id: UUID
+    connection_id: UUID | None = None
+    provider: Literal["fmc", "scc"]
+    name: str
+    policy_id: UUID | None = None
+    provider_only: bool = False
+    resource_type: str
+    resource_id: UUID
+    state: str
+    previous_fingerprint: str | None
+    observed_fingerprint: str | None
+    previous_snapshot: dict[str, object]
+    observed_snapshot: dict[str, object]
+    details: dict[str, object]
+    created_at: datetime
+
+
+class ReconciliationRestoreRequest(BaseModel):
+    active_group_id: UUID
+
+
+class ReconciliationActionResponse(BaseModel):
+    action: str
+    drift_id: UUID
+    state: str
+    change_set_id: UUID | None = None
 
 
 class DelegatedPolicySummary(BaseModel):
@@ -150,10 +182,15 @@ class DelegatedRuleResponse(BaseModel):
     id: UUID
     name: str
     action: str
+    enabled: bool = True
+    logging: Literal["NONE", "BEGIN", "END"] = "NONE"
     position: int
     management_state: str
     revision: int
     category_id: UUID | None = None
+    intrusion_policy_id: UUID | None = None
+    variable_set_id: UUID | None = None
+    file_policy_id: UUID | None = None
     source_zones: list[str] = Field(default_factory=list)
     destination_zones: list[str] = Field(default_factory=list)
     source_networks: list[str] = Field(default_factory=list)
@@ -168,10 +205,12 @@ class DelegatedObjectResponse(BaseModel):
     id: UUID
     name: str
     object_type: str
+    management_state: str = "OBSERVED"
     owner_type: Literal["GROUP", "PROVIDER"] = "PROVIDER"
     owner_group_id: UUID | None = None
     owner_policy_id: UUID | None = None
     created_by_user_id: UUID | None = None
+    member_object_ids: list[UUID] = Field(default_factory=list)
 
 
 class DelegatedZoneResponse(BaseModel):
@@ -190,9 +229,27 @@ class DelegatedCategoryResponse(BaseModel):
     name: str
 
 
+class DelegatedIntrusionPolicyResponse(BaseModel):
+    id: UUID
+    name: str
+    default_variable_set_id: UUID | None = None
+
+
+class DelegatedVariableSetResponse(BaseModel):
+    id: UUID
+    name: str
+    is_default: bool = False
+
+
+class DelegatedFilePolicyResponse(BaseModel):
+    id: UUID
+    name: str
+
+
 class DelegatedContextResponse(BaseModel):
     policy: DelegatedPolicySummary
     provider_writable: bool = False
+    firewall_deployment_status: Literal["SUPPORTED", "NOT_AVAILABLE"] = "NOT_AVAILABLE"
     provider_type: Literal["fmc", "scc"] = "fmc"
     provider_name: str = "Provider"
     provider_is_mock: bool = True
@@ -201,6 +258,9 @@ class DelegatedContextResponse(BaseModel):
     objects: list[DelegatedObjectResponse]
     zones: list[DelegatedZoneResponse]
     categories: list[DelegatedCategoryResponse]
+    intrusion_policies: list[DelegatedIntrusionPolicyResponse] = Field(default_factory=list)
+    variable_sets: list[DelegatedVariableSetResponse] = Field(default_factory=list)
+    file_policies: list[DelegatedFilePolicyResponse] = Field(default_factory=list)
     ip_ranges: list[str]
     object_create: list[ObjectCreateCapabilityResponse]
 
@@ -308,6 +368,11 @@ class ProviderConnectionResponse(BaseModel):
     last_error_correlation_id: str | None
     certificate_info: dict[str, str]
     sync_interval_minutes: int
+    applications_sync_interval_minutes: int
+    applications_sync_status: str | None
+    applications_last_sync: datetime | None
+    applications_last_successful_sync: datetime | None
+    applications_next_sync_at: datetime | None
     write_enabled: bool = False
     write_validation_mode: bool = False
     version_family_tested: bool = False
@@ -337,6 +402,7 @@ class ProviderConnectionCreateRequest(BaseModel):
     token: SecretStr | None = Field(default=None, repr=False)
     ca_certificate: SecretStr | None = Field(default=None, repr=False)
     sync_interval_minutes: int = Field(default=60, ge=5, le=10080)
+    applications_sync_interval_minutes: int = Field(default=1440, ge=60, le=43200)
 
     @model_validator(mode="after")
     def validate_provider_fields(self) -> "ProviderConnectionCreateRequest":
@@ -361,6 +427,7 @@ class ProviderConnectionUpdateRequest(BaseModel):
     region: Literal["us", "eu", "apj", "au", "in", "uae", "fedramp", "il5"] | None = None
     tls_mode: Literal["SYSTEM", "CUSTOM_CA"] | None = None
     sync_interval_minutes: int | None = Field(default=None, ge=5, le=10080)
+    applications_sync_interval_minutes: int | None = Field(default=None, ge=60, le=43200)
 
 
 class ProviderCredentialUpdateRequest(BaseModel):
@@ -415,7 +482,12 @@ class DraftRuleRequest(BaseModel):
     name: str | None = Field(default=None, max_length=200)
     rule_id: UUID | None = None
     action: Literal["ALLOW", "BLOCK", "TRUST", "MONITOR"] | None = None
+    enabled: bool = True
+    logging: Literal["NONE", "BEGIN", "END"] = "NONE"
     category_id: UUID | None = None
+    intrusion_policy_id: UUID | None = None
+    variable_set_id: UUID | None = None
+    file_policy_id: UUID | None = None
     anchor_rule_id: UUID | None = None
     position: int | None = Field(default=None, ge=0)
     placement: Literal["BEFORE", "AFTER"] | None = None
@@ -431,7 +503,6 @@ class DraftRuleRequest(BaseModel):
     manual_source_networks: list[str] = Field(default_factory=list)
     manual_destination_networks: list[str] = Field(default_factory=list)
     manual_ports: list[str] = Field(default_factory=list)
-    logging: dict[str, object] = Field(default_factory=dict)
     settings: dict[str, object] = Field(default_factory=dict)
     mock_behavior: Literal[
         "success",
@@ -442,19 +513,49 @@ class DraftRuleRequest(BaseModel):
         "partial_failure",
     ] = "success"
 
+    @model_validator(mode="after")
+    def validate_logging(self) -> "DraftRuleRequest":
+        if self.action == "BLOCK" and self.logging not in {"NONE", "BEGIN"}:
+            raise ValueError("block rules may only use no logging or log at the beginning")
+        if self.action == "MONITOR" and self.logging != "END":
+            raise ValueError("monitor rules must log at the end")
+        return self
+
 
 class DraftRuleOperationRequest(BaseModel):
     active_group_id: UUID
     kind: Literal["CREATE_RULE", "MODIFY_RULE", "DELETE_RULE", "MOVE_RULE"]
     rule: DraftRuleRequest
 
+    @model_validator(mode="after")
+    def validate_rule_scope(self) -> "DraftRuleOperationRequest":
+        if self.kind in {"CREATE_RULE", "MODIFY_RULE"}:
+            rule = self.rule
+            if not rule.source_zone_ids or not rule.destination_zone_ids:
+                raise ValueError("source and destination zones are required")
+            if not rule.source_object_ids and not rule.manual_source_networks:
+                raise ValueError("at least one source network is required")
+            if not rule.destination_object_ids and not rule.manual_destination_networks:
+                raise ValueError("at least one destination network is required")
+        return self
+
 
 class DraftObjectRequest(BaseModel):
     policy_id: UUID | None = None
     object_id: UUID | None = None
     name: str | None = Field(default=None, min_length=1, max_length=200)
-    object_type: Literal["NETWORK", "PORT_SERVICE", "URL", "APPLICATION", "APPLICATION_FILTER"]
-    value: str | None = Field(default=None, min_length=1, max_length=500)
+    object_type: Literal[
+        "NETWORK",
+        "NETWORK_GROUP",
+        "PORT_SERVICE",
+        "PORT_SERVICE_GROUP",
+        "URL",
+        "URL_GROUP",
+        "APPLICATION",
+        "APPLICATION_FILTER",
+    ]
+    value: str | None = Field(default=None, max_length=500)
+    member_object_ids: list[UUID] = Field(default_factory=list, max_length=100)
     mock_behavior: Literal[
         "success",
         "provider_failure",

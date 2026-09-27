@@ -15,10 +15,13 @@ from firewall_manager.domain.models import (
     DiscoveredCategory,
     DiscoveredDevice,
     DiscoveredDomain,
+    DiscoveredFilePolicy,
+    DiscoveredIntrusionPolicy,
     DiscoveredObject,
     DiscoveredObjectReference,
     DiscoveredPolicy,
     DiscoveredRule,
+    DiscoveredVariableSet,
     DiscoveredZone,
     DiscoveredZoneReference,
     PageRequest,
@@ -86,6 +89,9 @@ class HttpFirewallProvider:
                 policy_count=int(payload["policy_count"]),
                 object_count=int(payload["object_count"]),
                 writable=bool(payload["writable"]),
+                evidence_profile=ProviderEvidenceProfile(
+                    str(payload.get("evidence_profile", ProviderEvidenceProfile.REAL.value))
+                ),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ProviderUnavailableError from exc
@@ -96,8 +102,11 @@ class HttpFirewallProvider:
         page: PageRequest,
         factory: Callable[..., T],
         parent: str | None = None,
+        extra_params: dict[str, str | int] | None = None,
     ) -> ProviderPage[T]:
         params: dict[str, str | int] = {"limit": page.limit}
+        if extra_params:
+            params.update(extra_params)
         if page.cursor is not None:
             params["cursor"] = page.cursor
         if parent is not None:
@@ -130,6 +139,23 @@ class HttpFirewallProvider:
     ) -> ProviderPage[DiscoveredCategory]:
         return await self._page("categories", page, DiscoveredCategory, policy_native_id)
 
+    async def intrusion_policies(
+        self, domain_native_id: str, page: PageRequest
+    ) -> ProviderPage[DiscoveredIntrusionPolicy]:
+        return await self._page(
+            "intrusion_policies", page, DiscoveredIntrusionPolicy, domain_native_id
+        )
+
+    async def variable_sets(
+        self, domain_native_id: str, page: PageRequest
+    ) -> ProviderPage[DiscoveredVariableSet]:
+        return await self._page("variable_sets", page, DiscoveredVariableSet, domain_native_id)
+
+    async def file_policies(
+        self, domain_native_id: str, page: PageRequest
+    ) -> ProviderPage[DiscoveredFilePolicy]:
+        return await self._page("file_policies", page, DiscoveredFilePolicy, domain_native_id)
+
     async def rules(self, policy_native_id: str, page: PageRequest) -> ProviderPage[DiscoveredRule]:
         def rule_factory(**item: Any) -> DiscoveredRule:
             item["object_references"] = tuple(
@@ -145,9 +171,20 @@ class HttpFirewallProvider:
         return await self._page("rules", page, rule_factory, policy_native_id)
 
     async def objects(
-        self, domain_native_id: str, page: PageRequest
+        self,
+        domain_native_id: str,
+        page: PageRequest,
+        *,
+        applications_only: bool = False,
+        include_applications: bool = True,
     ) -> ProviderPage[DiscoveredObject]:
-        return await self._page("objects", page, DiscoveredObject, domain_native_id)
+        params: dict[str, str | int] = {
+            "applications_only": int(applications_only),
+            "include_applications": int(include_applications),
+        }
+        return await self._page(
+            "objects", page, DiscoveredObject, domain_native_id, extra_params=params
+        )
 
     async def zones(self, domain_native_id: str, page: PageRequest) -> ProviderPage[DiscoveredZone]:
         return await self._page("zones", page, DiscoveredZone, domain_native_id)

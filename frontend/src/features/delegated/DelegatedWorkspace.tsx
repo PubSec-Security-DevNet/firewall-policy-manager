@@ -2,8 +2,11 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
   IconArrowRight,
   IconArrowsMoveVertical,
+  IconAlertTriangle,
   IconCategory,
   IconEdit,
+  IconFileDescription,
+  IconFileTextShield,
   IconHierarchy3,
   IconPackages,
   IconPlus,
@@ -49,6 +52,7 @@ import {
   AppSimpleGrid as SimpleGrid,
   AppStack as Stack,
   AppStatusBadge,
+  AppTooltip,
   AppTable as Table,
   AppText as Text,
   AppTextInput as TextInput,
@@ -56,6 +60,7 @@ import {
   MetricCard,
 } from '../../ui';
 import { ChangeSetPanel } from '../changesets/ChangeSetPanel';
+import { AdaptivePagination, useAdaptivePageSize } from '../shared/AdaptivePagination';
 import { useDelegatedWorkspace } from './useDelegatedWorkspace';
 
 type WorkspaceView = 'policies' | 'rules' | 'objects' | 'changes';
@@ -81,9 +86,15 @@ export function DelegatedWorkspace({
   onDefaultChange?: (groupId: string, policyId: string) => void;
   onNavigate?: (view: WorkspaceView) => void;
 }) {
-  const workspace = useDelegatedWorkspace(groups, initialGroupId, initialPolicyId);
-  const [activity, setActivity] = useState<ChangeSet[]>([]);
   const view = initialView;
+  const workspace = useDelegatedWorkspace(
+    groups,
+    initialGroupId,
+    initialPolicyId,
+    view === 'rules',
+    view === 'rules',
+  );
+  const [activity, setActivity] = useState<ChangeSet[]>([]);
   const activeGroup = groups.find((group) => group.id === workspace.activeGroupId);
   const activePolicy =
     workspace.state.status === 'ready'
@@ -106,7 +117,12 @@ export function DelegatedWorkspace({
     workspace.activePolicyId,
   ]);
   useEffect(() => {
-    if (!workspace.activeGroupId || !workspace.activePolicyId || view === 'policies') {
+    if (
+      !workspace.activeGroupId ||
+      !workspace.activePolicyId ||
+      view === 'policies' ||
+      view === 'changes'
+    ) {
       return;
     }
     let current = true;
@@ -568,13 +584,15 @@ function RulesWorkspace({
     .filter(
       (changeSet) =>
         changeSet.access_policy_id === context.policy.id &&
-        (['QUEUED', 'EXECUTING'].includes(changeSet.state) ||
+        (['READY', 'QUEUED', 'EXECUTING'].includes(changeSet.state) ||
           (['SUCCEEDED', 'FAILED', 'CONFLICT', 'PARTIALLY_SUCCEEDED'].includes(changeSet.state) &&
             Date.parse(changeSet.updated_at) >= recentCutoff)),
     )
     .flatMap((changeSet) =>
       changeSet.operations
-        .filter((operation) => ['CREATE_RULE', 'DELETE_RULE'].includes(operation.kind))
+        .filter((operation) =>
+          ['CREATE_RULE', 'MODIFY_RULE', 'DELETE_RULE'].includes(operation.kind),
+        )
         .map((operation) => ({ changeSet, operation })),
     );
   const activeRuleOperations = trackedRuleOperations.filter(({ changeSet }) =>
@@ -877,6 +895,16 @@ function RulesWorkspace({
                   </div>
                 </div>
                 <Group gap="xs" wrap="wrap" justify="flex-end">
+                  <RuleFeatureIcons rule={rule} context={context} />
+                  <ResourceStateNotice
+                    state={rule.management_state}
+                    deploymentStatus={context.firewall_deployment_status}
+                    pending={trackedRuleOperations.some(
+                      ({ changeSet, operation }) =>
+                        pendingDeploymentState(changeSet.state) &&
+                        operation.payload.rule_id === rule.id,
+                    )}
+                  />
                   <AppStatusBadge
                     value={
                       rule.action === 'ALLOW'
@@ -888,6 +916,13 @@ function RulesWorkspace({
                     label={rule.action}
                   />
                   <AppStatusBadge value={rule.management_state} />
+                  <AppStatusBadge value={rule.enabled ? 'ENABLED' : 'DISABLED'} />
+                  {rule.logging !== 'NONE' && (
+                    <AppStatusBadge
+                      value={rule.logging}
+                      label={`Log ${rule.logging.toLowerCase()}`}
+                    />
+                  )}
                   {activeRuleOperations.some(
                     ({ operation }) =>
                       operation.kind === 'DELETE_RULE' && operation.payload.rule_id === rule.id,
@@ -982,6 +1017,110 @@ function RulesWorkspace({
   );
 }
 
+function RuleFeatureIcons({
+  rule,
+  context,
+}: {
+  rule: DelegatedContext['rules'][number];
+  context: DelegatedContext;
+}) {
+  const intrusion = context.intrusion_policies.find((item) => item.id === rule.intrusion_policy_id);
+  const variableSet = context.variable_sets.find((item) => item.id === rule.variable_set_id);
+  const filePolicy = context.file_policies.find((item) => item.id === rule.file_policy_id);
+  const features = [
+    {
+      key: 'logging',
+      label: rule.logging === 'NONE' ? 'Logging disabled' : `Log at ${rule.logging.toLowerCase()}`,
+      enabled: rule.logging !== 'NONE',
+      Icon: IconFileDescription,
+    },
+    {
+      key: 'intrusion',
+      label: intrusion
+        ? `Intrusion policy: ${intrusion.name}${variableSet ? ` · Variable set: ${variableSet.name}` : ''}`
+        : 'No intrusion policy',
+      enabled: Boolean(intrusion),
+      Icon: IconShieldCheck,
+    },
+    {
+      key: 'file-policy',
+      label: filePolicy ? `File policy: ${filePolicy.name}` : 'No file policy',
+      enabled: Boolean(filePolicy),
+      Icon: IconFileTextShield,
+    },
+  ];
+  return (
+    <Group className="fm-rule-feature-icons" gap={4} wrap="nowrap" aria-label="Rule features">
+      {features.map(({ key, label, enabled, Icon }) => (
+        <AppTooltip key={key} label={label} withArrow>
+          <span
+            className={`fm-rule-feature-icon${enabled ? ' fm-rule-feature-icon-enabled' : ''}`}
+            aria-label={label}
+          >
+            <Icon size={18} stroke={1.8} />
+          </span>
+        </AppTooltip>
+      ))}
+    </Group>
+  );
+}
+
+function ResourceStateNotice({
+  state,
+  pending = false,
+  deploymentStatus,
+}: {
+  state?: string;
+  pending?: boolean;
+  deploymentStatus?: 'SUPPORTED' | 'NOT_AVAILABLE';
+}) {
+  const currentState = state ?? 'UNKNOWN';
+  const unverified = deploymentStatus === 'NOT_AVAILABLE';
+  const label = pending
+    ? 'Deployment pending: this resource has an unexecuted or in-progress ChangeSet.'
+    : unverified
+      ? 'Firewall deployment has not been verified. Managed means synchronized to FMC/SCC only.'
+      : resourceStateLabel(currentState);
+  if (!pending && currentState === 'MANAGED' && !unverified) return null;
+  return (
+    <AppTooltip label={label} withArrow>
+      <span className="fm-resource-state-notice" aria-label={label}>
+        <IconAlertTriangle size={16} stroke={2} />
+        <span>
+          {pending ? 'DEPLOYING' : unverified ? 'FW UNVERIFIED' : resourceStateChip(currentState)}
+        </span>
+      </span>
+    </AppTooltip>
+  );
+}
+
+function pendingDeploymentState(state: string) {
+  return ['READY', 'QUEUED', 'EXECUTING'].includes(state);
+}
+
+function resourceStateLabel(state: string) {
+  switch (state) {
+    case 'OBSERVED':
+      return 'Imported from the provider; not deployed from this application.';
+    case 'UNMANAGED':
+      return 'Provider resource is not managed by this application.';
+    case 'DRIFTED':
+      return 'Provider state differs from the application state.';
+    case 'MISSING':
+      return 'Resource is missing from the provider.';
+    case 'CONFLICT':
+      return 'Resource has a synchronization conflict requiring review.';
+    case 'PENDING_ADOPTION':
+      return 'Resource is waiting to be adopted by the application.';
+    default:
+      return `Provider state: ${state.toLowerCase()}`;
+  }
+}
+
+function resourceStateChip(state: string) {
+  return state === 'OBSERVED' ? 'NOT DEPLOYED' : state;
+}
+
 function CreateRuleDialog({
   opened,
   onClose,
@@ -1000,12 +1139,18 @@ function CreateRuleDialog({
   const [changeSetName, setChangeSetName] = useState(() => defaultRuleChangeSetName(groupName));
   const [name, setName] = useState('');
   const [action, setAction] = useState('ALLOW');
+  const [enabled, setEnabled] = useState('true');
+  const [logging, setLogging] = useState<PendingRule['logging']>('NONE');
+  const [intrusionPolicyId, setIntrusionPolicyId] = useState<string | null>(null);
+  const [variableSetId, setVariableSetId] = useState<string | null>(null);
+  const [filePolicyId, setFilePolicyId] = useState<string | null>(null);
   const [sourceZoneIds, setSourceZoneIds] = useState<string[]>([]);
   const [destinationZoneIds, setDestinationZoneIds] = useState<string[]>([]);
   const [sourceObjectIds, setSourceObjectIds] = useState<string[]>([]);
   const [destinationObjectIds, setDestinationObjectIds] = useState<string[]>([]);
   const [sourcePortObjectIds, setSourcePortObjectIds] = useState<string[]>([]);
   const [destinationPortObjectIds, setDestinationPortObjectIds] = useState<string[]>([]);
+  const [applicationObjectIds, setApplicationObjectIds] = useState<string[]>([]);
   const orderedExistingRules = [...context.rules].sort(
     (left, right) => left.position - right.position,
   );
@@ -1028,17 +1173,42 @@ function CreateRuleDialog({
     .filter((object) => ['NETWORK', 'NETWORK_GROUP'].includes(object.object_type))
     .map(selectOption);
   const portObjects = context.objects
-    .filter((object) => object.object_type === 'PORT_SERVICE')
+    .filter((object) => ['PORT_SERVICE', 'PORT_SERVICE_GROUP'].includes(object.object_type))
     .map(selectOption);
+  const applicationFilters = context.objects
+    .filter((object) => object.object_type === 'APPLICATION_FILTER')
+    .map(selectOption);
+  const applicationOptions = context.objects
+    .filter((object) => object.object_type === 'APPLICATION')
+    .map(selectOption);
+  const selectedFilterIds = new Set(applicationFilters.map((item) => item.value));
+  const intrusionPolicies = context.intrusion_policies.map((item) => ({
+    value: item.id,
+    label: item.name,
+  }));
+  const variableSets = context.variable_sets.map((item) => ({
+    value: item.id,
+    label: item.is_default ? `${item.name} (default)` : item.name,
+  }));
+  const filePolicies = context.file_policies.map((item) => ({
+    value: item.id,
+    label: item.name,
+  }));
   const clearRuleFields = () => {
     setName('');
     setAction('ALLOW');
+    setEnabled('true');
+    setLogging('NONE');
+    setIntrusionPolicyId(null);
+    setVariableSetId(null);
+    setFilePolicyId(null);
     setSourceZoneIds([]);
     setDestinationZoneIds([]);
     setSourceObjectIds([]);
     setDestinationObjectIds([]);
     setSourcePortObjectIds([]);
     setDestinationPortObjectIds([]);
+    setApplicationObjectIds([]);
     setPlacement(defaultRulePlacement(orderedExistingRules));
   };
   const resetAndClose = () => {
@@ -1054,6 +1224,16 @@ function CreateRuleDialog({
   const addRule = () => {
     const cleanName = name.trim();
     if (!cleanName) return;
+    const scopeError = ruleScopeError(
+      sourceZoneIds,
+      destinationZoneIds,
+      sourceObjectIds,
+      destinationObjectIds,
+    );
+    if (scopeError) {
+      setError(scopeError);
+      return;
+    }
     const providerName = providerRuleName(groupSlug, cleanName).toLocaleLowerCase();
     if (
       rules.some(
@@ -1069,12 +1249,18 @@ function CreateRuleDialog({
         id: `${Date.now()}-${current.length}`,
         name: cleanName,
         action,
+        enabled: enabled === 'true',
+        logging,
+        intrusion_policy_id: intrusionPolicyId ?? undefined,
+        variable_set_id: variableSetId ?? undefined,
+        file_policy_id: filePolicyId ?? undefined,
         source_zone_ids: sourceZoneIds,
         destination_zone_ids: destinationZoneIds,
         source_object_ids: sourceObjectIds,
         destination_object_ids: destinationObjectIds,
         source_port_object_ids: sourcePortObjectIds,
         destination_port_object_ids: destinationPortObjectIds,
+        application_object_ids: applicationObjectIds,
         ...(orderedExistingRules.length
           ? rulePlacementPayload(placement, orderedExistingRules)
           : {}),
@@ -1089,6 +1275,8 @@ function CreateRuleDialog({
   const editRule = (rule: PendingRule) => {
     setName(rule.name);
     setAction(rule.action);
+    setEnabled(rule.enabled === false ? 'false' : 'true');
+    setLogging(rule.logging ?? 'NONE');
     setSourceZoneIds(rule.source_zone_ids);
     setDestinationZoneIds(rule.destination_zone_ids);
     setSourceObjectIds(rule.source_object_ids);
@@ -1174,9 +1362,99 @@ function CreateRuleDialog({
               <Select
                 label="Action"
                 value={action}
-                onChange={(value) => setAction(value ?? 'ALLOW')}
+                onChange={(value) => {
+                  const next = value ?? 'ALLOW';
+                  setAction(next);
+                  if (next === 'BLOCK' && logging === 'END') setLogging('BEGIN');
+                  if (next === 'MONITOR') setLogging('END');
+                }}
                 data={['ALLOW', 'BLOCK', 'TRUST', 'MONITOR']}
                 disabled={busy}
+              />
+              <Select
+                label="Rule status"
+                value={enabled}
+                onChange={(value) => {
+                  const next = value ?? 'true';
+                  setEnabled(next);
+                  if (next === 'true' && intrusionPolicyId && !variableSetId) {
+                    const selected = context.intrusion_policies.find(
+                      (item) => item.id === intrusionPolicyId,
+                    );
+                    setVariableSetId(selected?.default_variable_set_id ?? null);
+                  }
+                }}
+                data={[
+                  { value: 'true', label: 'Enabled' },
+                  { value: 'false', label: 'Disabled' },
+                ]}
+                disabled={busy}
+              />
+              <Select
+                label="Logging"
+                value={logging}
+                onChange={(value) => setLogging((value ?? 'NONE') as PendingRule['logging'])}
+                data={
+                  action === 'BLOCK'
+                    ? [
+                        { value: 'NONE', label: 'Do not log' },
+                        { value: 'BEGIN', label: 'Log at beginning' },
+                      ]
+                    : action === 'MONITOR'
+                      ? [{ value: 'END', label: 'Log at end' }]
+                      : [
+                          { value: 'NONE', label: 'Do not log' },
+                          { value: 'BEGIN', label: 'Log at beginning' },
+                          { value: 'END', label: 'Log at end' },
+                        ]
+                }
+                disabled={busy}
+              />
+              <Select
+                clearable={enabled !== 'true' || !intrusionPolicyId}
+                searchable
+                label="Intrusion policy"
+                placeholder="No intrusion policy"
+                value={intrusionPolicyId}
+                onChange={(value) => {
+                  setIntrusionPolicyId(value);
+                  const selected = context.intrusion_policies.find((item) => item.id === value);
+                  if (value && enabled === 'true') {
+                    setVariableSetId(selected?.default_variable_set_id ?? null);
+                  } else if (!value) {
+                    setVariableSetId(null);
+                  }
+                }}
+                data={intrusionPolicies}
+                disabled={busy}
+              />
+              <Select
+                clearable={enabled !== 'true' || !intrusionPolicyId}
+                searchable
+                label="Variable set"
+                placeholder="Select variable set"
+                value={variableSetId}
+                onChange={(value) => {
+                  if (value) setVariableSetId(value);
+                  else if (enabled === 'true' && intrusionPolicyId) {
+                    setVariableSetId(
+                      context.intrusion_policies.find((item) => item.id === intrusionPolicyId)
+                        ?.default_variable_set_id ?? null,
+                    );
+                  } else setVariableSetId(null);
+                }}
+                data={variableSets}
+                disabled={busy || !intrusionPolicyId}
+              />
+              <Select
+                clearable
+                searchable
+                label="File policy"
+                placeholder="No file policy"
+                value={filePolicyId}
+                onChange={setFilePolicyId}
+                data={filePolicies}
+                disabled={busy || enabled !== 'true'}
               />
             </SimpleGrid>
             {orderedExistingRules.length > 0 && (
@@ -1238,6 +1516,35 @@ function CreateRuleDialog({
                 data={portObjects}
                 value={destinationPortObjectIds}
                 onChange={setDestinationPortObjectIds}
+                disabled={busy}
+              />
+              <MultiSelect
+                searchable
+                limit={100}
+                label="Application filters"
+                description="Select an entire provider filter; combine filters with individual applications below."
+                data={applicationFilters}
+                value={applicationObjectIds.filter((id) => selectedFilterIds.has(id))}
+                onChange={(values) =>
+                  setApplicationObjectIds([
+                    ...values,
+                    ...applicationObjectIds.filter((id) => !selectedFilterIds.has(id)),
+                  ])
+                }
+                disabled={busy}
+              />
+              <MultiSelect
+                searchable
+                limit={100}
+                label="Applications"
+                data={applicationOptions}
+                value={applicationObjectIds.filter((id) => !selectedFilterIds.has(id))}
+                onChange={(values) =>
+                  setApplicationObjectIds([
+                    ...applicationObjectIds.filter((id) => selectedFilterIds.has(id)),
+                    ...values,
+                  ])
+                }
                 disabled={busy}
               />
             </SimpleGrid>
@@ -1383,6 +1690,30 @@ function EditRuleDialog({
 }) {
   const [name, setName] = useState(() => (rule ? editableRuleName(groupSlug, rule.name) : ''));
   const [action, setAction] = useState(() => rule?.action ?? 'ALLOW');
+  const [enabled, setEnabled] = useState(() => ((rule?.enabled ?? true) ? 'true' : 'false'));
+  const [logging, setLogging] = useState<PendingRule['logging']>(() =>
+    rule?.action === 'BLOCK'
+      ? rule.logging === 'BEGIN'
+        ? 'BEGIN'
+        : 'NONE'
+      : rule?.action === 'MONITOR'
+        ? 'END'
+        : (rule?.logging ?? 'NONE'),
+  );
+  const [intrusionPolicyId, setIntrusionPolicyId] = useState<string | null>(
+    rule?.intrusion_policy_id ?? null,
+  );
+  const [variableSetId, setVariableSetId] = useState<string | null>(() => {
+    if (rule?.variable_set_id) return rule.variable_set_id;
+    if (rule?.enabled !== false && rule?.intrusion_policy_id) {
+      return (
+        context.intrusion_policies.find((item) => item.id === rule.intrusion_policy_id)
+          ?.default_variable_set_id ?? null
+      );
+    }
+    return null;
+  });
+  const [filePolicyId, setFilePolicyId] = useState<string | null>(rule?.file_policy_id ?? null);
   const [sourceZoneIds, setSourceZoneIds] = useState<string[]>(() =>
     rule ? idsForNames(context.zones, rule.source_zones ?? []) : [],
   );
@@ -1401,6 +1732,9 @@ function EditRuleDialog({
   const [destinationPortObjectIds, setDestinationPortObjectIds] = useState<string[]>(() =>
     rule ? idsForNames(context.objects, rule.destination_services ?? []) : [],
   );
+  const [applicationObjectIds, setApplicationObjectIds] = useState<string[]>(() =>
+    rule ? idsForNames(context.objects, rule.applications ?? []) : [],
+  );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [prepared, setPrepared] = useState<ChangeSet>();
@@ -1415,8 +1749,27 @@ function EditRuleDialog({
     .filter((object) => ['NETWORK', 'NETWORK_GROUP'].includes(object.object_type))
     .map(selectOption);
   const portObjects = context.objects
-    .filter((object) => object.object_type === 'PORT_SERVICE')
+    .filter((object) => ['PORT_SERVICE', 'PORT_SERVICE_GROUP'].includes(object.object_type))
     .map(selectOption);
+  const applicationFilters = context.objects
+    .filter((object) => object.object_type === 'APPLICATION_FILTER')
+    .map(selectOption);
+  const applicationOptions = context.objects
+    .filter((object) => object.object_type === 'APPLICATION')
+    .map(selectOption);
+  const selectedFilterIds = new Set(applicationFilters.map((item) => item.value));
+  const intrusionPolicies = context.intrusion_policies.map((item) => ({
+    value: item.id,
+    label: item.name,
+  }));
+  const variableSets = context.variable_sets.map((item) => ({
+    value: item.id,
+    label: item.is_default ? `${item.name} (default)` : item.name,
+  }));
+  const filePolicies = context.file_policies.map((item) => ({
+    value: item.id,
+    label: item.name,
+  }));
 
   const close = () => {
     if (busy) return;
@@ -1427,6 +1780,16 @@ function EditRuleDialog({
   };
   const prepare = async () => {
     if (!rule || !name.trim()) return;
+    const scopeError = ruleScopeError(
+      sourceZoneIds,
+      destinationZoneIds,
+      sourceObjectIds,
+      destinationObjectIds,
+    );
+    if (scopeError) {
+      setError(scopeError);
+      return;
+    }
     setBusy(true);
     setError('');
     try {
@@ -1443,12 +1806,18 @@ function EditRuleDialog({
           rule_id: rule.id,
           name: providerRuleName(groupSlug, name),
           action,
+          enabled: enabled === 'true',
+          logging,
+          intrusion_policy_id: intrusionPolicyId ?? undefined,
+          variable_set_id: variableSetId ?? undefined,
+          file_policy_id: filePolicyId ?? undefined,
           source_zone_ids: sourceZoneIds,
           destination_zone_ids: destinationZoneIds,
           source_object_ids: sourceObjectIds,
           destination_object_ids: destinationObjectIds,
           source_port_object_ids: sourcePortObjectIds,
           destination_port_object_ids: destinationPortObjectIds,
+          application_object_ids: applicationObjectIds,
         },
         'MODIFY_RULE',
       );
@@ -1503,9 +1872,96 @@ function EditRuleDialog({
               <Select
                 label="Action"
                 value={action}
-                onChange={(value) => setAction(value ?? 'ALLOW')}
+                onChange={(value) => {
+                  const next = value ?? 'ALLOW';
+                  setAction(next);
+                  if (next === 'BLOCK' && logging === 'END') setLogging('BEGIN');
+                  if (next === 'MONITOR') setLogging('END');
+                }}
                 data={['ALLOW', 'BLOCK', 'TRUST', 'MONITOR']}
                 disabled={busy}
+              />
+              <Select
+                label="Rule status"
+                value={enabled}
+                onChange={(value) => {
+                  const next = value ?? 'true';
+                  setEnabled(next);
+                  if (next === 'true' && intrusionPolicyId && !variableSetId) {
+                    const selected = context.intrusion_policies.find(
+                      (item) => item.id === intrusionPolicyId,
+                    );
+                    setVariableSetId(selected?.default_variable_set_id ?? null);
+                  }
+                }}
+                data={[
+                  { value: 'true', label: 'Enabled' },
+                  { value: 'false', label: 'Disabled' },
+                ]}
+                disabled={busy}
+              />
+              <Select
+                label="Logging"
+                value={logging}
+                onChange={(value) => setLogging((value ?? 'NONE') as PendingRule['logging'])}
+                data={
+                  action === 'BLOCK'
+                    ? [
+                        { value: 'NONE', label: 'Do not log' },
+                        { value: 'BEGIN', label: 'Log at beginning' },
+                      ]
+                    : action === 'MONITOR'
+                      ? [{ value: 'END', label: 'Log at end' }]
+                      : [
+                          { value: 'NONE', label: 'Do not log' },
+                          { value: 'BEGIN', label: 'Log at beginning' },
+                          { value: 'END', label: 'Log at end' },
+                        ]
+                }
+                disabled={busy}
+              />
+              <Select
+                clearable={enabled !== 'true' || !intrusionPolicyId}
+                searchable
+                label="Intrusion policy"
+                placeholder="No intrusion policy"
+                value={intrusionPolicyId}
+                onChange={(value) => {
+                  setIntrusionPolicyId(value);
+                  const selected = context.intrusion_policies.find((item) => item.id === value);
+                  if (value) setVariableSetId(selected?.default_variable_set_id ?? null);
+                  else setVariableSetId(null);
+                }}
+                data={intrusionPolicies}
+                disabled={busy}
+              />
+              <Select
+                clearable={enabled !== 'true' || !intrusionPolicyId}
+                searchable
+                label="Variable set"
+                placeholder="Select variable set"
+                value={variableSetId}
+                onChange={(value) => {
+                  if (value) setVariableSetId(value);
+                  else if (enabled === 'true' && intrusionPolicyId) {
+                    setVariableSetId(
+                      context.intrusion_policies.find((item) => item.id === intrusionPolicyId)
+                        ?.default_variable_set_id ?? null,
+                    );
+                  } else setVariableSetId(null);
+                }}
+                data={variableSets}
+                disabled={busy || !intrusionPolicyId}
+              />
+              <Select
+                clearable
+                searchable
+                label="File policy"
+                placeholder="No file policy"
+                value={filePolicyId}
+                onChange={setFilePolicyId}
+                data={filePolicies}
+                disabled={busy || enabled !== 'true'}
               />
             </SimpleGrid>
             <SimpleGrid cols={{ base: 1, md: 2 }}>
@@ -1557,6 +2013,35 @@ function EditRuleDialog({
                 onChange={setDestinationPortObjectIds}
                 disabled={busy}
               />
+              <MultiSelect
+                searchable
+                limit={100}
+                label="Application filters"
+                description="Select an entire provider filter; combine filters with individual applications below."
+                data={applicationFilters}
+                value={applicationObjectIds.filter((id) => selectedFilterIds.has(id))}
+                onChange={(values) =>
+                  setApplicationObjectIds([
+                    ...values,
+                    ...applicationObjectIds.filter((id) => !selectedFilterIds.has(id)),
+                  ])
+                }
+                disabled={busy}
+              />
+              <MultiSelect
+                searchable
+                limit={100}
+                label="Applications"
+                data={applicationOptions}
+                value={applicationObjectIds.filter((id) => !selectedFilterIds.has(id))}
+                onChange={(values) =>
+                  setApplicationObjectIds([
+                    ...applicationObjectIds.filter((id) => selectedFilterIds.has(id)),
+                    ...values,
+                  ])
+                }
+                disabled={busy}
+              />
             </SimpleGrid>
           </>
         )}
@@ -1598,7 +2083,21 @@ function EditRuleDialog({
             {queued ? 'Close' : 'Cancel'}
           </Button>
           {!prepared && !queued && (
-            <Button loading={busy} disabled={!name.trim()} onClick={() => void prepare()}>
+            <Button
+              loading={busy}
+              disabled={
+                !name.trim() ||
+                Boolean(
+                  ruleScopeError(
+                    sourceZoneIds,
+                    destinationZoneIds,
+                    sourceObjectIds,
+                    destinationObjectIds,
+                  ),
+                )
+              }
+              onClick={() => void prepare()}
+            >
               Review update
             </Button>
           )}
@@ -1660,12 +2159,18 @@ interface PendingRule {
   id: string;
   name: string;
   action: string;
+  enabled: boolean;
+  logging: 'NONE' | 'BEGIN' | 'END';
   source_zone_ids: string[];
   destination_zone_ids: string[];
   source_object_ids: string[];
   destination_object_ids: string[];
   source_port_object_ids: string[];
   destination_port_object_ids: string[];
+  application_object_ids: string[];
+  intrusion_policy_id?: string;
+  variable_set_id?: string;
+  file_policy_id?: string;
   category_id?: string;
   position?: number;
   placement?: 'BEFORE' | 'AFTER';
@@ -1723,7 +2228,8 @@ function ruleElementCount(rule: PendingRule) {
     rule.source_object_ids.length +
     rule.destination_object_ids.length +
     rule.source_port_object_ids.length +
-    rule.destination_port_object_ids.length
+    rule.destination_port_object_ids.length +
+    rule.application_object_ids.length
   );
 }
 
@@ -1761,6 +2267,20 @@ function rulePreflightError(changeSet: ChangeSet) {
   return 'Preflight did not approve this rule. Review the ChangeSet validation details.';
 }
 
+function ruleScopeError(
+  sourceZoneIds: string[],
+  destinationZoneIds: string[],
+  sourceObjectIds: string[],
+  destinationObjectIds: string[],
+) {
+  if (!sourceZoneIds.length || !destinationZoneIds.length) {
+    return 'Select at least one source zone and one destination zone.';
+  }
+  if (!sourceObjectIds.length) return 'Select at least one source network.';
+  if (!destinationObjectIds.length) return 'Select at least one destination network.';
+  return '';
+}
+
 function ruleDialogError(reason: unknown) {
   return reason instanceof ApiError
     ? `${reason.message} Reference: ${reason.correlationId}`
@@ -1784,13 +2304,15 @@ function ObjectsWorkspace({
 }) {
   const [query, setQuery] = useState('');
   const [type, setType] = useState<string | null>('ALL');
+  const [page, setPage] = useState(1);
+  const pageSize = useAdaptivePageSize();
   const [creating, setCreating] = useState(false);
   const recentCutoff = useRecentActivityCutoff();
   const trackedObjectOperations = activity
     .filter(
       (changeSet) =>
         changeSet.access_policy_id === context.policy.id &&
-        (['QUEUED', 'EXECUTING'].includes(changeSet.state) ||
+        (['READY', 'QUEUED', 'EXECUTING'].includes(changeSet.state) ||
           (['SUCCEEDED', 'FAILED', 'CONFLICT', 'PARTIALLY_SUCCEEDED'].includes(changeSet.state) &&
             Date.parse(changeSet.updated_at) >= recentCutoff)),
     )
@@ -1804,12 +2326,18 @@ function ObjectsWorkspace({
   const activeObjectOperations = trackedObjectOperations.filter(({ changeSet }) =>
     ['QUEUED', 'EXECUTING'].includes(changeSet.state),
   );
-  const rows = context.objects.filter(
+  const visibleObjects = context.objects.filter(
+    (item) => item.object_type !== 'APPLICATION' && item.object_type !== 'APPLICATION_FILTER',
+  );
+  const rows = visibleObjects.filter(
     (item) =>
       item.name.toLowerCase().includes(query.toLowerCase()) &&
       (type === 'ALL' || item.object_type === type),
   );
-  const types = [...new Set(context.objects.map((item) => item.object_type))];
+  const pageCount = Math.max(1, Math.ceil(rows.length / pageSize));
+  const currentPage = Math.min(page, pageCount);
+  const pagedRows = rows.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  const types = [...new Set(visibleObjects.map((item) => item.object_type))];
   return (
     <AppCard>
       <Group justify="space-between" align="end" mb="md">
@@ -1847,12 +2375,18 @@ function ObjectsWorkspace({
           placeholder="Search objects"
           leftSection={<IconSearch size={15} />}
           value={query}
-          onChange={(event) => setQuery(event.currentTarget.value)}
+          onChange={(event) => {
+            setQuery(event.currentTarget.value);
+            setPage(1);
+          }}
         />
         <Select
           aria-label="Filter object type"
           value={type}
-          onChange={setType}
+          onChange={(value) => {
+            setType(value);
+            setPage(1);
+          }}
           data={[
             { value: 'ALL', label: 'All object types' },
             ...types.map((value) => ({ value, label: humanize(value) })),
@@ -1908,12 +2442,26 @@ function ObjectsWorkspace({
             </Table.Tr>
           </Table.Thead>
           <Table.Tbody>
-            {rows.map((object) => {
+            {pagedRows.map((object) => {
               const owned = object.owner_type === 'GROUP';
               return (
                 <Table.Tr key={object.id}>
                   <Table.Td>
-                    <Text fw={650}>{object.name}</Text>
+                    <Group gap="xs" wrap="nowrap">
+                      <Text fw={650}>{object.name}</Text>
+                      <ResourceStateNotice
+                        state={object.management_state}
+                        deploymentStatus={context.firewall_deployment_status}
+                        pending={trackedObjectOperations.some(
+                          ({ changeSet, operation }) =>
+                            pendingDeploymentState(changeSet.state) &&
+                            ['CREATE_OBJECT', 'MODIFY_OBJECT', 'DELETE_OBJECT'].includes(
+                              operation.kind,
+                            ) &&
+                            operation.payload.object_id === object.id,
+                        )}
+                      />
+                    </Group>
                   </Table.Td>
                   <Table.Td>{humanize(object.object_type)}</Table.Td>
                   <Table.Td>
@@ -1949,6 +2497,12 @@ function ObjectsWorkspace({
           </Table.Tbody>
         </AppDataTable>
       )}
+      <AdaptivePagination
+        page={currentPage}
+        pageSize={pageSize}
+        total={rows.length}
+        onPageChange={setPage}
+      />
     </AppCard>
   );
 }
@@ -1975,6 +2529,7 @@ function CreateObjectDialog({
   const [portProtocol, setPortProtocol] = useState('tcp');
   const [name, setName] = useState('');
   const [value, setValue] = useState('');
+  const [memberObjectIds, setMemberObjectIds] = useState<string[]>([]);
   const [changeSetName, setChangeSetName] = useState(() => defaultObjectChangeSetName(groupName));
   const [objects, setObjects] = useState<PendingObject[]>([]);
   const [busy, setBusy] = useState(false);
@@ -1988,6 +2543,7 @@ function CreateObjectDialog({
     setPortProtocol('tcp');
     setName('');
     setValue('');
+    setMemberObjectIds([]);
     setChangeSetName(defaultObjectChangeSetName(groupName));
     setObjects([]);
     setError('');
@@ -1998,7 +2554,14 @@ function CreateObjectDialog({
   const addObject = () => {
     const cleanName = name.trim();
     const enteredValue = value.trim();
-    if (!objectType || !cleanName || !enteredValue) return;
+    const isGroup = objectType.endsWith('_GROUP');
+    if (
+      !objectType ||
+      !cleanName ||
+      (!isGroup && !enteredValue) ||
+      (isGroup && !memberObjectIds.length)
+    )
+      return;
     const cleanValue =
       objectType === 'PORT_SERVICE' ? `${portProtocol}/${enteredValue}` : enteredValue;
     if (objects.some((item) => item.name.toLocaleLowerCase() === cleanName.toLocaleLowerCase())) {
@@ -2018,10 +2581,12 @@ function CreateObjectDialog({
         object_type: objectType,
         name: cleanName,
         value: cleanValue,
+        member_object_ids: memberObjectIds,
       },
     ]);
     setName('');
     setValue('');
+    setMemberObjectIds([]);
   };
   const editObject = (object: PendingObject) => {
     setObjectType(object.object_type);
@@ -2033,6 +2598,7 @@ function CreateObjectDialog({
     } else {
       setValue(object.value);
     }
+    setMemberObjectIds(object.member_object_ids ?? []);
     setObjects((current) => current.filter((item) => item.id !== object.id));
     setError('');
   };
@@ -2052,6 +2618,7 @@ function CreateObjectDialog({
           name: object.name,
           object_type: object.object_type,
           value: object.value,
+          member_object_ids: object.member_object_ids,
         });
       }
       const validated = await changeSetAction(withObjects.id, activeGroupId, 'preflight');
@@ -2113,10 +2680,23 @@ function CreateObjectDialog({
               onChange={(next) => {
                 setObjectType(next ?? '');
                 setValue('');
+                setMemberObjectIds([]);
                 setError('');
               }}
               disabled={busy}
             />
+            {objectType.endsWith('_GROUP') && (
+              <MultiSelect
+                label="Group members"
+                description="Only objects this group can use are listed. Network groups may mix IPv4 and IPv6; port groups accept one protocol only."
+                data={groupMemberOptions(context.objects, objectType, memberObjectIds)}
+                value={memberObjectIds}
+                onChange={setMemberObjectIds}
+                searchable
+                nothingFoundMessage="No authorized compatible objects"
+                disabled={busy}
+              />
+            )}
             <TextInput
               label="Object name"
               description={
@@ -2142,16 +2722,23 @@ function CreateObjectDialog({
                 </Group>
               </Radio.Group>
             )}
-            <TextInput
-              label={objectType === 'PORT_SERVICE' ? 'Port' : 'Value'}
-              description={objectValueHelp(objectType)}
-              value={value}
-              onChange={(event) => setValue(event.currentTarget.value)}
-              disabled={busy}
-            />
+            {!objectType.endsWith('_GROUP') && (
+              <TextInput
+                label={objectType === 'PORT_SERVICE' ? 'Port' : 'Value'}
+                description={objectValueHelp(objectType)}
+                value={value}
+                onChange={(event) => setValue(event.currentTarget.value)}
+                disabled={busy}
+              />
+            )}
             <Button
               variant="light"
-              disabled={!objectType || !name.trim() || !value.trim() || busy}
+              disabled={
+                !objectType ||
+                !name.trim() ||
+                busy ||
+                (objectType.endsWith('_GROUP') ? !memberObjectIds.length : !value.trim())
+              }
               onClick={addObject}
             >
               Add object to ChangeSet
@@ -2282,6 +2869,41 @@ interface PendingObject {
   object_type: string;
   name: string;
   value: string;
+  member_object_ids?: string[];
+}
+
+function groupMemberOptions(
+  objects: DelegatedContext['objects'],
+  groupType: string,
+  selectedIds: string[],
+) {
+  const memberType =
+    groupType === 'NETWORK_GROUP'
+      ? 'NETWORK'
+      : groupType === 'PORT_SERVICE_GROUP'
+        ? 'PORT_SERVICE'
+        : 'URL';
+  const selectedProtocols = new Set(
+    (objects ?? [])
+      .filter((item) => selectedIds.includes(item.id) && item.object_type === 'PORT_SERVICE')
+      .map(
+        (item) =>
+          String(item.normalized_value ?? '')
+            .split('/', 1)[0]
+            ?.toLowerCase() ?? '',
+      ),
+  );
+  return (objects ?? [])
+    .filter((item) => {
+      if (item.object_type !== memberType) return false;
+      if (memberType !== 'PORT_SERVICE' || selectedProtocols.size === 0) return true;
+      return selectedProtocols.has(
+        String(item.normalized_value ?? '')
+          .split('/', 1)[0]
+          ?.toLowerCase() ?? '',
+      );
+    })
+    .map((item) => ({ value: item.id, label: item.name }));
 }
 
 function defaultObjectChangeSetName(groupName: string) {
@@ -2299,7 +2921,7 @@ function providerObjectNamePreview(groupSlug: string, requestedName: string) {
 
 function objectValueHelp(objectType: string) {
   if (objectType === 'NETWORK')
-    return 'Individual IP, CIDR subnet, or IP range within an authorized range, for example 10.10.10.1, 10.10.10.0/24, or 10.10.10.1-10.10.20.30.';
+    return 'IPv4 or IPv6 host, CIDR subnet, or IP range within an authorized range, for example 10.10.10.1, 10.10.10.0/24, 2001:db8::1, or 2001:db8::1-2001:db8::ff.';
   if (objectType === 'PORT_SERVICE')
     return 'One port or one ordered port range, for example 443 or 8000-8080.';
   if (objectType === 'URL') return 'Hostname or URL value supported by the provider.';

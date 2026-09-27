@@ -769,14 +769,18 @@ def test_lifecycle_queue_and_credential_rotation_are_connection_scoped(  # noqa:
     assert first_id in due
     assert second_id not in due
     dispatched: list[UUID] = []
-    service.request_sync(admin, first_id, dispatched.append)
+    service.request_sync(
+        admin, first_id, lambda connection_id, _mode: dispatched.append(connection_id)
+    )
     assert dispatched == [first_id]
     queued = service.get(admin, first_id)
     assert queued["sync_status"] == "QUEUED"
     disabled = service.set_lifecycle(admin, first_id, int(str(queued["revision"])), "DISABLED")
     session.commit()
     with pytest.raises(InvalidChangeSetStateError):
-        service.request_sync(admin, first_id, dispatched.append)
+        service.request_sync(
+            admin, first_id, lambda connection_id, _mode: dispatched.append(connection_id)
+        )
     assert disabled["lifecycle"] == "DISABLED"
 
     retired = service.set_lifecycle(admin, first_id, int(str(disabled["revision"])), "RETIRED")

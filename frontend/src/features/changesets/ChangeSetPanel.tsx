@@ -4,6 +4,7 @@ import { IconAlertTriangle, IconCircleCheck, IconFileDiff, IconLoader2 } from '@
 import {
   ApiError,
   changeSetAction,
+  deleteChangeSet,
   loadChangeSets,
   type ChangeSet,
   type DelegatedContext,
@@ -17,6 +18,7 @@ import {
   AppDivider as Divider,
   AppEmptyState,
   AppGroup as Group,
+  AppLoadingState,
   AppPaper as Paper,
   AppSimpleGrid as SimpleGrid,
   AppStack as Stack,
@@ -26,8 +28,12 @@ import {
   AppTitle as Title,
   MetricCard,
 } from '../../ui';
+import { retryableChangeSet } from './changeSetRetry';
 
 const SUBMITTED_STATES = new Set([
+  'DRAFT',
+  'VALIDATION_FAILED',
+  'READY',
   'QUEUED',
   'EXECUTING',
   'SUCCEEDED',
@@ -45,8 +51,11 @@ export function ChangeSetPanel({
   context: DelegatedContext;
 }) {
   const [items, setItems] = useState<ChangeSet[]>([]);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [retryingId, setRetryingId] = useState('');
+  const [executingId, setExecutingId] = useState('');
+  const [deletingId, setDeletingId] = useState('');
   const [detailsId, setDetailsId] = useState('');
   const selected = items.find((item) => item.id === detailsId);
 
@@ -65,6 +74,9 @@ export function ChangeSetPanel({
         })
         .catch((reason: unknown) => {
           if (active) setError(message(reason));
+        })
+        .finally(() => {
+          if (active) setLoading(false);
         });
     void load();
     const refresh = window.setInterval(() => void load(), 3_000);
@@ -93,19 +105,56 @@ export function ChangeSetPanel({
     }
   };
 
+  const execute = async (item: ChangeSet) => {
+    if (
+      !window.confirm(
+        `Execute ${item.title}?\n\nThe validated operations will be queued for provider execution.`,
+      )
+    )
+      return;
+    setExecutingId(item.id);
+    setError('');
+    try {
+      const updated = await changeSetAction(item.id, activeGroupId, 'execute');
+      setItems((current) => current.map((row) => (row.id === updated.id ? updated : row)));
+    } catch (reason) {
+      setError(message(reason));
+    } finally {
+      setExecutingId('');
+    }
+  };
+
+  const remove = async (item: ChangeSet) => {
+    if (!window.confirm(`Delete the ${item.state.toLowerCase()} ChangeSet “${item.title}”?`))
+      return;
+    setDeletingId(item.id);
+    setError('');
+    try {
+      await deleteChangeSet(activeGroupId, item.id);
+      setItems((current) => current.filter((row) => row.id !== item.id));
+      setDetailsId((current) => (current === item.id ? '' : current));
+    } catch (reason) {
+      setError(message(reason));
+    } finally {
+      setDeletingId('');
+    }
+  };
+
   const inProgress = items.filter((item) => ['QUEUED', 'EXECUTING'].includes(item.state)).length;
   const successful = items.filter((item) => item.state === 'SUCCEEDED').length;
   const attention = items.filter((item) =>
     ['FAILED', 'PARTIALLY_SUCCEEDED', 'CONFLICT', 'RECONCILIATION_REQUIRED'].includes(item.state),
   ).length;
 
+  if (loading) return <AppLoadingState label="Loading ChangeSets" />;
+
   return (
     <Stack gap="lg">
       <SimpleGrid cols={{ base: 1, xs: 2, lg: 4 }}>
         <MetricCard
-          label="Submitted"
+          label="Tracked"
           value={items.length}
-          detail="ChangeSets for this policy"
+          detail="Validated and submitted ChangeSets"
           icon={<IconFileDiff size={19} />}
         />
         <MetricCard
@@ -151,8 +200,8 @@ export function ChangeSetPanel({
 
         {!error && items.length === 0 ? (
           <AppEmptyState
-            title="No submitted ChangeSets"
-            description="ChangeSets appear here after they are submitted for provider execution. Drafts and failed preflight attempts are not shown."
+            title="No ChangeSets for this policy"
+            description="Draft, validated, and submitted ChangeSets appear here."
           />
         ) : (
           items.length > 0 && (
@@ -194,8 +243,37 @@ export function ChangeSetPanel({
                         <Button
                           size="xs"
                           variant="light"
+                          color="blue"
+                          loading={executingId === item.id}
+                          disabled={
+                            item.state !== 'READY' || Boolean(retryingId) || Boolean(executingId)
+                          }
+                          onClick={() => void execute(item)}
+                        >
+                          Execute
+                        </Button>
+                        <Button
+                          size="xs"
+                          variant="subtle"
+                          color="red"
+                          loading={deletingId === item.id}
+                          disabled={
+                            !['DRAFT', 'VALIDATION_FAILED', 'READY'].includes(item.state) ||
+                            Boolean(retryingId) ||
+                            Boolean(executingId) ||
+                            Boolean(deletingId)
+                          }
+                          onClick={() => void remove(item)}
+                        >
+                          Delete
+                        </Button>
+                        <Button
+                          size="xs"
+                          variant="light"
                           loading={retryingId === item.id}
-                          disabled={!retryable(item) || Boolean(retryingId)}
+                          disabled={
+                            !retryableChangeSet(item) || Boolean(retryingId) || Boolean(executingId)
+                          }
                           onClick={() => void retry(item)}
                         >
                           Retry
@@ -228,7 +306,13 @@ export function ChangeSetPanel({
   );
 }
 
-function ChangeSetDetails({ item, context }: { item: ChangeSet; context: DelegatedContext }) {
+export function ChangeSetDetails({
+  item,
+  context,
+}: {
+  item: ChangeSet;
+  context?: DelegatedContext;
+}) {
   const failures = failureCodes(item);
   const pendingWarnings = pendingChangeWarnings(item);
   return (
@@ -251,7 +335,11 @@ function ChangeSetDetails({ item, context }: { item: ChangeSet; context: Delegat
         <Group gap="xl" align="start">
           <Detail
             label="Provider"
-            value={`${context.provider_name} (${context.provider_type.toUpperCase()})`}
+            value={
+              context
+                ? `${context.provider_name} (${context.provider_type.toUpperCase()})`
+                : (item.operations[0]?.manager_id ?? 'Provider manager not specified')
+            }
           />
           <Detail label="Requested by" value={requestingUser(item)} />
           <Detail label="Created" value={new Date(item.created_at).toLocaleString()} />
@@ -539,54 +627,6 @@ function pendingChangeWarnings(item: ChangeSet) {
     });
   });
   return warnings;
-}
-
-function retryable(item: ChangeSet) {
-  const operationKinds = new Map(
-    item.operations.map((operation) => [operation.id, operation.kind]),
-  );
-  const partialCategoryRecovery =
-    item.state === 'PARTIALLY_SUCCEEDED' &&
-    item.transactions.length > 0 &&
-    item.transactions.every(
-      (transaction) =>
-        !transaction.reconciliation_required &&
-        transaction.operation_results.length > 0 &&
-        transaction.operation_results.every(
-          (result) =>
-            (result.status === 'SUCCEEDED' &&
-              result.mutated === true &&
-              operationKinds.get(stringValue(result.operation_id)) === 'ENSURE_RULE_CATEGORY') ||
-            (result.mutated === false &&
-              ['FAILED', 'CONFLICT', 'NOT_ATTEMPTED'].includes(stringValue(result.status))),
-        ),
-    );
-  const safeTransactions = item.transactions.every(
-    (transaction) =>
-      !transaction.reconciliation_required &&
-      transaction.operation_results.length > 0 &&
-      transaction.operation_results.every(
-        (result) =>
-          result.mutated === false &&
-          ['SUCCEEDED', 'FAILED', 'CONFLICT', 'NOT_ATTEMPTED'].includes(stringValue(result.status)),
-      ),
-  );
-  const interruptedIdempotentCreate =
-    item.state === 'FAILED' &&
-    stringValue(record(item.failure_info).code) === 'CHANGE_SET_EXECUTION_ERROR' &&
-    item.transactions.length > 0 &&
-    item.operations.every((operation) =>
-      ['ENSURE_RULE_CATEGORY', 'CREATE_RULE'].includes(operation.kind),
-    ) &&
-    item.transactions.every(
-      (transaction) =>
-        transaction.state === 'EXECUTING' && transaction.operation_results.length === 0,
-    );
-  return (
-    (['FAILED', 'CONFLICT'].includes(item.state) && safeTransactions) ||
-    partialCategoryRecovery ||
-    interruptedIdempotentCreate
-  );
 }
 
 function message(error: unknown) {

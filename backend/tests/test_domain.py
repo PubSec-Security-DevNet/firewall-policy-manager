@@ -3,6 +3,7 @@
 import pytest
 
 from firewall_manager.domain.models import DiscoveredObject, FirewallObjectType
+from firewall_manager.domain.networks import network_is_contained, normalize_ip_value
 
 
 def test_network_object_values_are_canonicalized_with_ip_arithmetic() -> None:
@@ -37,6 +38,24 @@ def test_network_range_object_values_are_canonicalized() -> None:
     )
 
     assert address_range.normalized_value == "192.168.95.100-192.168.95.110"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("2001:0db8::1", "2001:db8::1"),
+        ("2001:db8:1::/48", "2001:db8:1::/48"),
+        ("2001:db8::1 - 2001:db8::ff", "2001:db8::1-2001:db8::ff"),
+    ],
+)
+def test_ipv6_hosts_subnets_and_ranges_are_canonicalized(value: str, expected: str) -> None:
+    assert normalize_ip_value(value) == expected
+
+
+def test_authorized_ranges_support_ipv4_and_ipv6_containment() -> None:
+    assert network_is_contained("10.10.10.20-10.10.10.30", "10.10.10.1-10.10.10.40")
+    assert network_is_contained("2001:db8::20", "2001:db8::1-2001:db8::ff")
+    assert not network_is_contained("2001:db9::1", "2001:db8::1-2001:db8::ff")
 
 
 @pytest.mark.parametrize(

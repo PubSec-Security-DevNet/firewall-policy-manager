@@ -6,7 +6,7 @@ from dataclasses import asdict
 from firewall_manager.application.authorization import require_action
 from firewall_manager.application.errors import ResourceOutOfScopeError
 from firewall_manager.application.ports import OverviewRepository, ProviderReader
-from firewall_manager.domain.models import Action, Principal
+from firewall_manager.domain.models import Action, Principal, ProviderEvidenceProfile
 
 
 class OverviewService:
@@ -24,11 +24,23 @@ class OverviewService:
         organization = self._repository.organization_name(principal.organization_id)
         if organization is None:
             raise ResourceOutOfScopeError
-        provider_inventory = await asyncio.gather(
-            *(provider.discover() for provider in self._providers)
-        )
+        normalized_summaries = getattr(self._repository, "provider_summaries", None)
+        if normalized_summaries is not None:
+            providers = normalized_summaries(principal.organization_id)
+        else:
+            providers = [
+                {
+                    key: value
+                    for key, value in asdict(inventory).items()
+                    if key != "evidence_profile"
+                }
+                for inventory in await asyncio.gather(
+                    *(provider.discover() for provider in self._providers)
+                )
+                if inventory.evidence_profile is not ProviderEvidenceProfile.MOCK
+            ]
         return {
             "organization": organization,
             "counts": self._repository.counts(principal.organization_id),
-            "providers": [asdict(inventory) for inventory in provider_inventory],
+            "providers": providers,
         }

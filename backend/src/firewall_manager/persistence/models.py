@@ -131,6 +131,11 @@ class ProviderConnection(TimestampMixin, Base):
             "sync_interval_minutes >= 5 AND sync_interval_minutes <= 10080",
             name="ck_provider_connections_sync_interval",
         ),
+        CheckConstraint(
+            "applications_sync_interval_minutes >= 60 "
+            "AND applications_sync_interval_minutes <= 43200",
+            name="ck_provider_connections_applications_sync_interval",
+        ),
         Index("ix_provider_connections_org_lifecycle", "organization_id", "lifecycle"),
         Index("ix_provider_connections_sync_due", "lifecycle", "next_sync_at"),
     )
@@ -164,6 +169,13 @@ class ProviderConnection(TimestampMixin, Base):
     certificate_info: Mapped[dict[str, str]] = mapped_column(JSONB, default=dict)
     sync_interval_minutes: Mapped[int] = mapped_column(Integer, default=60)
     next_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    applications_sync_interval_minutes: Mapped[int] = mapped_column(Integer, default=1440)
+    applications_sync_status: Mapped[str | None] = mapped_column(String(30))
+    applications_last_sync: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    applications_last_successful_sync: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    applications_next_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     write_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     write_enabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     write_enabled_by_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
@@ -306,6 +318,9 @@ class SyncedResourceMixin(TimestampMixin):
     provider_version: Mapped[str | None] = mapped_column(String(200))
     provider_fingerprint: Mapped[str] = mapped_column(String(200))
     native_metadata: Mapped[dict[str, str]] = mapped_column(JSONB, default=dict)
+    # Desired application-managed state is retained separately from the latest provider snapshot.
+    # Provider observations must never overwrite it during drift detection.
+    application_snapshot: Mapped[dict[str, object] | None] = mapped_column(JSONB)
     management_state: Mapped[str] = mapped_column(String(30), default="OBSERVED")
     revision: Mapped[int] = mapped_column(Integer, default=1)
     last_seen_sync_run_id: Mapped[UUID | None] = mapped_column(ForeignKey("sync_runs.id"))
@@ -357,6 +372,56 @@ class AccessPolicy(SyncedResourceMixin, Base):
         ),
         CheckConstraint("revision >= 1", name="ck_access_policies_revision"),
         Index("ix_access_policies_org_manager", "organization_id", "manager_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    domain_id: Mapped[UUID] = mapped_column(ForeignKey("provider_domains.id"), index=True)
+
+
+class IntrusionPolicy(SyncedResourceMixin, Base):
+    __tablename__ = "intrusion_policies"
+    __table_args__ = (
+        UniqueConstraint("manager_id", "native_id"),
+        CheckConstraint(
+            "management_state IN ('OBSERVED','UNMANAGED','PENDING_ADOPTION',"
+            "'MANAGED','DRIFTED','MISSING','CONFLICT')",
+            name="ck_intrusion_policies_management_state",
+        ),
+        Index("ix_intrusion_policies_org_manager", "organization_id", "manager_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    domain_id: Mapped[UUID] = mapped_column(ForeignKey("provider_domains.id"), index=True)
+    default_variable_set_native_id: Mapped[str | None] = mapped_column(String(200))
+
+
+class VariableSet(SyncedResourceMixin, Base):
+    __tablename__ = "variable_sets"
+    __table_args__ = (
+        UniqueConstraint("manager_id", "native_id"),
+        CheckConstraint(
+            "management_state IN ('OBSERVED','UNMANAGED','PENDING_ADOPTION',"
+            "'MANAGED','DRIFTED','MISSING','CONFLICT')",
+            name="ck_variable_sets_management_state",
+        ),
+        Index("ix_variable_sets_org_manager", "organization_id", "manager_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    domain_id: Mapped[UUID] = mapped_column(ForeignKey("provider_domains.id"), index=True)
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class FilePolicy(SyncedResourceMixin, Base):
+    __tablename__ = "file_policies"
+    __table_args__ = (
+        UniqueConstraint("manager_id", "native_id"),
+        CheckConstraint(
+            "management_state IN ('OBSERVED','UNMANAGED','PENDING_ADOPTION',"
+            "'MANAGED','DRIFTED','MISSING','CONFLICT')",
+            name="ck_file_policies_management_state",
+        ),
+        Index("ix_file_policies_org_manager", "organization_id", "manager_id"),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
@@ -422,12 +487,20 @@ class AccessRule(SyncedResourceMixin, Base):
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     policy_id: Mapped[UUID] = mapped_column(ForeignKey("access_policies.id"), index=True)
     category_id: Mapped[UUID | None] = mapped_column(ForeignKey("rule_categories.id"), index=True)
+    intrusion_policy_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("intrusion_policies.id"), index=True
+    )
+    variable_set_id: Mapped[UUID | None] = mapped_column(ForeignKey("variable_sets.id"), index=True)
+    file_policy_id: Mapped[UUID | None] = mapped_column(ForeignKey("file_policies.id"), index=True)
     owner_group_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("application_groups.id"), index=True
     )
     created_by_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"), index=True)
     modified_by_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"), index=True)
     action: Mapped[str] = mapped_column(String(30))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    log_begin: Mapped[bool] = mapped_column(Boolean, default=False)
+    log_end: Mapped[bool] = mapped_column(Boolean, default=False)
     position: Mapped[int] = mapped_column(Integer)
 
 
@@ -443,8 +516,8 @@ class FirewallObject(SyncedResourceMixin, Base):
         ),
         CheckConstraint("revision >= 1", name="ck_firewall_objects_revision"),
         CheckConstraint(
-            "object_type IN ('NETWORK','NETWORK_GROUP','PORT_SERVICE','URL',"
-            "'APPLICATION','APPLICATION_FILTER')",
+            "object_type IN ('NETWORK','NETWORK_GROUP','PORT_SERVICE','PORT_SERVICE_GROUP',"
+            "'URL','URL_GROUP','APPLICATION','APPLICATION_FILTER')",
             name="ck_firewall_objects_type",
         ),
         CheckConstraint(
@@ -724,7 +797,7 @@ class IpRangeGrant(TimestampMixin, Base):
     organization_id: Mapped[UUID] = mapped_column(ForeignKey("organizations.id"), index=True)
     group_id: Mapped[UUID] = mapped_column(index=True)
     policy_id: Mapped[UUID] = mapped_column(index=True)
-    network: Mapped[str] = mapped_column(String(64))
+    network: Mapped[str] = mapped_column(String(128))
     ip_version: Mapped[int] = mapped_column(Integer)
     revision: Mapped[int] = mapped_column(Integer, default=1)
 
@@ -904,6 +977,8 @@ class DriftRecord(TimestampMixin, Base):
     status: Mapped[str] = mapped_column(String(30))
     previous_fingerprint: Mapped[str | None] = mapped_column(String(200))
     observed_fingerprint: Mapped[str | None] = mapped_column(String(200))
+    previous_snapshot: Mapped[dict[str, object] | None] = mapped_column(JSONB)
+    observed_snapshot: Mapped[dict[str, object] | None] = mapped_column(JSONB)
     details: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict)
 
 

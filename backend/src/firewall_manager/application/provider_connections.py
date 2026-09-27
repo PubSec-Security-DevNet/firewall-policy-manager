@@ -467,11 +467,14 @@ class ProviderConnectionService:
         self,
         principal: Principal,
         connection_id: UUID,
-        dispatch: Callable[[UUID], object],
+        dispatch: Callable[[UUID, str], object],
+        mode: str = "FULL",
     ) -> None:
         self._require_admin(principal)
-        self._repository.request_sync(principal.organization_id, principal.user_id, connection_id)
-        dispatch(connection_id)
+        self._repository.request_sync(
+            principal.organization_id, principal.user_id, connection_id, mode
+        )
+        dispatch(connection_id, mode)
 
     @staticmethod
     def guidance(provider: ProviderKind) -> dict[str, object]:
@@ -536,6 +539,9 @@ class ProviderConnectionService:
         interval = int(str(values.get("sync_interval_minutes", 60)))
         if not 5 <= interval <= 10080:
             raise InvalidInputError
+        applications_interval = int(str(values.get("applications_sync_interval_minutes", 1440)))
+        if not 60 <= applications_interval <= 43200:
+            raise InvalidInputError
         if provider is ProviderKind.FMC:
             endpoint = normalize_fmc_endpoint(str(values.get("base_endpoint", "")))
             username = str(values.get("username", "")).strip()
@@ -562,6 +568,7 @@ class ProviderConnectionService:
                     "credential_type": "USERNAME_PASSWORD",
                     "credential_username": username,
                     "sync_interval_minutes": interval,
+                    "applications_sync_interval_minutes": applications_interval,
                 },
                 credential,
             )
@@ -580,15 +587,20 @@ class ProviderConnectionService:
                 "credential_type": "BEARER_TOKEN",
                 "credential_username": None,
                 "sync_interval_minutes": interval,
+                "applications_sync_interval_minutes": applications_interval,
             },
             {"token": token},
         )
 
     @staticmethod
-    def _validated_update_values(
+    def _validated_update_values(  # noqa: PLR0912
         provider: ProviderKind, values: dict[str, object]
     ) -> dict[str, object]:
-        allowed = {"display_name", "sync_interval_minutes"}
+        allowed = {
+            "display_name",
+            "sync_interval_minutes",
+            "applications_sync_interval_minutes",
+        }
         if provider is ProviderKind.FMC:
             allowed.update({"base_endpoint", "tls_mode"})
         else:
@@ -605,6 +617,11 @@ class ProviderConnectionService:
             if not 5 <= interval <= 10080:
                 raise InvalidInputError
             result["sync_interval_minutes"] = interval
+        if "applications_sync_interval_minutes" in result:
+            applications_interval = int(str(result["applications_sync_interval_minutes"]))
+            if not 60 <= applications_interval <= 43200:
+                raise InvalidInputError
+            result["applications_sync_interval_minutes"] = applications_interval
         if "base_endpoint" in result:
             result["base_endpoint"] = normalize_fmc_endpoint(str(result["base_endpoint"]))
         if "tls_mode" in result:

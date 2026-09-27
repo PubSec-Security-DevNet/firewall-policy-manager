@@ -30,6 +30,8 @@ export function useDelegatedWorkspace(
   groups: ActiveGroup[],
   preferredGroupId?: string,
   preferredPolicyId?: string,
+  includeApplications = true,
+  includeRules = true,
 ) {
   const initialGroupId = groups.some((group) => group.id === preferredGroupId)
     ? (preferredGroupId ?? '')
@@ -71,7 +73,12 @@ export function useDelegatedWorkspace(
           activePolicyId: policyId,
           policies,
         });
-        return loadDelegatedContext(activeGroupId, policyId).then((context) => {
+        return loadDelegatedContext(
+          activeGroupId,
+          policyId,
+          includeApplications,
+          includeRules,
+        ).then((context) => {
           if (current && generation === requestGeneration.current) {
             setState({
               status: 'ready',
@@ -90,16 +97,16 @@ export function useDelegatedWorkspace(
     return () => {
       current = false;
     };
-  }, [activeGroupId]);
+  }, [activeGroupId, includeApplications, includeRules]);
 
   useEffect(() => {
-    if (!activeGroupId || !activePolicyId) return;
+    if (!activeGroupId || !activePolicyId || state.status !== 'ready') return;
     let current = true;
     let refreshing = false;
     const refresh = () => {
       if (refreshing) return;
       refreshing = true;
-      void loadDelegatedContext(activeGroupId, activePolicyId)
+      void loadDelegatedContext(activeGroupId, activePolicyId, includeApplications, includeRules)
         .then((context) => {
           if (!current) return;
           setState((existing) =>
@@ -122,7 +129,7 @@ export function useDelegatedWorkspace(
       current = false;
       window.clearInterval(timer);
     };
-  }, [activeGroupId, activePolicyId]);
+  }, [activeGroupId, activePolicyId, includeApplications, includeRules, state.status]);
 
   const selectGroup = (groupId: string) => {
     // Clear every resource from the previous Group before loading the next context.
@@ -148,7 +155,7 @@ export function useDelegatedWorkspace(
         activePolicyId: policyId,
         policies,
       });
-      void loadDelegatedContext(activeGroupId, policyId)
+      void loadDelegatedContext(activeGroupId, policyId, includeApplications, includeRules)
         .then((context) => {
           if (generation !== requestGeneration.current) return;
           setState({

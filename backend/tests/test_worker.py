@@ -58,7 +58,7 @@ def test_stale_queue_message_cannot_restart_a_disabled_connection(
     class DisabledConnectionRepository:
         finished = False
 
-        def mark_sync_running(self, _connection_id: object) -> None:
+        def mark_sync_running(self, _connection_id: object, _mode: str = "FULL") -> None:
             raise InvalidChangeSetStateError
 
         def mark_sync_finished(self, *_args: object) -> None:

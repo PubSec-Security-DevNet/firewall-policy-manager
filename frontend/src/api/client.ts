@@ -8,6 +8,24 @@ export type Policy = components['schemas']['PolicyResponse'];
 export type Rule = components['schemas']['RuleResponse'];
 export type FirewallObject = components['schemas']['ObjectResponse'];
 export type ProviderStatus = components['schemas']['ProviderStatusResponse'];
+export interface SynchronizationDiscrepancy {
+  id: string;
+  manager_id: string;
+  connection_id: string | null;
+  provider: 'fmc' | 'scc';
+  name: string;
+  policy_id: string | null;
+  provider_only: boolean;
+  resource_type: string;
+  resource_id: string;
+  state: string;
+  previous_fingerprint: string | null;
+  observed_fingerprint: string | null;
+  previous_snapshot: Record<string, unknown>;
+  observed_snapshot: Record<string, unknown>;
+  details: Record<string, unknown>;
+  created_at: string;
+}
 export type ActiveGroup = components['schemas']['ActiveGroupResponse'];
 export type DelegatedPolicy = components['schemas']['DelegatedPolicySummary'];
 export type DelegatedContext = components['schemas']['DelegatedContextResponse'];
@@ -78,6 +96,11 @@ export interface ProviderConnection {
   last_error_correlation_id: string | null;
   certificate_info: Record<string, string>;
   sync_interval_minutes: number;
+  applications_sync_interval_minutes: number;
+  applications_sync_status: string | null;
+  applications_last_sync: string | null;
+  applications_last_successful_sync: string | null;
+  applications_next_sync_at: string | null;
   write_enabled: boolean;
   write_validation_mode: boolean;
   version_family_tested: boolean;
@@ -207,11 +230,17 @@ export async function setProviderConnectionWriteGate(
   );
 }
 
-export async function requestProviderSync(connectionId: string): Promise<void> {
-  await request(`/api/v1/admin/provider-connections/${encodeURIComponent(connectionId)}/sync`, {
-    method: 'POST',
-    body: '{}',
-  });
+export async function requestProviderSync(
+  connectionId: string,
+  mode: 'FULL' | 'NON_APPLICATIONS' | 'APPLICATIONS' = 'FULL',
+): Promise<void> {
+  await request(
+    `/api/v1/admin/provider-connections/${encodeURIComponent(connectionId)}/sync?mode=${mode}`,
+    {
+      method: 'POST',
+      body: '{}',
+    },
+  );
 }
 
 export async function rotateProviderCredential(
@@ -249,9 +278,11 @@ export async function loadDelegatedPolicies(activeGroupId: string): Promise<Dele
 export async function loadDelegatedContext(
   activeGroupId: string,
   policyId: string,
+  includeApplications = true,
+  includeRules = true,
 ): Promise<DelegatedContext> {
   return get<DelegatedContext>(
-    `/api/v1/delegated/context?active_group_id=${encodeURIComponent(activeGroupId)}&policy_id=${encodeURIComponent(policyId)}`,
+    `/api/v1/delegated/context?active_group_id=${encodeURIComponent(activeGroupId)}&policy_id=${encodeURIComponent(policyId)}&include_applications=${includeApplications}&include_rules=${includeRules}`,
   );
 }
 
@@ -335,6 +366,23 @@ export async function loadChangeSets(activeGroupId: string): Promise<ChangeSet[]
   );
 }
 
+export async function loadAdminChangeSets(): Promise<ChangeSet[]> {
+  return get<ChangeSet[]>('/api/v1/admin/changesets');
+}
+
+export async function deleteAdminChangeSet(changeSetId: string): Promise<void> {
+  await request<void>(`/api/v1/admin/changesets/${encodeURIComponent(changeSetId)}`, {
+    method: 'DELETE',
+  });
+}
+
+export async function deleteChangeSet(activeGroupId: string, changeSetId: string): Promise<void> {
+  await request<void>(
+    `/api/v1/changesets/${encodeURIComponent(changeSetId)}?active_group_id=${encodeURIComponent(activeGroupId)}`,
+    { method: 'DELETE' },
+  );
+}
+
 export async function createChangeSet(
   activeGroupId: string,
   policyId: string,
@@ -412,23 +460,47 @@ export interface Inventory {
   rules: Rule[];
   objects: FirewallObject[];
   statuses: ProviderStatus[];
+  discrepancies: SynchronizationDiscrepancy[];
+}
+
+export async function loadSynchronizationDiscrepancies(): Promise<SynchronizationDiscrepancy[]> {
+  return get<SynchronizationDiscrepancy[]>('/api/v1/synchronization/discrepancies');
+}
+
+export async function acceptProviderState(driftId: string): Promise<{ id: string; state: string }> {
+  return request<{ id: string; state: string }>(
+    `/api/v1/synchronization/discrepancies/${encodeURIComponent(driftId)}/accept-provider-state`,
+    { method: 'POST', body: '{}' },
+  );
+}
+
+export async function restoreProviderState(
+  driftId: string,
+  activeGroupId: string,
+): Promise<{ action: string; drift_id: string; state: string; change_set_id: string | null }> {
+  return request(
+    `/api/v1/synchronization/discrepancies/${encodeURIComponent(driftId)}/restore-proposal`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ active_group_id: activeGroupId }),
+    },
+  );
 }
 
 export async function loadInventory(): Promise<Inventory> {
-  const [managerPage, policyPage, rulePage, objectPage, statuses] = await Promise.all([
-    get<components['schemas']['PageResponse_ManagerResponse_']>(
-      '/api/v1/firewall-managers?limit=100',
-    ),
+  const [policyPage, rulePage, objectPage, statuses] = await Promise.all([
     get<components['schemas']['PageResponse_PolicyResponse_']>('/api/v1/policies?limit=100'),
     get<components['schemas']['PageResponse_RuleResponse_']>('/api/v1/rules?limit=100'),
     get<components['schemas']['PageResponse_ObjectResponse_']>('/api/v1/objects?limit=100'),
     get<ProviderStatus[]>('/api/v1/providers/status'),
   ]);
   return {
-    managers: managerPage.items,
+    // Sync & drift does not render manager inventory; provider status is its source of truth.
+    managers: [],
     policies: policyPage.items,
     rules: rulePage.items,
     objects: objectPage.items,
     statuses,
+    discrepancies: [],
   };
 }

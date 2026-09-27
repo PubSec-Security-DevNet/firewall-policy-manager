@@ -1,6 +1,6 @@
 """Thin versioned REST routes."""
 
-from typing import Annotated, cast
+from typing import Annotated, Literal, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -54,8 +54,11 @@ from firewall_manager.api.schemas import (
     ProviderLifecycleRequest,
     ProviderStatusResponse,
     ProviderWriteGateRequest,
+    ReconciliationActionResponse,
+    ReconciliationRestoreRequest,
     RuleResponse,
     SessionResponse,
+    SynchronizationDiscrepancyResponse,
     UserCreateRequest,
     UserRoleUpdateRequest,
 )
@@ -67,6 +70,7 @@ from firewall_manager.application.inventory import InventoryService
 from firewall_manager.application.overview import OverviewService
 from firewall_manager.application.ports import ProviderFactory, ProviderReader
 from firewall_manager.application.provider_connections import ProviderConnectionService
+from firewall_manager.application.reconciliation import ReconciliationService
 from firewall_manager.domain.models import ChangeOperationKind, DelegatedPolicyContext, ProviderKind
 from firewall_manager.providers.transactions import (
     HttpMockTransactionExecutor,
@@ -152,15 +156,19 @@ async def set_default_context(
 
 
 @router.get("/delegated/context", tags=["delegated"])
-async def delegated_context(
+async def delegated_context(  # noqa: PLR0913, PLR0917 -- explicit delegated context filters
     request: Request,
     active_group_id: UUID,
     policy_id: UUID,
     principal: PrincipalDependency,
     repository: AuthorizationRepositoryDependency,
+    include_applications: bool = True,
+    include_rules: bool = True,
 ) -> DelegatedContextResponse:
     result = DelegatedPolicyService(repository).context_view(
         DelegatedPolicyContext(principal, active_group_id, policy_id),
+        include_applications=include_applications,
+        include_rules=include_rules,
         interface="rest",
         correlation_id=getattr(request.state, "correlation_id", None),
     )
@@ -233,6 +241,18 @@ async def get_change_set(
         principal, active_group_id, change_set_id
     )
     return ChangeSetResponse.model_validate(result)
+
+
+@router.get("/admin/changesets", tags=["administration"])
+async def admin_change_sets(
+    principal: PrincipalDependency,
+    authorization_repository: AuthorizationRepositoryDependency,
+    change_set_repository: ChangeSetRepositoryDependency,
+) -> list[ChangeSetResponse]:
+    result = _change_set_service(authorization_repository, change_set_repository).list_for_admin(
+        principal
+    )
+    return [ChangeSetResponse.model_validate(item) for item in result]
 
 
 @router.patch("/changesets/{change_set_id}", tags=["change-sets"])
@@ -448,6 +468,18 @@ async def delete_change_set(
     )
 
 
+@router.delete("/admin/changesets/{change_set_id}", status_code=204, tags=["administration"])
+async def admin_delete_change_set(
+    change_set_id: UUID,
+    principal: PrincipalDependency,
+    authorization_repository: AuthorizationRepositoryDependency,
+    change_set_repository: ChangeSetRepositoryDependency,
+) -> None:
+    _change_set_service(authorization_repository, change_set_repository).delete_for_admin(
+        principal, change_set_id
+    )
+
+
 @router.get("/admin/authorization", tags=["administration"])
 async def administration_snapshot(
     principal: PrincipalDependency,
@@ -537,6 +569,7 @@ async def create_provider_connection(
         "token": body.token.get_secret_value() if body.token else None,
         "ca_certificate": body.ca_certificate.get_secret_value() if body.ca_certificate else None,
         "sync_interval_minutes": body.sync_interval_minutes,
+        "applications_sync_interval_minutes": body.applications_sync_interval_minutes,
     }
     result = _provider_connection_service(
         authorization_repository, connection_repository, secret_store
@@ -669,6 +702,7 @@ async def request_provider_connection_sync(  # noqa: PLR0913, PLR0917 -- FastAPI
     connection_repository: ProviderConnectionRepositoryDependency,
     secret_store: SecretStoreDependency,
     dispatch: ProviderSyncDispatcherDependency,
+    mode: Literal["FULL", "NON_APPLICATIONS", "APPLICATIONS"] = "FULL",
 ) -> dict[str, str]:
     _provider_connection_service(
         authorization_repository, connection_repository, secret_store
@@ -676,6 +710,7 @@ async def request_provider_connection_sync(  # noqa: PLR0913, PLR0917 -- FastAPI
         principal,
         connection_id,
         dispatch,
+        mode,
     )
     return {"status": "QUEUED", "connection_id": str(connection_id)}
 
@@ -841,3 +876,46 @@ async def provider_status(
 ) -> list[ProviderStatusResponse]:
     result = InventoryService(repository).provider_status(principal)
     return [ProviderStatusResponse.model_validate(item) for item in result]
+
+
+@router.get("/synchronization/discrepancies", tags=["inventory"])
+async def synchronization_discrepancies(  # noqa: PLR0913, PLR0917 -- bounded filter surface
+    principal: PrincipalDependency,
+    repository: InventoryRepositoryDependency,
+    manager_id: UUID | None = None,
+    policy_id: UUID | None = None,
+    resource_type: Annotated[str | None, Query(max_length=50)] = None,
+    state: Annotated[str | None, Query(max_length=30)] = None,
+    connection_id: UUID | None = None,
+) -> list[SynchronizationDiscrepancyResponse]:
+    result = InventoryService(repository).synchronization_discrepancies(
+        principal, manager_id, policy_id, resource_type, state, connection_id
+    )
+    return [SynchronizationDiscrepancyResponse.model_validate(item) for item in result]
+
+
+@router.post("/synchronization/discrepancies/{drift_id}/accept-provider-state", tags=["inventory"])
+async def accept_provider_state(
+    drift_id: UUID,
+    principal: PrincipalDependency,
+    repository: InventoryRepositoryDependency,
+) -> dict[str, object]:
+    return InventoryService(repository).accept_provider_state(principal, drift_id)
+
+
+@router.post(
+    "/synchronization/discrepancies/{drift_id}/restore-proposal",
+    tags=["inventory"],
+)
+async def restore_provider_state_proposal(  # noqa: PLR0913, PLR0917 -- explicit security dependencies
+    drift_id: UUID,
+    body: ReconciliationRestoreRequest,
+    principal: PrincipalDependency,
+    inventory_repository: InventoryRepositoryDependency,
+    authorization_repository: AuthorizationRepositoryDependency,
+    change_set_repository: ChangeSetRepositoryDependency,
+) -> ReconciliationActionResponse:
+    result = ReconciliationService(
+        inventory_repository, authorization_repository, change_set_repository
+    ).restore(principal, drift_id, body.active_group_id)
+    return ReconciliationActionResponse.model_validate(result)

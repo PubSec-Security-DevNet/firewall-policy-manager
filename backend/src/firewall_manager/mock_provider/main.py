@@ -25,6 +25,7 @@ class DiscoveryResponse(BaseModel):
     provider_version: str
     policy_count: int
     object_count: int
+    evidence_profile: Literal["mock", "real"]
     writable: Literal[True] = True
 
 
@@ -83,10 +84,23 @@ async def reconcile_transaction(external_operation_id: str) -> dict[str, object]
 
 @app.get("/api/v1/resources/{resource}")
 async def resources(
-    resource: Literal["domains", "devices", "policies", "categories", "rules", "objects", "zones"],
+    resource: Literal[
+        "domains",
+        "devices",
+        "policies",
+        "categories",
+        "intrusion_policies",
+        "variable_sets",
+        "rules",
+        "objects",
+        "zones",
+        "file_policies",
+    ],
     parent: str | None = None,
     cursor: str | None = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 100,
+    applications_only: bool = False,
+    include_applications: bool = True,
 ) -> dict[str, object]:
     page_request = PageRequest(limit=limit, cursor=cursor)
     try:
@@ -100,12 +114,23 @@ async def resources(
             page = await provider.policies(parent, page_request)
         elif resource == "categories":
             page = await provider.categories(parent, page_request)
+        elif resource == "intrusion_policies":
+            page = await provider.intrusion_policies(parent, page_request)
+        elif resource == "variable_sets":
+            page = await provider.variable_sets(parent, page_request)
+        elif resource == "file_policies":
+            page = await provider.file_policies(parent, page_request)
         elif resource == "rules":
             page = await provider.rules(parent, page_request)
         elif resource == "zones":
             page = await provider.zones(parent, page_request)
         else:
-            page = await provider.objects(parent, page_request)
+            page = await provider.objects(
+                parent,
+                page_request,
+                applications_only=applications_only,
+                include_applications=include_applications,
+            )
     except ProviderPaginationError as exc:
         raise HTTPException(status_code=424, detail="page unavailable") from exc
     return {"items": [asdict(item) for item in page.items], "next_cursor": page.next_cursor}

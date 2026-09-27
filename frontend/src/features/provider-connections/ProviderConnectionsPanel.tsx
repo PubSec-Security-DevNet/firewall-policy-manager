@@ -67,12 +67,20 @@ const regions = [
 export function ProviderConnectionsPanel() {
   const [state, setState] = useState<State>({ status: 'loading' });
   const [createOpened, setCreateOpened] = useState(false);
-  const load = useCallback(() => {
-    void loadProviderConnections()
-      .then((connections) => setState({ status: 'ready', connections }))
-      .catch((error: unknown) => setState(toError(error)));
+  const loadConnections = useCallback(async (): Promise<ProviderConnection[]> => {
+    try {
+      const connections = await loadProviderConnections();
+      setState({ status: 'ready', connections });
+      return connections;
+    } catch (error: unknown) {
+      setState(toError(error));
+      return [];
+    }
   }, []);
-  useEffect(load, [load]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => void loadConnections(), 0);
+    return () => window.clearTimeout(timer);
+  }, [loadConnections]);
 
   if (state.status === 'loading') return <AppLoadingState label="Loading provider connections" />;
   if (state.status === 'error') {
@@ -147,7 +155,11 @@ export function ProviderConnectionsPanel() {
               />
             )}
             {state.connections.map((connection) => (
-              <ConnectionCard key={connection.id} connection={connection} onChanged={load} />
+              <ConnectionCard
+                key={connection.id}
+                connection={connection}
+                onChanged={loadConnections}
+              />
             ))}
           </Stack>
         </AppSection>
@@ -166,7 +178,12 @@ export function ProviderConnectionsPanel() {
         size="xl"
         centered
       >
-        <ConnectionWizard onSaved={load} onCompleted={() => setCreateOpened(false)} />
+        <ConnectionWizard
+          onSaved={() => {
+            void loadConnections();
+          }}
+          onCompleted={() => setCreateOpened(false)}
+        />
       </Dialog>
     </Stack>
   );
@@ -375,7 +392,7 @@ function ConnectionCard({
   onChanged,
 }: {
   connection: ProviderConnection;
-  onChanged: () => void;
+  onChanged: () => Promise<ProviderConnection[]>;
 }) {
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
@@ -389,6 +406,9 @@ function ConnectionCard({
   const [newRegion, setNewRegion] = useState<string | null>(connection.region);
   const [newTlsMode, setNewTlsMode] = useState<string | null>(connection.tls_mode);
   const [newSyncInterval, setNewSyncInterval] = useState(String(connection.sync_interval_minutes));
+  const [newApplicationsSyncInterval, setNewApplicationsSyncInterval] = useState(
+    String(connection.applications_sync_interval_minutes),
+  );
   const [editing, setEditing] = useState(false);
 
   const run = (operation: () => Promise<unknown>, success: string) => {
@@ -397,7 +417,7 @@ function ConnectionCard({
     void operation()
       .then(() => {
         setMessage(success);
-        onChanged();
+        void onChanged();
       })
       .catch((error: unknown) => setMessage(errorMessage(error)))
       .finally(() => setBusy(false));
@@ -422,6 +442,7 @@ function ConnectionCard({
     const values = {
       display_name: newName,
       sync_interval_minutes: Number(newSyncInterval),
+      applications_sync_interval_minutes: Number(newApplicationsSyncInterval),
       ...(connection.provider_type === 'fmc'
         ? { base_endpoint: newEndpoint, tls_mode: newTlsMode }
         : { region: newRegion }),
@@ -434,6 +455,7 @@ function ConnectionCard({
   const configurationChanged =
     newName !== connection.display_name ||
     Number(newSyncInterval) !== connection.sync_interval_minutes ||
+    Number(newApplicationsSyncInterval) !== connection.applications_sync_interval_minutes ||
     (connection.provider_type === 'fmc'
       ? newEndpoint !== connection.base_endpoint || newTlsMode !== connection.tls_mode
       : newRegion !== connection.region);
@@ -456,6 +478,44 @@ function ConnectionCard({
     if (!window.confirm('Retire this connection? Historical inventory and audit records remain.'))
       return;
     run(() => setProviderConnectionLifecycle(connection, 'RETIRED'), 'Connection retired.');
+  };
+  const sync = async (mode: 'FULL' | 'NON_APPLICATIONS' = 'FULL') => {
+    setBusy(true);
+    setMessage('Sync queued. Waiting for the worker to start…');
+    try {
+      await requestProviderSync(connection.id, mode);
+      for (let attempt = 0; attempt < 120; attempt += 1) {
+        await new Promise((resolve) => window.setTimeout(resolve, 1000));
+        const connections = await onChanged();
+        const current = connections.find((item) => item.id === connection.id);
+        const completed = current?.sync_status === 'COMPLETED';
+        const failed = current?.sync_status === 'FAILED';
+        if (completed) {
+          setMessage(`Sync completed at ${formatDate(current?.last_successful_sync ?? null)}.`);
+          return;
+        }
+        if (failed || (mode === 'FULL' && current?.last_error_code)) {
+          setMessage(
+            `Sync failed: ${humanize(current?.last_error_code ?? 'PROVIDER_SYNC_FAILED')}.`,
+          );
+          return;
+        }
+        setMessage(
+          current?.sync_status === 'RUNNING'
+            ? 'Sync is running. Refreshing provider state…'
+            : 'Sync queued. Waiting for the worker to start…',
+        );
+      }
+      setMessage('Sync is still running. The status badge will update when it finishes.');
+    } catch (error: unknown) {
+      setMessage(
+        error instanceof ApiError
+          ? `Sync could not be queued: ${error.message}`
+          : 'Sync could not be queued.',
+      );
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -480,6 +540,10 @@ function ConnectionCard({
         <Group gap="xs" className="fm-provider-statuses">
           <AppStatusBadge value={connection.lifecycle} />
           <AppStatusBadge value={connection.connection_status} />
+          <AppStatusBadge
+            value={connection.sync_status ?? 'NEVER_SYNCED'}
+            label={connection.sync_status ? humanize(connection.sync_status) : 'Never synced'}
+          />
           {connection.compatibility_warning && (
             <AppStatusBadge value="WARNING" label="Version untested" />
           )}
@@ -507,10 +571,14 @@ function ConnectionCard({
           label="Sync schedule"
           value={`Every ${connection.sync_interval_minutes} minutes`}
         />
+        <ProviderFact
+          label="Application catalog schedule"
+          value={`Every ${connection.applications_sync_interval_minutes} minutes`}
+        />
       </div>
-      {connection.last_error_message && (
+      {(connection.last_error_message || connection.last_error_code) && (
         <Alert color="red" mt="sm">
-          {connection.last_error_message}{' '}
+          {connection.last_error_message ?? humanize(connection.last_error_code ?? 'SYNC_FAILED')}{' '}
           {connection.last_error_correlation_id
             ? `Reference: ${connection.last_error_correlation_id}`
             : ''}
@@ -579,9 +647,21 @@ function ConnectionCard({
             intent="secondary"
             leftSection={<IconRefresh size={14} />}
             disabled={connection.lifecycle !== 'ACTIVE'}
-            onClick={() => run(() => requestProviderSync(connection.id), 'Sync queued.')}
+            loading={busy}
+            onClick={() => {
+              void sync('FULL');
+            }}
           >
-            Sync now
+            Sync all
+          </ActionButton>
+          <ActionButton
+            intent="secondary"
+            leftSection={<IconRefresh size={14} />}
+            disabled={connection.lifecycle !== 'ACTIVE'}
+            loading={busy}
+            onClick={() => void sync('NON_APPLICATIONS')}
+          >
+            Sync without applications
           </ActionButton>
         </Group>
         <Group gap="xs" wrap="wrap">
@@ -612,6 +692,15 @@ function ConnectionCard({
               label="Display name"
               value={newName}
               onChange={(event) => setNewName(event.currentTarget.value)}
+            />
+            <TextInput
+              label="Application catalog sync interval (minutes)"
+              description="Use a longer cadence for the provider application catalog. Minimum 60 minutes."
+              type="number"
+              min={60}
+              max={43200}
+              value={newApplicationsSyncInterval}
+              onChange={(event) => setNewApplicationsSyncInterval(event.currentTarget.value)}
             />
             {connection.provider_type === 'fmc' ? (
               <>
@@ -739,6 +828,14 @@ function ProviderTokens({
 function formatDate(value: string | null) {
   return value ? new Date(value).toLocaleString() : 'Never';
 }
+
+function humanize(value: string) {
+  return value
+    .toLowerCase()
+    .replaceAll('_', ' ')
+    .replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
 function errorMessage(error: unknown) {
   return error instanceof ApiError
     ? `${error.message} Reference: ${error.correlationId}`

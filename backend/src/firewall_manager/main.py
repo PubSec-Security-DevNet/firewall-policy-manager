@@ -28,9 +28,9 @@ from firewall_manager.security.redaction import SecretRedactionFilter
 from firewall_manager.worker.tasks import execute_change_set, synchronize_provider_connection
 
 
-def dispatch_provider_sync(connection_id: UUID) -> object:
+def dispatch_provider_sync(connection_id: UUID, mode: str = "FULL") -> object:
     """Publish one connection UUID after the repository has committed its queue state."""
-    return synchronize_provider_connection.send(str(connection_id))
+    return synchronize_provider_connection.send(str(connection_id), mode)
 
 
 def dispatch_change_set_execution(
@@ -67,9 +67,13 @@ def create_app() -> FastAPI:
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["Content-Type", "X-Correlation-ID", "X-Dev-User"],
     )
-    providers = (
-        FmcProviderReader(str(settings.fmc_base_url)),
-        SccProviderReader(str(settings.scc_base_url)),
+    providers = tuple(
+        reader
+        for reader, base_url in (
+            (FmcProviderReader(str(settings.fmc_base_url)), settings.fmc_base_url),
+            (SccProviderReader(str(settings.scc_base_url)), settings.scc_base_url),
+        )
+        if "mock" not in str(base_url).casefold()
     )
     application.dependency_overrides[get_provider_readers] = lambda: providers
     application.dependency_overrides[get_provider_factory] = lambda: build_real_provider

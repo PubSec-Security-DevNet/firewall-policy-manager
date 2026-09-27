@@ -7,6 +7,7 @@ from uuid import UUID
 
 import dramatiq
 from redis import Redis
+from sqlalchemy import select
 
 from firewall_manager.application.changesets import ChangeSetService
 from firewall_manager.application.errors import ApplicationError
@@ -15,7 +16,7 @@ from firewall_manager.config import get_settings
 from firewall_manager.domain.models import ChangeSetState, Principal
 from firewall_manager.persistence.changesets import SqlChangeSetRepository
 from firewall_manager.persistence.database import new_session
-from firewall_manager.persistence.models import ChangeSet, User
+from firewall_manager.persistence.models import ChangeSet, FirewallManager, User
 from firewall_manager.persistence.provider_connections import SqlProviderConnectionRepository
 from firewall_manager.persistence.repositories import SqlAuthorizationRepository, SqlSyncRepository
 from firewall_manager.persistence.secrets import EncryptedDatabaseSecretStore
@@ -38,10 +39,10 @@ def record_worker_heartbeat() -> None:
         redis.close()
 
 
-@dramatiq.actor(max_retries=1, min_backoff=5000)
-def synchronize_provider_connection(connection_id: str) -> None:
-    """Run one connection-isolated, read-only sync outside the web request process."""
-    asyncio.run(_synchronize_provider_connection(UUID(connection_id)))
+@dramatiq.actor(max_retries=0)
+def synchronize_provider_connection(connection_id: str, mode: str = "FULL") -> None:
+    """Run one connection-isolated sync; retries are explicit to avoid duplicate full imports."""
+    asyncio.run(_synchronize_provider_connection(UUID(connection_id), mode))
 
 
 @dramatiq.actor(max_retries=0)
@@ -102,8 +103,25 @@ async def _execute_change_set(
             GuardedProviderTransactionExecutor(secrets, build_real_provider),
         )
         try:
-            await service.execute(principal, group_id, change_set_id, queued=True)
+            execution = await service.execute(principal, group_id, change_set_id, queued=True)
             session.commit()
+            # A successful or ambiguous write is followed by a fresh provider read. The write
+            # executor's response is not treated as the application's final inventory state.
+            manager_ids = {
+                UUID(str(item["manager_id"]))
+                for item in cast("list[dict[str, object]]", execution.get("transactions", []))
+                if item.get("manager_id")
+            }
+            connection_ids = list(
+                session.scalars(
+                    select(FirewallManager.provider_connection_id).where(
+                        FirewallManager.id.in_(manager_ids),
+                        FirewallManager.provider_connection_id.is_not(None),
+                    )
+                )
+            )
+            for connection_id in connection_ids:
+                synchronize_provider_connection.send(str(connection_id))
         except ApplicationError as exc:
             if exc.details.get("code") == "CHANGE_SET_ALREADY_CLAIMED":
                 # Redis may redeliver while the original worker still owns the durable
@@ -172,12 +190,12 @@ async def _execute_change_set(
             raise
 
 
-async def _synchronize_provider_connection(connection_id: UUID) -> None:
+async def _synchronize_provider_connection(connection_id: UUID, mode: str = "FULL") -> None:
     settings = get_settings()
     with new_session() as session:
         connections = SqlProviderConnectionRepository(session)
         try:
-            organization_id, manager_id = connections.mark_sync_running(connection_id)
+            organization_id, manager_id = connections.mark_sync_running(connection_id, mode)
         except ApplicationError:
             # A disabled, retired, or removed connection is a terminal stale queue message.
             session.rollback()
@@ -207,20 +225,23 @@ async def _synchronize_provider_connection(connection_id: UUID) -> None:
             provider = build_real_provider(context, credential, capabilities)
             try:
                 result = await SynchronizationService(SqlSyncRepository(session)).synchronize(
-                    manager_id, provider
+                    manager_id,
+                    provider,
+                    applications_only=mode == "APPLICATIONS",
+                    include_applications=mode == "FULL",
                 )
             finally:
                 await provider.aclose()
             error_code = None if result.status.value == "COMPLETED" else "PROVIDER_SYNC_FAILED"
-            connections.mark_sync_finished(connection_id, result.status.value, error_code)
+            connections.mark_sync_finished(connection_id, result.status.value, error_code, mode)
         except ApplicationError as exc:
             session.rollback()
-            connections.mark_sync_finished(connection_id, "FAILED", exc.code)
+            connections.mark_sync_finished(connection_id, "FAILED", exc.code, mode)
         except Exception:
             # Preserve a terminal observable state even when an unexpected adapter/parser defect
             # is re-raised for Dramatiq's bounded retry and traceback logging.
             session.rollback()
-            connections.mark_sync_finished(connection_id, "FAILED", "PROVIDER_SYNC_FAILED")
+            connections.mark_sync_finished(connection_id, "FAILED", "PROVIDER_SYNC_FAILED", mode)
             raise
 
 
@@ -229,6 +250,6 @@ def enqueue_scheduled_provider_syncs() -> None:
     """Claim due connections in one bounded batch; never create per-connection timers."""
     with new_session() as session:
         repository = SqlProviderConnectionRepository(session)
-        connection_ids = repository.queue_due_connections(datetime.now(UTC))
-    for connection_id in connection_ids:
-        synchronize_provider_connection.send(str(connection_id))
+        jobs = repository.queue_due_sync_jobs(datetime.now(UTC))
+    for connection_id, mode in jobs:
+        synchronize_provider_connection.send(str(connection_id), mode)

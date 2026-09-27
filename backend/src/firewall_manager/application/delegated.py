@@ -25,6 +25,8 @@ class DelegatedPolicyService:
         self,
         context: DelegatedPolicyContext,
         *,
+        include_applications: bool = True,
+        include_rules: bool = True,
         interface: str = "rest",
         correlation_id: str | None = None,
     ) -> dict[str, object]:
@@ -36,12 +38,23 @@ class DelegatedPolicyService:
             interface=interface,
             correlation_id=correlation_id,
         )
-        result = self._repository.delegated_context_view(
-            context.principal.user_id,
-            context.active_group_id,
-            context.access_policy_id,
-            context.principal.organization_id,
-        )
+        if include_applications and include_rules:
+            # Preserve compatibility with repository adapters that predate the optional filter.
+            result = self._repository.delegated_context_view(
+                context.principal.user_id,
+                context.active_group_id,
+                context.access_policy_id,
+                context.principal.organization_id,
+            )
+        else:
+            result = self._repository.delegated_context_view(
+                context.principal.user_id,
+                context.active_group_id,
+                context.access_policy_id,
+                context.principal.organization_id,
+                include_applications=False,
+                include_rules=include_rules,
+            )
         if result is None:
             # This cannot normally occur after preflight, but fail closed under concurrent removal.
             raise ResourceOutOfScopeError

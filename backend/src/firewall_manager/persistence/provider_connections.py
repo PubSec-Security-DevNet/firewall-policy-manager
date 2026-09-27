@@ -114,6 +114,9 @@ class SqlProviderConnectionRepository:
             credential_updated_at=now,
             connection_status="NEVER_TESTED",
             sync_interval_minutes=int(str(values.get("sync_interval_minutes", 60))),
+            applications_sync_interval_minutes=int(
+                str(values.get("applications_sync_interval_minutes", 1440))
+            ),
             revision=1,
         )
         manager = FirewallManager(
@@ -154,7 +157,14 @@ class SqlProviderConnectionRepository:
             key in values and getattr(row, key) != values[key]
             for key in ("base_endpoint", "region", "tls_mode")
         )
-        for key in ("display_name", "base_endpoint", "region", "tls_mode", "sync_interval_minutes"):
+        for key in (
+            "display_name",
+            "base_endpoint",
+            "region",
+            "tls_mode",
+            "sync_interval_minutes",
+            "applications_sync_interval_minutes",
+        ):
             if key in values:
                 setattr(row, key, values[key])
         if routing_changed:
@@ -315,14 +325,17 @@ class SqlProviderConnectionRepository:
         now = datetime.now(UTC)
         if lifecycle == "ACTIVE":
             row.next_sync_at = now
+            row.applications_next_sync_at = now
             action = "connection_enabled"
         elif lifecycle == "RETIRED":
             row.retired_at = now
             row.next_sync_at = None
+            row.applications_next_sync_at = None
             self._disable_writes(row)
             action = "connection_retired"
         else:
             row.next_sync_at = None
+            row.applications_next_sync_at = None
             self._disable_writes(row)
             action = "connection_disabled"
         if lifecycle != "ACTIVE":
@@ -392,12 +405,19 @@ class SqlProviderConnectionRepository:
         )
         return self._safe_dict(row)
 
-    def request_sync(self, organization_id: UUID, actor_user_id: UUID, connection_id: UUID) -> None:
+    def request_sync(
+        self, organization_id: UUID, actor_user_id: UUID, connection_id: UUID, mode: str = "FULL"
+    ) -> None:
         row = self._require_row(organization_id, connection_id)
         if row.lifecycle != "ACTIVE":
             raise InvalidChangeSetStateError
-        row.sync_status = "QUEUED"
-        row.last_sync = datetime.now(UTC)
+        now = datetime.now(UTC)
+        if mode == "APPLICATIONS":
+            row.applications_sync_status = "QUEUED"
+            row.applications_last_sync = now
+        else:
+            row.sync_status = "QUEUED"
+            row.last_sync = now
         row.last_error_code = None
         row.last_error_message = None
         row.last_error_correlation_id = None
@@ -408,6 +428,43 @@ class SqlProviderConnectionRepository:
         # Publish happens after this method returns. Commit the queue claim and its audit first so
         # a fast worker can never observe pre-request state.
         self._session.commit()
+
+    def due_connection_jobs(self, now: datetime, limit: int = 100) -> list[tuple[UUID, str]]:
+        full = list(
+            self._session.scalars(
+                select(ProviderConnection.id)
+                .where(
+                    ProviderConnection.lifecycle == "ACTIVE",
+                    ProviderConnection.next_sync_at.is_not(None),
+                    ProviderConnection.next_sync_at <= now,
+                    or_(
+                        ProviderConnection.sync_status.is_(None),
+                        ProviderConnection.sync_status.notin_(("QUEUED", "RUNNING")),
+                    ),
+                )
+                .order_by(ProviderConnection.next_sync_at, ProviderConnection.id)
+                .limit(limit)
+            )
+        )
+        apps = list(
+            self._session.scalars(
+                select(ProviderConnection.id)
+                .where(
+                    ProviderConnection.lifecycle == "ACTIVE",
+                    ProviderConnection.applications_next_sync_at.is_not(None),
+                    ProviderConnection.applications_next_sync_at <= now,
+                    or_(
+                        ProviderConnection.applications_sync_status.is_(None),
+                        ProviderConnection.applications_sync_status.notin_(("QUEUED", "RUNNING")),
+                    ),
+                )
+                .order_by(ProviderConnection.applications_next_sync_at, ProviderConnection.id)
+                .limit(limit)
+            )
+        )
+        return [(connection_id, "NON_APPLICATIONS") for connection_id in full] + [
+            (connection_id, "APPLICATIONS") for connection_id in apps
+        ]
 
     def due_connection_ids(self, now: datetime, limit: int = 100) -> list[UUID]:
         return list(
@@ -442,35 +499,68 @@ class SqlProviderConnectionRepository:
             self._session.commit()
         return ids
 
-    def mark_sync_running(self, connection_id: UUID) -> tuple[UUID, UUID]:
+    def queue_due_sync_jobs(self, now: datetime, limit: int = 100) -> list[tuple[UUID, str]]:
+        jobs = self.due_connection_jobs(now, limit)
+        for connection_id, mode in jobs:
+            row = self._session.get(ProviderConnection, connection_id)
+            if row is None:
+                continue
+            if mode == "APPLICATIONS":
+                row.applications_sync_status = "QUEUED"
+                row.applications_last_sync = now
+            else:
+                row.sync_status = "QUEUED"
+                row.last_sync = now
+        if jobs:
+            self._session.commit()
+        return jobs
+
+    def mark_sync_running(self, connection_id: UUID, mode: str = "FULL") -> tuple[UUID, UUID]:
         row = self._session.get(ProviderConnection, connection_id)
         if row is None or row.lifecycle != "ACTIVE":
             raise InvalidChangeSetStateError
-        row.sync_status = "RUNNING"
-        row.last_sync = datetime.now(UTC)
-        row.last_error_code = None
-        row.last_error_message = None
-        row.last_error_correlation_id = None
+        now = datetime.now(UTC)
+        if mode == "APPLICATIONS":
+            row.applications_sync_status = "RUNNING"
+            row.applications_last_sync = now
+        else:
+            row.sync_status = "RUNNING"
+            row.last_sync = now
+            row.last_error_code = None
+            row.last_error_message = None
+            row.last_error_correlation_id = None
         manager = self._manager(row.organization_id, connection_id)
         self._session.commit()
         return row.organization_id, manager.id
 
-    def mark_sync_finished(self, connection_id: UUID, status: str, error_code: str | None) -> None:
+    def mark_sync_finished(
+        self, connection_id: UUID, status: str, error_code: str | None, mode: str = "FULL"
+    ) -> None:
         row = self._session.get(ProviderConnection, connection_id)
         if row is None:
             raise ResourceOutOfScopeError
         now = datetime.now(UTC)
-        row.sync_status = status
-        row.last_sync = now
-        row.last_error_code = error_code
-        if status == "COMPLETED":
-            row.last_successful_sync = now
-            row.last_error_code = None
-        row.next_sync_at = (
-            now + timedelta(minutes=row.sync_interval_minutes)
-            if row.lifecycle == "ACTIVE"
-            else None
-        )
+        if mode == "APPLICATIONS":
+            row.applications_sync_status = status
+            if status == "COMPLETED":
+                row.applications_last_successful_sync = now
+            row.applications_next_sync_at = (
+                now + timedelta(minutes=row.applications_sync_interval_minutes)
+                if row.lifecycle == "ACTIVE"
+                else None
+            )
+        else:
+            row.sync_status = status
+            row.last_sync = now
+            row.last_error_code = error_code
+            if status == "COMPLETED":
+                row.last_successful_sync = now
+                row.last_error_code = None
+            row.next_sync_at = (
+                now + timedelta(minutes=row.sync_interval_minutes)
+                if row.lifecycle == "ACTIVE"
+                else None
+            )
         self._session.commit()
 
     def _safe_dict(self, row: ProviderConnection) -> dict[str, object]:
@@ -550,6 +640,11 @@ class SqlProviderConnectionRepository:
             "last_error_correlation_id": row.last_error_correlation_id,
             "certificate_info": dict(row.certificate_info),
             "sync_interval_minutes": row.sync_interval_minutes,
+            "applications_sync_interval_minutes": row.applications_sync_interval_minutes,
+            "applications_sync_status": row.applications_sync_status,
+            "applications_last_sync": row.applications_last_sync,
+            "applications_last_successful_sync": row.applications_last_successful_sync,
+            "applications_next_sync_at": row.applications_next_sync_at,
             "write_enabled": row.write_enabled,
             "write_validation_mode": False,
             "version_family_tested": version_family_tested,

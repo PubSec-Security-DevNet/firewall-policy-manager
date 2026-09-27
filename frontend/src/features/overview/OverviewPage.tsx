@@ -12,6 +12,7 @@ import { DevelopmentUserSelector } from '../auth/DevelopmentUserSelector';
 import { DelegatedWorkspace } from '../delegated/DelegatedWorkspace';
 import { AuditPage, SyncDriftPage } from '../operations/OperationsPages';
 import { ProviderConnectionsPanel } from '../provider-connections/ProviderConnectionsPanel';
+import { AdminChangeSetsPanel } from '../changesets/AdminChangeSetsPanel';
 import {
   AppCard,
   AppEmptyState,
@@ -199,7 +200,16 @@ function ReadyApplication({ overview, session }: { overview: Overview; session: 
           </Suspense>
         </AppPage>
       )}
-      {route === 'sync' && admin && <SyncDriftPage />}
+      {route === 'changesets-admin' && admin && (
+        <AppPage
+          eyebrow="Operations"
+          title="All ChangeSets"
+          description="Organization-wide ChangeSet status and cleanup for administrators."
+        >
+          <AdminChangeSetsPanel />
+        </AppPage>
+      )}
+      {route === 'sync' && admin && <SyncDriftPage activeGroupId={workingContext.groupId} />}
       {route === 'audit' && admin && <AuditPage />}
     </AppLayout>
   );
@@ -251,9 +261,9 @@ function Dashboard({
       <AppIdentityNotice email={session.email} role={session.role} />
       <AppSimpleGrid cols={{ base: 1, xs: 2, lg: 4 }}>
         <MetricCard
-          label="Provider connections"
+          label="Synchronized providers"
           value={overview.counts.managers}
-          detail={`${providersHealthy} reporting inventory`}
+          detail={`${providersHealthy} with reporting inventory`}
           icon={<IconPlugConnected size={19} />}
         />
         <MetricCard
@@ -271,7 +281,7 @@ function Dashboard({
         <MetricCard
           label="Open ChangeSets"
           value={overview.counts.change_sets}
-          detail="Draft and validation activity"
+          detail="Ready, queued, or executing"
           icon={<IconFileDiff size={19} />}
         />
       </AppSimpleGrid>
@@ -279,49 +289,62 @@ function Dashboard({
         <AppCard style={{ gridColumn: 'span 2' }}>
           <AppSection
             title="Provider estate"
-            description="Synchronized managers visible to the current organization"
+            description="Real providers and synchronized inventory"
           >
-            <AppSimpleGrid cols={{ base: 1, sm: 2 }}>
-              {overview.providers.map((provider) => (
-                <AppCard key={provider.provider} interactive className="fm-subtle-panel">
-                  <AppGroup justify="space-between" align="start">
-                    <div>
+            {overview.providers.length === 0 ? (
+              <AppEmptyState
+                title="No synchronized providers"
+                description="Provider inventory is not currently available."
+              />
+            ) : (
+              <AppSimpleGrid cols={{ base: 1, sm: 2 }}>
+                {overview.providers.map((provider) => (
+                  <AppCard key={provider.provider} className="fm-subtle-panel">
+                    <AppGroup justify="space-between" align="start">
                       <AppGroup gap="xs">
                         <AppProviderBadge provider={provider.provider} />
                         <AppText fw={650}>{provider.display_name}</AppText>
                       </AppGroup>
-                      <AppText size="xs" c="dimmed" mt={6}>
-                        Version {provider.provider_version}
-                      </AppText>
-                    </div>
-                    <AppStatusBadge value={provider.writable ? 'ACTIVE' : 'READ_ONLY'} />
-                  </AppGroup>
-                  <AppGroup mt="lg" gap="xl">
-                    <div>
-                      <AppText size="xl" fw={700}>
-                        {provider.policy_count}
-                      </AppText>
-                      <AppText size="xs" c="dimmed">
-                        Policies
-                      </AppText>
-                    </div>
-                    <div>
-                      <AppText size="xl" fw={700}>
-                        {provider.object_count}
-                      </AppText>
-                      <AppText size="xs" c="dimmed">
-                        Objects
-                      </AppText>
-                    </div>
-                  </AppGroup>
-                </AppCard>
-              ))}
-            </AppSimpleGrid>
+                      <AppStatusBadge value={provider.writable ? 'ACTIVE' : 'READ_ONLY'} />
+                    </AppGroup>
+                    <AppText size="xs" c="dimmed" mt={6}>
+                      Version {provider.provider_version}
+                    </AppText>
+                    <AppSimpleGrid cols={{ base: 3 }} mt="lg">
+                      <div>
+                        <AppText size="xl" fw={700}>
+                          {provider.policy_count}
+                        </AppText>
+                        <AppText size="xs" c="dimmed">
+                          Policies
+                        </AppText>
+                      </div>
+                      <div>
+                        <AppText size="xl" fw={700}>
+                          {provider.rule_count}
+                        </AppText>
+                        <AppText size="xs" c="dimmed">
+                          Rules
+                        </AppText>
+                      </div>
+                      <div>
+                        <AppText size="xl" fw={700}>
+                          {provider.object_count}
+                        </AppText>
+                        <AppText size="xs" c="dimmed">
+                          Objects
+                        </AppText>
+                      </div>
+                    </AppSimpleGrid>
+                  </AppCard>
+                ))}
+              </AppSimpleGrid>
+            )}
           </AppSection>
         </AppCard>
         <AppCard>
           <AppSection title="Needs attention" description="Conditions that may affect operations">
-            {overview.providers.every((provider) => provider.policy_count > 0) ? (
+            {overview.providers.length > 0 && providersHealthy === overview.providers.length ? (
               <AppEmptyState
                 title="No active alerts"
                 description="All reporting providers have synchronized policy inventory."
@@ -330,9 +353,15 @@ function Dashboard({
               <AppGroup align="start" wrap="nowrap">
                 <IconAlertTriangle color="var(--fm-warning)" size={20} />
                 <div>
-                  <AppText fw={650}>Inventory unavailable</AppText>
+                  <AppText fw={650}>
+                    {overview.providers.length === 0
+                      ? 'No provider inventory'
+                      : 'Inventory unavailable'}
+                  </AppText>
                   <AppText size="xs" c="dimmed">
-                    One or more providers have no synchronized policies.
+                    {overview.providers.length === 0
+                      ? 'No real provider inventory is available to report.'
+                      : 'One or more providers have no synchronized policies.'}
                   </AppText>
                 </div>
               </AppGroup>

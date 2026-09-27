@@ -24,7 +24,7 @@ from firewall_manager.domain.models import (
     ProviderTransactionState,
 )
 from firewall_manager.providers.fmc import RealFmcProvider
-from firewall_manager.providers.real import normalize_fmc_endpoint
+from firewall_manager.providers.real import CiscoReadOnlyProvider, normalize_fmc_endpoint
 from firewall_manager.providers.scc import RealSccProvider
 
 
@@ -94,6 +94,8 @@ def _fmc_transport(requests: list[httpx.Request]) -> httpx.MockTransport:
                         "id": "rule-1",
                         "name": "Example Rule",
                         "action": "ALLOW",
+                        "ipsPolicy": {"id": "intrusion-1", "type": "IntrusionPolicy"},
+                        "variableSet": {"id": "variables-1", "type": "VariableSet"},
                         "metadata": {"ruleIndex": 1, "category": {"id": "category-1"}},
                         "sourceNetworks": {"objects": [{"id": "network-1"}]},
                         "sourceZones": {"objects": [{"id": "zone-1"}]},
@@ -152,6 +154,8 @@ async def test_real_fmc_uses_token_auth_and_normalizes_read_only_inventory(
     assert categories.items[0].native_id == "category-1"
     assert rules.items[0].object_references[0].object_native_id == "network-1"
     assert rules.items[0].zone_references[0].zone_native_id == "zone-1"
+    assert rules.items[0].intrusion_policy_native_id == "intrusion-1"
+    assert rules.items[0].variable_set_native_id == "variables-1"
     assert objects.items[0].normalized_value == "10.0.0.0/24"
     assert zones.items[0].zone_type == "ROUTED"
     assert [request.method for request in requests].count("POST") == 1
@@ -231,6 +235,43 @@ def test_real_object_payload_maps_network_hosts_subnets_and_ranges() -> None:
             "value": "10.10.10.1-10.10.20.30",
         },
     )
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "criterion"),
+    [
+        ("applicationtypes", "type"),
+        ("applicationrisks", "risk"),
+        ("applicationproductivities", "productivity"),
+        ("applicationcategories", "category"),
+        ("applicationtags", "tag"),
+    ],
+)
+def test_system_application_criteria_are_normalized_with_stable_filter_ids(
+    endpoint: str, criterion: str
+) -> None:
+    item = CiscoReadOnlyProvider._system_filter_item(  # pyright: ignore[reportPrivateUsage]
+        {"id": "criterion-1", "name": "Example"}, endpoint
+    )
+
+    assert item["id"] == f"system-filter:{criterion}:criterion-1"
+    assert f'"criterion":"{criterion}"' in str(item["value"])
+
+
+def test_system_application_criteria_are_sent_as_provider_app_conditions() -> None:
+    payload = CiscoReadOnlyProvider._application_reference_payload(  # pyright: ignore[reportPrivateUsage]
+        {
+            "id": "system-filter:category:category-1",
+            "type": "ApplicationFilter",
+            "normalized_value": '{"criterion":"category","id":"category-1","name":"Social"}',
+        }
+    )
+
+    assert payload == {
+        "appConditions": [
+            {"categories": [{"id": "category-1", "name": "Social"}]}
+        ]
+    }
 
 
 @pytest.mark.asyncio

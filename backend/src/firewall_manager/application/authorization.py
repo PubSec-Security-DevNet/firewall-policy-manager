@@ -52,8 +52,11 @@ _POLICY_ACTION_CAPABILITY: Mapping[Action, PolicyCapability] = {
 
 _OBJECT_CREATE_CAPABILITY: Mapping[str, ProviderCapability] = {
     FirewallObjectType.NETWORK: ProviderCapability.NETWORK_OBJECT_CREATE,
+    FirewallObjectType.NETWORK_GROUP: ProviderCapability.NETWORK_OBJECT_CREATE,
     FirewallObjectType.PORT_SERVICE: ProviderCapability.PORT_SERVICE_OBJECT_CREATE,
+    FirewallObjectType.PORT_SERVICE_GROUP: ProviderCapability.PORT_SERVICE_OBJECT_CREATE,
     FirewallObjectType.URL: ProviderCapability.URL_OBJECT_CREATE,
+    FirewallObjectType.URL_GROUP: ProviderCapability.URL_OBJECT_CREATE,
     FirewallObjectType.APPLICATION: ProviderCapability.APPLICATION_OBJECT_CREATE,
     FirewallObjectType.APPLICATION_FILTER: ProviderCapability.APPLICATION_OBJECT_CREATE,
 }

@@ -26,10 +26,12 @@ from firewall_manager.persistence.models import (
     AuditEvent,
     ChangeSet,
     ChangeSetOperation,
+    FilePolicy,
     FirewallManager,
     FirewallObject,
     Group,
     GroupPolicyCategoryMapping,
+    IntrusionPolicy,
     ObjectReference,
     ObjectUseGrant,
     ProviderCapabilityEvidence,
@@ -40,6 +42,7 @@ from firewall_manager.persistence.models import (
     RuleZoneReference,
     SecurityZone,
     User,
+    VariableSet,
 )
 from firewall_manager.providers.capabilities import (
     VALIDATION_WRITE_CAPABILITIES,
@@ -56,14 +59,23 @@ _WRITE_CAPABILITY_BY_OPERATION = {
 
 _OBJECT_CAPABILITY_BY_OPERATION = {
     ("CREATE_OBJECT", "NETWORK"): "network_object_create",
+    ("CREATE_OBJECT", "NETWORK_GROUP"): "network_object_create",
     ("CREATE_OBJECT", "PORT_SERVICE"): "port_service_object_create",
+    ("CREATE_OBJECT", "PORT_SERVICE_GROUP"): "port_service_object_create",
     ("CREATE_OBJECT", "URL"): "url_object_create",
+    ("CREATE_OBJECT", "URL_GROUP"): "url_object_create",
     ("MODIFY_OBJECT", "NETWORK"): "network_object_mutation",
+    ("MODIFY_OBJECT", "NETWORK_GROUP"): "network_object_mutation",
     ("MODIFY_OBJECT", "PORT_SERVICE"): "port_service_object_mutation",
+    ("MODIFY_OBJECT", "PORT_SERVICE_GROUP"): "port_service_object_mutation",
     ("MODIFY_OBJECT", "URL"): "url_object_mutation",
+    ("MODIFY_OBJECT", "URL_GROUP"): "url_object_mutation",
     ("DELETE_OBJECT", "NETWORK"): "network_object_mutation",
+    ("DELETE_OBJECT", "NETWORK_GROUP"): "network_object_mutation",
     ("DELETE_OBJECT", "PORT_SERVICE"): "port_service_object_mutation",
+    ("DELETE_OBJECT", "PORT_SERVICE_GROUP"): "port_service_object_mutation",
     ("DELETE_OBJECT", "URL"): "url_object_mutation",
+    ("DELETE_OBJECT", "URL_GROUP"): "url_object_mutation",
 }
 
 _EDITABLE_STATES = {
@@ -116,6 +128,69 @@ class SqlChangeSetRepository:
     def __init__(self, session: Session) -> None:
         self._session = session
 
+    def _rule_application_snapshot(self, rule: AccessRule) -> dict[str, object]:
+        """Capture the complete application-managed rule intent for reconciliation."""
+        values: dict[str, object] = {
+            "name": rule.name,
+            "action": rule.action,
+            "enabled": rule.enabled,
+            "logging": "BEGIN" if rule.log_begin else "END" if rule.log_end else "NONE",
+            "position": rule.position,
+            "category_id": str(rule.category_id) if rule.category_id else None,
+            "intrusion_policy_id": str(rule.intrusion_policy_id)
+            if rule.intrusion_policy_id
+            else None,
+            "variable_set_id": str(rule.variable_set_id) if rule.variable_set_id else None,
+            "file_policy_id": str(rule.file_policy_id) if rule.file_policy_id else None,
+        }
+        object_keys = {
+            "SOURCE_NETWORK": "source_object_ids",
+            "DESTINATION_NETWORK": "destination_object_ids",
+            "SOURCE_PORT": "source_port_object_ids",
+            "DESTINATION_PORT": "destination_port_object_ids",
+            "PORT_SERVICE": "destination_port_object_ids",
+            "APPLICATION": "application_object_ids",
+            "URL": "url_object_ids",
+        }
+        for key in set(object_keys.values()):
+            values[key] = []
+        for target_id, element_type in self._session.execute(
+            select(ObjectReference.target_object_id, ObjectReference.element_type).where(
+                ObjectReference.source_rule_id == rule.id
+            )
+        ):
+            key = object_keys.get(str(element_type))
+            if key:
+                cast("list[str]", values[key]).append(str(target_id))
+        values["source_zone_ids"] = []
+        values["destination_zone_ids"] = []
+        for zone_id, element_type in self._session.execute(
+            select(RuleZoneReference.zone_id, RuleZoneReference.element_type).where(
+                RuleZoneReference.rule_id == rule.id
+            )
+        ):
+            key = "source_zone_ids" if str(element_type) == "SOURCE" else "destination_zone_ids"
+            cast("list[str]", values[key]).append(str(zone_id))
+        return values
+
+    def _object_application_snapshot(self, row: FirewallObject) -> dict[str, object]:
+        values: dict[str, object] = {
+            "name": row.name,
+            "object_type": row.object_type,
+            "normalized_value": row.normalized_value,
+        }
+        if str(row.object_type).endswith("_GROUP"):
+            values["member_object_ids"] = [
+                str(target_id)
+                for (target_id,) in self._session.execute(
+                    select(ObjectReference.target_object_id).where(
+                        ObjectReference.source_object_id == row.id,
+                        ObjectReference.element_type == "MEMBER",
+                    )
+                )
+            ]
+        return values
+
     def create_change_set(
         self,
         principal: Principal,
@@ -157,6 +232,16 @@ class SqlChangeSetRepository:
                     ChangeSet.organization_id == principal.organization_id,
                     ChangeSet.acting_group_id == group_id,
                 )
+                .order_by(ChangeSet.updated_at.desc(), ChangeSet.id)
+            )
+        )
+        return [self._change_set_dict(row) for row in rows]
+
+    def list_all_change_sets(self, principal: Principal) -> list[dict[str, object]]:
+        rows = list(
+            self._session.scalars(
+                select(ChangeSet)
+                .where(ChangeSet.organization_id == principal.organization_id)
                 .order_by(ChangeSet.updated_at.desc(), ChangeSet.id)
             )
         )
@@ -846,6 +931,21 @@ class SqlChangeSetRepository:
                 provider_payload["expected_category_name"] = category.name
                 if category.provider_version:
                     provider_payload["expected_category_version"] = category.provider_version
+            for source, target, model in (
+                ("intrusion_policy_id", "intrusion_policy_native_id", IntrusionPolicy),
+                ("variable_set_id", "variable_set_native_id", VariableSet),
+                ("file_policy_id", "file_policy_native_id", FilePolicy),
+            ):
+                if payload.get(source):
+                    resource = self._native_resource(
+                        model, UUID(str(payload[source])), organization_id
+                    )
+                    if (
+                        resource.manager_id != policy.manager_id
+                        or resource.domain_id != policy.domain_id
+                    ):
+                        raise ResourceOutOfScopeError
+                    provider_payload[target] = resource.native_id
             if payload.get("rule_id"):
                 rule = self._native_resource(
                     AccessRule, UUID(str(payload["rule_id"])), organization_id
@@ -891,10 +991,34 @@ class SqlChangeSetRepository:
                         )
                         for value in cast("list[object]", values)
                     ]
+            if payload.get("intrusion_policy_id") and bool(payload.get("enabled", True)):
+                intrusion = self._native_resource(
+                    IntrusionPolicy, UUID(str(payload["intrusion_policy_id"])), organization_id
+                )
+                if not payload.get("variable_set_id") and intrusion.default_variable_set_native_id:
+                    provider_payload["variable_set_native_id"] = (
+                        intrusion.default_variable_set_native_id
+                    )
             resolution = dict(_as_dict(operation.get("resolution", {})))
             if str(operation["kind"]) == "CREATE_OBJECT":
                 provider_payload["provider_name"] = resolution.get("provider_name")
                 provider_payload["normalized_value"] = resolution.get("normalized_value")
+                member_ids = resolution.get(
+                    "member_object_ids", payload.get("member_object_ids", [])
+                )
+                if isinstance(member_ids, list):
+                    provider_payload["member_object_native_ids"] = [
+                        self._native_resource(
+                            FirewallObject, UUID(str(value)), organization_id
+                        ).native_id
+                        for value in member_ids
+                    ]
+                    provider_payload["member_object_references"] = [
+                        self._provider_reference(
+                            self._native_resource(FirewallObject, UUID(str(value)), organization_id)
+                        )
+                        for value in member_ids
+                    ]
                 existing_id = resolution.get("existing_object_id")
                 if existing_id:
                     resolution["existing_object_native_id"] = self._native_resource(
@@ -942,7 +1066,9 @@ class SqlChangeSetRepository:
             provider_type = {
                 "NETWORK_GROUP": "NetworkGroup",
                 "PORT_SERVICE": "ProtocolPortObject",
+                "PORT_SERVICE_GROUP": "PortObjectGroup",
                 "URL": "Url",
+                "URL_GROUP": "UrlGroup",
                 "APPLICATION": "Application",
                 "APPLICATION_FILTER": "ApplicationFilter",
             }.get(row.object_type, "Network")
@@ -956,7 +1082,12 @@ class SqlChangeSetRepository:
                     )
         else:
             provider_type = type(row).__name__
-        return {"id": str(row.native_id), "name": str(row.name), "type": provider_type}
+        reference = {"id": str(row.native_id), "name": str(row.name), "type": provider_type}
+        if isinstance(row, FirewallObject) and row.object_type == "APPLICATION_FILTER":
+            reference["object_type"] = str(row.object_type)
+            if row.normalized_value:
+                reference["normalized_value"] = str(row.normalized_value)
+        return reference
 
     def reconcile_successful_operations(  # noqa: PLR0912, PLR0915 -- typed operation reducer
         self,
@@ -1027,6 +1158,12 @@ class SqlChangeSetRepository:
                                 permission=permission,
                             )
                         )
+                member_ids = payload.get("member_object_ids", [])
+                if str(payload.get("object_type", "")).endswith("_GROUP") and isinstance(
+                    member_ids, list
+                ):
+                    self._replace_object_group_references(row, payload, principal.organization_id)
+                row.application_snapshot = self._object_application_snapshot(row)
             elif kind == "MODIFY_OBJECT":
                 row = self._native_resource(
                     FirewallObject, UUID(str(payload["object_id"])), principal.organization_id
@@ -1037,6 +1174,7 @@ class SqlChangeSetRepository:
                 row.modified_by_user_id = principal.user_id
                 row.management_state = "MANAGED"
                 row.revision += 1
+                row.application_snapshot = self._object_application_snapshot(row)
             elif kind == "DELETE_OBJECT":
                 row = self._native_resource(
                     FirewallObject, UUID(str(payload["object_id"])), principal.organization_id
@@ -1123,11 +1261,25 @@ class SqlChangeSetRepository:
                 rule.owner_group_id = group_id
                 rule.modified_by_user_id = principal.user_id
                 rule.action = str(payload["action"])
+                rule.enabled = bool(payload.get("enabled", True))
+                logging_mode = str(payload.get("logging", "NONE")).upper()
+                rule.log_begin = logging_mode == "BEGIN"
+                rule.log_end = logging_mode == "END"
+                rule.intrusion_policy_id = self._native_resource_id_from_payload(
+                    IntrusionPolicy, payload.get("intrusion_policy_id"), principal.organization_id
+                )
+                rule.variable_set_id = self._rule_variable_set_id(
+                    payload, principal.organization_id, rule.manager_id, rule.enabled
+                )
+                rule.file_policy_id = self._native_resource_id_from_payload(
+                    FilePolicy, payload.get("file_policy_id"), principal.organization_id
+                )
                 rule.position = int(
                     str(payload.get("position", provider_resource.get("position", 0)))
                 )
                 self._session.flush()
                 self._replace_rule_references(rule, payload, principal.organization_id)
+                rule.application_snapshot = self._rule_application_snapshot(rule)
             elif kind in {"MODIFY_RULE", "MOVE_RULE"}:
                 rule = self._native_resource(
                     AccessRule, UUID(str(payload["rule_id"])), principal.organization_id
@@ -1142,6 +1294,21 @@ class SqlChangeSetRepository:
                 if kind == "MODIFY_RULE":
                     rule.name = str(payload.get("name", rule.name))
                     rule.action = str(payload.get("action", rule.action))
+                    rule.enabled = bool(payload.get("enabled", rule.enabled))
+                    logging_mode = str(payload.get("logging", "NONE")).upper()
+                    rule.log_begin = logging_mode == "BEGIN"
+                    rule.log_end = logging_mode == "END"
+                    rule.intrusion_policy_id = self._native_resource_id_from_payload(
+                        IntrusionPolicy,
+                        payload.get("intrusion_policy_id"),
+                        principal.organization_id,
+                    )
+                    rule.variable_set_id = self._rule_variable_set_id(
+                        payload, principal.organization_id, rule.manager_id, rule.enabled
+                    )
+                    rule.file_policy_id = self._native_resource_id_from_payload(
+                        FilePolicy, payload.get("file_policy_id"), principal.organization_id
+                    )
                     self._replace_rule_references(rule, payload, principal.organization_id)
                 if kind == "MOVE_RULE" and result.get("provider_resource_id"):
                     rule.native_id = str(result["provider_resource_id"])
@@ -1152,6 +1319,7 @@ class SqlChangeSetRepository:
                 rule.modified_by_user_id = principal.user_id
                 rule.management_state = "MANAGED"
                 rule.revision += 1
+                rule.application_snapshot = self._rule_application_snapshot(rule)
             elif kind == "DELETE_RULE":
                 rule = self._native_resource(
                     AccessRule, UUID(str(payload["rule_id"])), principal.organization_id
@@ -1162,9 +1330,13 @@ class SqlChangeSetRepository:
                 self._session.execute(
                     delete(RuleZoneReference).where(RuleZoneReference.rule_id == rule.id)
                 )
-                rule.management_state = "MISSING"
-                rule.modified_by_user_id = principal.user_id
-                rule.revision += 1
+                # This is an application-initiated deletion that completed at the
+                # provider.  It is not a provider-side disappearance.  Retaining
+                # the row as MISSING turns a successful delete into a false
+                # reconciliation discrepancy on the next sync.  Change-set and
+                # transaction history retain the audit trail, so remove the
+                # normalized resource from the active inventory instead.
+                self._session.delete(rule)
         self._session.flush()
 
     def record_successful_write_evidence(
@@ -1329,10 +1501,62 @@ class SqlChangeSetRepository:
                         )
                     )
 
+    def _replace_object_group_references(
+        self,
+        source_object: FirewallObject,
+        payload: dict[str, object],
+        organization_id: UUID,
+    ) -> None:
+        """Persist group membership after the provider confirms group creation."""
+        self._session.execute(
+            delete(ObjectReference).where(ObjectReference.source_object_id == source_object.id)
+        )
+        values = payload.get("member_object_ids", [])
+        if not isinstance(values, list):
+            return
+        for value in cast("list[object]", values):
+            member = self._native_resource(FirewallObject, UUID(str(value)), organization_id)
+            self._session.add(
+                ObjectReference(
+                    organization_id=organization_id,
+                    manager_id=source_object.manager_id,
+                    source_object_id=source_object.id,
+                    target_object_id=member.id,
+                    element_type="MEMBER",
+                )
+            )
+
     def group_provider_slug(self, group_id: UUID, organization_id: UUID) -> str | None:
         return self._session.scalar(
             select(Group.provider_slug).where(
                 Group.id == group_id, Group.organization_id == organization_id
+            )
+        )
+
+    def _native_resource_id_from_payload(
+        self, model: type[Any], value: object, organization_id: UUID
+    ) -> UUID | None:
+        if not value:
+            return None
+        return self._native_resource(model, UUID(str(value)), organization_id).id
+
+    def _rule_variable_set_id(
+        self, payload: dict[str, object], organization_id: UUID, manager_id: UUID, enabled: bool
+    ) -> UUID | None:
+        selected = self._native_resource_id_from_payload(
+            VariableSet, payload.get("variable_set_id"), organization_id
+        )
+        if selected is not None or not enabled or not payload.get("intrusion_policy_id"):
+            return selected
+        intrusion = self._native_resource(
+            IntrusionPolicy, UUID(str(payload["intrusion_policy_id"])), organization_id
+        )
+        if not intrusion.default_variable_set_native_id:
+            return None
+        return self._session.scalar(
+            select(VariableSet.id).where(
+                VariableSet.manager_id == manager_id,
+                VariableSet.native_id == intrusion.default_variable_set_native_id,
             )
         )
 
@@ -1359,6 +1583,23 @@ class SqlChangeSetRepository:
 
     def delete_change_set(self, principal: Principal, group_id: UUID, change_set_id: UUID) -> None:
         row = self._require_editable(principal, group_id, change_set_id)
+        self._session.execute(
+            delete(ChangeSetOperation).where(ChangeSetOperation.change_set_id == row.id)
+        )
+        self._session.delete(row)
+        self._session.flush()
+
+    def delete_admin_change_set(self, principal: Principal, change_set_id: UUID) -> None:
+        row = self._session.scalar(
+            select(ChangeSet).where(
+                ChangeSet.id == change_set_id,
+                ChangeSet.organization_id == principal.organization_id,
+            )
+        )
+        if row is None:
+            raise ResourceOutOfScopeError
+        if row.state not in _EDITABLE_STATES:
+            raise InvalidChangeSetStateError
         self._session.execute(
             delete(ChangeSetOperation).where(ChangeSetOperation.change_set_id == row.id)
         )

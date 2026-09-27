@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from typing import Any, TypeVar
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, func, or_, select, update
+from sqlalchemy import ColumnElement, and_, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -18,15 +18,20 @@ from firewall_manager.application.errors import (
 from firewall_manager.domain.models import (
     AuthorizationDecision,
     CapabilityStatus,
+    ChangeSetState,
     DiscoveredCategory,
     DiscoveredDevice,
     DiscoveredDomain,
+    DiscoveredFilePolicy,
+    DiscoveredIntrusionPolicy,
     DiscoveredObject,
     DiscoveredObjectReference,
     DiscoveredPolicy,
     DiscoveredRule,
+    DiscoveredVariableSet,
     DiscoveredZone,
     DiscoveredZoneReference,
+    FirewallObjectType,
     NativeResource,
     Principal,
     ProviderEvidenceProfile,
@@ -36,6 +41,7 @@ from firewall_manager.domain.models import (
     SyncResult,
     SyncStatus,
 )
+from firewall_manager.domain.networks import network_is_contained
 from firewall_manager.persistence.models import (
     AccessPolicy,
     AccessRule,
@@ -44,11 +50,13 @@ from firewall_manager.persistence.models import (
     Device,
     DirectUserPolicyGrant,
     DriftRecord,
+    FilePolicy,
     FirewallManager,
     FirewallObject,
     Group,
     GroupMembership,
     GroupPolicyCategoryMapping,
+    IntrusionPolicy,
     IpRangeGrant,
     ObjectCreateGrant,
     ObjectReference,
@@ -62,6 +70,7 @@ from firewall_manager.persistence.models import (
     SecurityZone,
     SyncRun,
     User,
+    VariableSet,
     ZoneGrant,
 )
 from firewall_manager.providers.capabilities import (
@@ -77,20 +86,39 @@ SyncedModel = TypeVar(
     ProviderDomain,
     Device,
     AccessPolicy,
+    IntrusionPolicy,
+    FilePolicy,
     RuleCategory,
     AccessRule,
     FirewallObject,
     SecurityZone,
+    VariableSet,
 )
 _SENSITIVE_METADATA_PARTS = ("secret", "password", "token", "authorization", "private_key")
 _USABLE_STATES = ("OBSERVED", "UNMANAGED", "MANAGED")
+_CONTEXT_RESOURCE_STATES = (
+    "OBSERVED",
+    "UNMANAGED",
+    "MANAGED",
+    "PENDING_ADOPTION",
+    "DRIFTED",
+    "MISSING",
+    "CONFLICT",
+)
 _OBJECT_CREATE_CAPABILITY_NAMES = {
     "NETWORK": "network_object_create",
+    "NETWORK_GROUP": "network_object_create",
     "PORT_SERVICE": "port_service_object_create",
+    "PORT_SERVICE_GROUP": "port_service_object_create",
     "URL": "url_object_create",
+    "URL_GROUP": "url_object_create",
     "APPLICATION": "application_object_create",
     "APPLICATION_FILTER": "application_object_create",
 }
+_PROVIDER_SHARED_OBJECT_TYPES = (
+    FirewallObjectType.APPLICATION.value,
+    FirewallObjectType.APPLICATION_FILTER.value,
+)
 
 
 def sanitize_provider_metadata(metadata: dict[str, str]) -> dict[str, str]:
@@ -148,20 +176,102 @@ class SqlOverviewRepository:
         ]
 
     def counts(self, organization_id: UUID) -> dict[str, int]:
+        real_manager_ids = select(FirewallManager.id).where(
+            FirewallManager.organization_id == organization_id,
+            FirewallManager.is_mock.is_(False),
+        )
+        real_policy_ids = select(AccessPolicy.id).where(
+            AccessPolicy.organization_id == organization_id,
+            AccessPolicy.manager_id.in_(real_manager_ids),
+        )
         return {
             "managers": self._count(
-                FirewallManager, FirewallManager.organization_id == organization_id
+                FirewallManager,
+                FirewallManager.organization_id == organization_id,
+                FirewallManager.is_mock.is_(False),
             ),
-            "policies": self._count(AccessPolicy, AccessPolicy.organization_id == organization_id),
-            "rules": self._count(AccessRule, AccessRule.organization_id == organization_id),
+            "policies": self._count(
+                AccessPolicy,
+                AccessPolicy.organization_id == organization_id,
+                AccessPolicy.manager_id.in_(real_manager_ids),
+            ),
+            "rules": self._count(
+                AccessRule,
+                AccessRule.organization_id == organization_id,
+                AccessRule.policy_id.in_(real_policy_ids),
+            ),
             "objects": self._count(
-                FirewallObject, FirewallObject.organization_id == organization_id
+                FirewallObject,
+                FirewallObject.organization_id == organization_id,
+                FirewallObject.manager_id.in_(real_manager_ids),
             ),
-            "change_sets": self._count(ChangeSet, ChangeSet.organization_id == organization_id),
+            "change_sets": self._count(
+                ChangeSet,
+                ChangeSet.organization_id == organization_id,
+                ChangeSet.state.in_(
+                    (
+                        ChangeSetState.READY.value,
+                        ChangeSetState.QUEUED.value,
+                        ChangeSetState.EXECUTING.value,
+                    )
+                ),
+            ),
         }
 
-    def _count(self, model: type[Any], where: ColumnElement[bool]) -> int:
-        value = self._session.scalar(select(func.count()).select_from(model).where(where))
+    def provider_summaries(self, organization_id: UUID) -> list[dict[str, object]]:
+        """Return real normalized providers represented in the application inventory."""
+        managers = list(
+            self._session.scalars(
+                select(FirewallManager)
+                .where(
+                    FirewallManager.organization_id == organization_id,
+                    FirewallManager.is_mock.is_(False),
+                )
+                .order_by(FirewallManager.display_name, FirewallManager.id)
+            )
+        )
+        summaries: list[dict[str, object]] = []
+        for manager in managers:
+            policy_count = self._session.scalar(
+                select(func.count())
+                .select_from(AccessPolicy)
+                .where(
+                    AccessPolicy.organization_id == organization_id,
+                    AccessPolicy.manager_id == manager.id,
+                )
+            )
+            object_count = self._session.scalar(
+                select(func.count())
+                .select_from(FirewallObject)
+                .where(
+                    FirewallObject.organization_id == organization_id,
+                    FirewallObject.manager_id == manager.id,
+                )
+            )
+            rule_count = self._session.scalar(
+                select(func.count())
+                .select_from(AccessRule)
+                .join(AccessPolicy, AccessPolicy.id == AccessRule.policy_id)
+                .where(
+                    AccessRule.organization_id == organization_id,
+                    AccessPolicy.manager_id == manager.id,
+                )
+            )
+            summaries.append(
+                {
+                    "provider": manager.provider,
+                    "display_name": manager.display_name,
+                    "provider_version": manager.provider_version or "Unknown",
+                    "policy_count": int(policy_count or 0),
+                    "rule_count": int(rule_count or 0),
+                    "object_count": int(object_count or 0),
+                    "writable": not manager.read_only,
+                }
+            )
+        return summaries
+
+    def _count(self, model: type[Any], *where: ColumnElement[bool]) -> int:
+        value = self._session.scalar(select(func.count()).select_from(model).where(*where))
         return int(value or 0)
 
     def _page(
@@ -191,7 +301,10 @@ class SqlOverviewRepository:
     ) -> tuple[list[dict[str, object]], int]:
         rows, total = self._page(
             FirewallManager,
-            [FirewallManager.organization_id == organization_id],
+            [
+                FirewallManager.organization_id == organization_id,
+                FirewallManager.is_mock.is_(False),
+            ],
             offset,
             limit,
             FirewallManager.display_name,
@@ -211,7 +324,14 @@ class SqlOverviewRepository:
     def list_policies(
         self, organization_id: UUID, manager_id: UUID | None, offset: int, limit: int
     ) -> tuple[list[dict[str, object]], int]:
-        where = [AccessPolicy.organization_id == organization_id]
+        real_manager_ids = select(FirewallManager.id).where(
+            FirewallManager.organization_id == organization_id,
+            FirewallManager.is_mock.is_(False),
+        )
+        where = [
+            AccessPolicy.organization_id == organization_id,
+            AccessPolicy.manager_id.in_(real_manager_ids),
+        ]
         if manager_id is not None:
             where.append(AccessPolicy.manager_id == manager_id)
         rows, total = self._page(AccessPolicy, where, offset, limit)
@@ -220,7 +340,19 @@ class SqlOverviewRepository:
     def list_rules(
         self, organization_id: UUID, policy_id: UUID | None, offset: int, limit: int
     ) -> tuple[list[dict[str, object]], int]:
-        where = [AccessRule.organization_id == organization_id]
+        real_policy_ids = select(AccessPolicy.id).where(
+            AccessPolicy.organization_id == organization_id,
+            AccessPolicy.manager_id.in_(
+                select(FirewallManager.id).where(
+                    FirewallManager.organization_id == organization_id,
+                    FirewallManager.is_mock.is_(False),
+                )
+            ),
+        )
+        where = [
+            AccessRule.organization_id == organization_id,
+            AccessRule.policy_id.in_(real_policy_ids),
+        ]
         if policy_id is not None:
             where.append(AccessRule.policy_id == policy_id)
         rows, total = self._page(AccessRule, where, offset, limit)
@@ -230,6 +362,8 @@ class SqlOverviewRepository:
                 "policy_id": row.policy_id,
                 "category_id": row.category_id,
                 "action": row.action,
+                "enabled": row.enabled,
+                "logging": "BEGIN" if row.log_begin else "END" if row.log_end else "NONE",
                 "position": row.position,
             }
             for row in rows
@@ -238,9 +372,17 @@ class SqlOverviewRepository:
     def list_objects(
         self, organization_id: UUID, manager_id: UUID | None, offset: int, limit: int
     ) -> tuple[list[dict[str, object]], int]:
-        where = [FirewallObject.organization_id == organization_id]
+        real_manager_ids = select(FirewallManager.id).where(
+            FirewallManager.organization_id == organization_id,
+            FirewallManager.is_mock.is_(False),
+        )
+        where = [
+            FirewallObject.organization_id == organization_id,
+            FirewallObject.manager_id.in_(real_manager_ids),
+        ]
         if manager_id is not None:
             where.append(FirewallObject.manager_id == manager_id)
+        where.append(~FirewallObject.object_type.in_(_PROVIDER_SHARED_OBJECT_TYPES))
         rows, total = self._page(FirewallObject, where, offset, limit)
         return [
             {
@@ -264,15 +406,29 @@ class SqlOverviewRepository:
         }
 
     def provider_status(self, organization_id: UUID) -> list[dict[str, object]]:
+        connections = {
+            row.id: row
+            for row in self._session.scalars(
+                select(ProviderConnection).where(
+                    ProviderConnection.organization_id == organization_id
+                )
+            )
+        }
         managers = list(
             self._session.scalars(
                 select(FirewallManager)
                 .where(FirewallManager.organization_id == organization_id)
+                .where(FirewallManager.is_mock.is_(False))
                 .order_by(FirewallManager.display_name)
             )
         )
         result: list[dict[str, object]] = []
         for manager in managers:
+            connection = (
+                connections.get(manager.provider_connection_id)
+                if manager.provider_connection_id is not None
+                else None
+            )
             latest = self._session.scalar(
                 select(SyncRun)
                 .where(
@@ -282,9 +438,12 @@ class SqlOverviewRepository:
                 .order_by(SyncRun.started_at.desc())
                 .limit(1)
             )
+            current_status = connection.sync_status if connection is not None else None
+            is_active_sync = current_status in {"QUEUED", "RUNNING"}
             result.append(
                 {
                     "manager_id": manager.id,
+                    "connection_id": manager.provider_connection_id,
                     "provider": manager.provider,
                     "display_name": manager.display_name,
                     "provider_version": manager.provider_version,
@@ -295,14 +454,394 @@ class SqlOverviewRepository:
                         else ProviderEvidenceProfile.REAL.value
                     ),
                     "writable": not manager.read_only,
-                    "sync_status": latest.status if latest else None,
-                    "sync_complete": latest.complete if latest else False,
+                    "sync_status": current_status or (latest.status if latest else None),
+                    "sync_complete": False
+                    if is_active_sync
+                    else (latest.complete if latest else False),
                     "resources_seen": latest.resources_seen if latest else 0,
-                    "last_sync_at": latest.completed_at if latest else None,
-                    "error_code": latest.error_code if latest else None,
+                    "last_sync_at": (
+                        connection.last_sync
+                        if connection is not None and connection.last_sync is not None
+                        else latest.completed_at
+                        if latest
+                        else None
+                    ),
+                    "error_code": (
+                        connection.last_error_code
+                        if connection is not None and not is_active_sync
+                        else latest.error_code
+                        if latest
+                        else None
+                    ),
                 }
             )
         return result
+
+    def synchronization_discrepancies(  # noqa: PLR0912, PLR0913, PLR0917 -- explicit state reducer
+        self,
+        organization_id: UUID,
+        manager_id: UUID | None = None,
+        policy_id: UUID | None = None,
+        resource_type: str | None = None,
+        state: str | None = None,
+        connection_id: UUID | None = None,
+    ) -> list[dict[str, object]]:
+        """Return bounded, organization-scoped drift evidence without provider payload leaks."""
+        query = (
+            select(DriftRecord)
+            .join(FirewallManager, FirewallManager.id == DriftRecord.manager_id)
+            .where(
+                DriftRecord.organization_id == organization_id,
+                FirewallManager.is_mock.is_(False),
+            )
+        )
+        if manager_id is not None:
+            query = query.where(DriftRecord.manager_id == manager_id)
+        if resource_type is not None:
+            query = query.where(DriftRecord.resource_type == resource_type)
+        if state is not None:
+            query = query.where(DriftRecord.status == state)
+        if connection_id is not None:
+            query = query.join(FirewallManager, FirewallManager.id == DriftRecord.manager_id).where(
+                FirewallManager.provider_connection_id == connection_id
+            )
+        rows = list(self._session.scalars(query.order_by(DriftRecord.created_at.desc()).limit(500)))
+        result: dict[tuple[str, UUID], dict[str, object]] = {}
+        for row in rows:
+            if row.resource_type == "firewall_objects":
+                object_row = self._session.get(FirewallObject, row.resource_id)
+                if (
+                    object_row is not None
+                    and object_row.object_type in _PROVIDER_SHARED_OBJECT_TYPES
+                ):
+                    continue
+            item = self._drift_response(row, policy_id)
+            if item is not None:
+                result[(row.resource_type, row.resource_id)] = item
+        # Missing and provider-only resources do not necessarily have a DriftRecord. Include
+        # them from the authoritative normalized inventory without changing ownership state.
+        resource_models: tuple[tuple[str, type[Any]], ...] = (
+            ("provider_domains", ProviderDomain),
+            ("devices", Device),
+            ("access_policies", AccessPolicy),
+            ("intrusion_policies", IntrusionPolicy),
+            ("variable_sets", VariableSet),
+            ("file_policies", FilePolicy),
+            ("rule_categories", RuleCategory),
+            ("access_rules", AccessRule),
+            ("firewall_objects", FirewallObject),
+            ("security_zones", SecurityZone),
+        )
+        managers = select(
+            FirewallManager.id, FirewallManager.provider, FirewallManager.provider_connection_id
+        ).where(FirewallManager.is_mock.is_(False))
+        manager_rows = {
+            manager_id_value: (provider, provider_connection_id)
+            for manager_id_value, provider, provider_connection_id in self._session.execute(
+                managers
+            )
+            if manager_id is None or manager_id_value == manager_id
+            if connection_id is None or provider_connection_id == connection_id
+        }
+        for table_name, model in resource_models:
+            inventory_query = select(model).where(
+                model.organization_id == organization_id,
+                model.manager_id.in_(manager_rows),
+            )
+            if table_name == "firewall_objects":
+                inventory_query = inventory_query.where(
+                    ~FirewallObject.object_type.in_(_PROVIDER_SHARED_OBJECT_TYPES)
+                )
+            for resource in self._session.scalars(inventory_query):
+                if resource.management_state in {"OBSERVED", "UNMANAGED"}:
+                    display_state = "OBSERVED"
+                    provider_only = True
+                elif resource.management_state not in {"DRIFTED", "MISSING", "CONFLICT"}:
+                    continue
+                else:
+                    display_state = resource.management_state
+                    provider_only = False
+                resource_policy_id = getattr(resource, "policy_id", None)
+                if policy_id is not None and resource_policy_id != policy_id:
+                    continue
+                if resource_type is not None and resource_type != table_name:
+                    continue
+                if state is not None and state != display_state:
+                    continue
+                provider, provider_connection_id = manager_rows[resource.manager_id]
+                key = (table_name, resource.id)
+                result.setdefault(
+                    key,
+                    {
+                        "id": resource.id,
+                        "manager_id": resource.manager_id,
+                        "connection_id": provider_connection_id,
+                        "provider": provider,
+                        "resource_type": table_name,
+                        "resource_id": resource.id,
+                        "name": resource.name,
+                        "policy_id": resource_policy_id,
+                        "state": display_state,
+                        "provider_only": provider_only,
+                        "previous_fingerprint": None,
+                        "observed_fingerprint": resource.provider_fingerprint,
+                        "previous_snapshot": resource.application_snapshot or {},
+                        "observed_snapshot": self._resource_snapshot(resource),
+                        "details": {
+                            "summary": (
+                                "Provider resource is not known to application ownership"
+                                if provider_only
+                                else f"Resource is {display_state.lower()}"
+                            )
+                        },
+                        "created_at": resource.updated_at,
+                    },
+                )
+        return list(result.values())
+
+    def _drift_response(self, row: DriftRecord, policy_id: UUID | None) -> dict[str, object] | None:
+        resource_models: dict[str, type[Any]] = {
+            "provider_domains": ProviderDomain,
+            "devices": Device,
+            "access_policies": AccessPolicy,
+            "intrusion_policies": IntrusionPolicy,
+            "variable_sets": VariableSet,
+            "file_policies": FilePolicy,
+            "rule_categories": RuleCategory,
+            "access_rules": AccessRule,
+            "firewall_objects": FirewallObject,
+            "security_zones": SecurityZone,
+        }
+        model = resource_models.get(row.resource_type)
+        resource = self._session.get(model, row.resource_id) if model else None
+        if (
+            resource is None
+            or resource.management_state != row.status
+            or resource.last_seen_sync_run_id != row.sync_run_id
+        ):
+            return None
+        resource_policy_id = getattr(resource, "policy_id", None)
+        if policy_id is not None and resource_policy_id != policy_id:
+            return None
+        manager = self._session.get(FirewallManager, row.manager_id)
+        if manager is None:
+            return None
+        return {
+            "id": row.id,
+            "manager_id": row.manager_id,
+            "connection_id": manager.provider_connection_id,
+            "provider": manager.provider,
+            "resource_type": row.resource_type,
+            "resource_id": row.resource_id,
+            "name": str(
+                (row.observed_snapshot or {}).get("name")
+                or getattr(resource, "name", row.resource_id)
+            ),
+            "policy_id": resource_policy_id,
+            "state": row.status,
+            "provider_only": False,
+            "previous_fingerprint": row.previous_fingerprint,
+            "observed_fingerprint": row.observed_fingerprint,
+            "previous_snapshot": row.previous_snapshot or {},
+            "observed_snapshot": row.observed_snapshot or {},
+            "details": row.details,
+            "created_at": row.created_at,
+        }
+
+    def _resource_snapshot(self, resource: Any) -> dict[str, object]:
+        values = {"name": resource.name, "fingerprint": resource.provider_fingerprint}
+        for key in (
+            "action",
+            "enabled",
+            "position",
+            "category_id",
+            "object_type",
+            "normalized_value",
+            "zone_type",
+            "model",
+        ):
+            value = getattr(resource, key, None)
+            if value is not None:
+                values[key] = str(value) if isinstance(value, UUID) else value
+        if isinstance(resource, AccessRule):
+            object_keys = {
+                "SOURCE_NETWORK": "source_object_ids",
+                "DESTINATION_NETWORK": "destination_object_ids",
+                "SOURCE_PORT": "source_port_object_ids",
+                "DESTINATION_PORT": "destination_port_object_ids",
+                "PORT_SERVICE": "destination_port_object_ids",
+                "APPLICATION": "application_object_ids",
+                "URL": "url_object_ids",
+            }
+            object_values: dict[str, list[str]] = {key: [] for key in object_keys.values()}
+            for target_id, element_type in self._session.execute(
+                select(ObjectReference.target_object_id, ObjectReference.element_type).where(
+                    ObjectReference.source_rule_id == resource.id
+                )
+            ):
+                key = object_keys.get(str(element_type))
+                if key:
+                    object_values[key].append(str(target_id))
+            zone_keys = {"SOURCE": "source_zone_ids", "DESTINATION": "destination_zone_ids"}
+            zone_values: dict[str, list[str]] = {key: [] for key in zone_keys.values()}
+            for zone_id, element_type in self._session.execute(
+                select(RuleZoneReference.zone_id, RuleZoneReference.element_type).where(
+                    RuleZoneReference.rule_id == resource.id
+                )
+            ):
+                key = zone_keys.get(str(element_type))
+                if key:
+                    zone_values[key].append(str(zone_id))
+            values.update(object_values)
+            values.update(zone_values)
+            values["logging"] = (
+                "BEGIN" if resource.log_begin else "END" if resource.log_end else "NONE"
+            )
+            values["intrusion_policy_id"] = (
+                str(resource.intrusion_policy_id) if resource.intrusion_policy_id else None
+            )
+            values["variable_set_id"] = (
+                str(resource.variable_set_id) if resource.variable_set_id else None
+            )
+            values["file_policy_id"] = (
+                str(resource.file_policy_id) if resource.file_policy_id else None
+            )
+        elif isinstance(resource, FirewallObject):
+            values["member_object_ids"] = [
+                str(target_id)
+                for (target_id,) in self._session.execute(
+                    select(ObjectReference.target_object_id).where(
+                        ObjectReference.source_object_id == resource.id,
+                        ObjectReference.element_type == "MEMBER",
+                    )
+                )
+            ]
+        return values
+
+    def _drift_belongs_to_policy(self, row: DriftRecord, policy_id: UUID) -> bool:
+        tables = {"access_rules": AccessRule, "rule_categories": RuleCategory}
+        model = tables.get(row.resource_type)
+        if model is None:
+            return True
+        return (
+            self._session.scalar(
+                select(model.id).where(model.id == row.resource_id, model.policy_id == policy_id)
+            )
+            is not None
+        )
+
+    def accept_provider_state(
+        self, organization_id: UUID, drift_id: UUID, actor_user_id: UUID
+    ) -> dict[str, object] | None:
+        """Accept only the already-synchronized observation; never infer ownership."""
+        row = self._session.scalar(
+            select(DriftRecord).where(
+                DriftRecord.id == drift_id, DriftRecord.organization_id == organization_id
+            )
+        )
+        if row is None:
+            return None
+        resource_models: dict[str, type[Any]] = {
+            "provider_domains": ProviderDomain,
+            "devices": Device,
+            "access_policies": AccessPolicy,
+            "intrusion_policies": IntrusionPolicy,
+            "variable_sets": VariableSet,
+            "file_policies": FilePolicy,
+            "rule_categories": RuleCategory,
+            "access_rules": AccessRule,
+            "firewall_objects": FirewallObject,
+            "security_zones": SecurityZone,
+        }
+        model = resource_models.get(row.resource_type)
+        resource = self._session.get(model, row.resource_id) if model else None
+        if resource is None or resource.manager_id != row.manager_id:
+            return None
+        latest_sync = self._session.scalar(
+            select(SyncRun)
+            .where(
+                SyncRun.organization_id == organization_id,
+                SyncRun.manager_id == row.manager_id,
+            )
+            .order_by(SyncRun.started_at.desc())
+            .limit(1)
+        )
+        if (
+            latest_sync is None
+            or latest_sync.complete is not True
+            or row.status not in {"DRIFTED", "CONFLICT", "MISSING"}
+            or (
+                row.status != "MISSING"
+                and resource.last_seen_sync_run_id != latest_sync.id
+            )
+        ):
+            return None
+        # Provider-only resources remain OBSERVED/UNMANAGED; accepting state never adopts them.
+        resource.application_snapshot = self._resource_snapshot(resource)
+        if getattr(resource, "owner_group_id", None) is None:
+            resource.management_state = ResourceState.OBSERVED
+        else:
+            resource.management_state = ResourceState.MANAGED
+        resource.revision += 1
+        row.status = "ACCEPTED"
+        row.details = {**row.details, "accepted_by_user_id": str(actor_user_id)}
+        self._session.add(
+            AuditEvent(
+                organization_id=organization_id,
+                actor_user_id=actor_user_id,
+                action="accept_provider_state",
+                resource_type=row.resource_type,
+                resource_id=row.resource_id,
+                decision="SUCCESS",
+                reason_code="PROVIDER_STATE_ACCEPTED",
+                interface="rest",
+                details={"drift_id": str(row.id), "manager_id": str(row.manager_id)},
+            )
+        )
+        self._session.commit()
+        return {"id": row.id, "state": resource.management_state}
+
+    def reconciliation_proposal(
+        self, organization_id: UUID, drift_id: UUID
+    ) -> dict[str, object] | None:
+        row = self._session.scalar(
+            select(DriftRecord).where(
+                DriftRecord.id == drift_id,
+                DriftRecord.organization_id == organization_id,
+                DriftRecord.status.in_(("DRIFTED", "CONFLICT", "MISSING")),
+            )
+        )
+        if row is None:
+            return None
+        resource_models: dict[str, type[Any]] = {
+            "access_rules": AccessRule,
+            "firewall_objects": FirewallObject,
+        }
+        model = resource_models.get(row.resource_type)
+        resource = self._session.get(model, row.resource_id) if model else None
+        if resource is None:
+            return None
+        owner_group_id = getattr(resource, "owner_group_id", None)
+        policy_id = getattr(resource, "owner_policy_id", None) or getattr(
+            resource, "policy_id", None
+        )
+        if owner_group_id is None or policy_id is None:
+            return None
+        desired = (row.previous_snapshot or {}).get("application_snapshot")
+        if not isinstance(desired, dict):
+            desired = row.previous_snapshot or {}
+        if not desired:
+            return None
+        return {
+            "drift_id": row.id,
+            "resource_type": row.resource_type,
+            "resource_id": resource.id,
+            "resource_name": resource.name,
+            "owner_group_id": owner_group_id,
+            "policy_id": policy_id,
+            "status": row.status,
+            "desired": desired,
+        }
 
 
 class SqlAuthorizationRepository:
@@ -538,6 +1077,11 @@ class SqlAuthorizationRepository:
     def object_create_grant_state(
         self, group_id: UUID, policy_id: UUID, object_type: str, organization_id: UUID
     ) -> tuple[UUID, dict[str, str], int] | None:
+        grant_type = {
+            "NETWORK_GROUP": "NETWORK",
+            "PORT_SERVICE_GROUP": "PORT_SERVICE",
+            "URL_GROUP": "URL",
+        }.get(object_type, object_type)
         row = self._session.execute(
             select(
                 AccessPolicy.manager_id,
@@ -560,7 +1104,7 @@ class SqlAuthorizationRepository:
                 ObjectCreateGrant.organization_id == organization_id,
                 ObjectCreateGrant.group_id == group_id,
                 ObjectCreateGrant.policy_id == policy_id,
-                ObjectCreateGrant.object_type == object_type,
+                ObjectCreateGrant.object_type == grant_type,
             )
         ).one_or_none()
         if row is None:
@@ -728,8 +1272,14 @@ class SqlAuthorizationRepository:
         user.revision += 1
         return True
 
-    def delegated_context_view(
-        self, user_id: UUID, group_id: UUID, policy_id: UUID, organization_id: UUID
+    def delegated_context_view(  # noqa: PLR0913, PLR0917 -- explicit context filters
+        self,
+        user_id: UUID,
+        group_id: UUID,
+        policy_id: UUID,
+        organization_id: UUID,
+        include_applications: bool = True,
+        include_rules: bool = True,
     ) -> dict[str, object] | None:
         policy = self._session.scalar(
             select(AccessPolicy).where(
@@ -741,17 +1291,21 @@ class SqlAuthorizationRepository:
         capabilities, _revision, _delegated = self.policy_capabilities(
             user_id, group_id, policy_id, organization_id
         )
-        rules = list(
-            self._session.scalars(
-                select(AccessRule)
-                .where(
-                    AccessRule.organization_id == organization_id,
-                    AccessRule.policy_id == policy_id,
-                    AccessRule.owner_group_id == group_id,
-                    AccessRule.management_state.notin_(("MISSING", "CONFLICT")),
+        rules = (
+            list(
+                self._session.scalars(
+                    select(AccessRule)
+                    .where(
+                        AccessRule.organization_id == organization_id,
+                        AccessRule.policy_id == policy_id,
+                        AccessRule.owner_group_id == group_id,
+                        AccessRule.management_state.in_(_CONTEXT_RESOURCE_STATES),
+                    )
+                    .order_by(AccessRule.position, AccessRule.id)
                 )
-                .order_by(AccessRule.position, AccessRule.id)
             )
+            if include_rules
+            else []
         )
         rule_ids = [row.id for row in rules]
         rule_elements: dict[UUID, dict[str, list[str]]] = {
@@ -767,7 +1321,7 @@ class SqlAuthorizationRepository:
             }
             for rule_id in rule_ids
         }
-        if rule_ids:
+        if rule_ids and include_rules:
             zone_references = self._session.execute(
                 select(RuleZoneReference.rule_id, SecurityZone.name, RuleZoneReference.element_type)
                 .join(SecurityZone, SecurityZone.id == RuleZoneReference.zone_id)
@@ -806,17 +1360,24 @@ class SqlAuthorizationRepository:
                 key = element_keys.get(str(element_type))
                 if rule_id is not None and key is not None:
                     rule_elements[rule_id][key].append(str(object_name))
-        objects = list(
+        object_type_filter = (
+            True
+            if include_applications
+            else ~FirewallObject.object_type.in_(_PROVIDER_SHARED_OBJECT_TYPES)
+        )
+        object_rows = list(
             self._session.execute(
                 select(
                     FirewallObject.id,
                     FirewallObject.name,
                     FirewallObject.object_type,
+                    FirewallObject.normalized_value,
+                    FirewallObject.management_state,
                     FirewallObject.owner_group_id,
                     FirewallObject.owner_policy_id,
                     FirewallObject.created_by_user_id,
                 )
-                .join(
+                .outerjoin(
                     ObjectUseGrant,
                     (ObjectUseGrant.object_id == FirewallObject.id)
                     & (ObjectUseGrant.organization_id == FirewallObject.organization_id),
@@ -824,15 +1385,48 @@ class SqlAuthorizationRepository:
                 .where(
                     FirewallObject.organization_id == organization_id,
                     FirewallObject.manager_id == policy.manager_id,
-                    FirewallObject.management_state.in_(_USABLE_STATES),
-                    ObjectUseGrant.group_id == group_id,
-                    ObjectUseGrant.policy_id == policy_id,
-                    ObjectUseGrant.permission == "use",
+                    FirewallObject.management_state.in_(_CONTEXT_RESOURCE_STATES),
+                    object_type_filter,
+                    or_(
+                        FirewallObject.object_type.in_(_PROVIDER_SHARED_OBJECT_TYPES),
+                        and_(
+                            ObjectUseGrant.group_id == group_id,
+                            ObjectUseGrant.policy_id == policy_id,
+                            ObjectUseGrant.permission == "use",
+                        ),
+                    ),
                 )
                 .distinct()
                 .order_by(FirewallObject.name, FirewallObject.id)
             )
         )
+        object_ids = [row[0] for row in object_rows]
+        member_ids_by_object: dict[UUID, list[UUID]] = {}
+        if object_ids:
+            for source_id, target_id in self._session.execute(
+                select(ObjectReference.source_object_id, ObjectReference.target_object_id).where(
+                    ObjectReference.organization_id == organization_id,
+                    ObjectReference.source_object_id.in_(object_ids),
+                    ObjectReference.element_type == "MEMBER",
+                )
+            ):
+                if source_id is not None:
+                    member_ids_by_object.setdefault(source_id, []).append(target_id)
+        objects = [
+            {
+                "id": row[0],
+                "name": row[1],
+                "object_type": row[2],
+                "normalized_value": row[3],
+                "management_state": row[4],
+                "owner_type": "GROUP" if row[5] is not None else "PROVIDER",
+                "owner_group_id": row[5],
+                "owner_policy_id": row[6],
+                "created_by_user_id": row[7],
+                "member_object_ids": member_ids_by_object.get(row[0], []),
+            }
+            for row in object_rows
+        ]
         zones = list(
             self._session.execute(
                 select(SecurityZone.id, SecurityZone.name, ZoneGrant.direction)
@@ -863,6 +1457,12 @@ class SqlAuthorizationRepository:
                 .order_by(ObjectCreateGrant.object_type)
             )
         )
+        group_types = {
+            "NETWORK": "NETWORK_GROUP",
+            "PORT_SERVICE": "PORT_SERVICE_GROUP",
+            "URL": "URL_GROUP",
+        }
+        create_types.extend(group_types[item] for item in create_types if item in group_types)
         manager = self._session.get(FirewallManager, policy.manager_id)
         if manager is None:
             return None
@@ -894,6 +1494,66 @@ class SqlAuthorizationRepository:
                 )
             )
         )
+        intrusion_policies = list(
+            self._session.scalars(
+                select(IntrusionPolicy)
+                .where(
+                    IntrusionPolicy.organization_id == organization_id,
+                    IntrusionPolicy.manager_id == policy.manager_id,
+                    IntrusionPolicy.domain_id == policy.domain_id,
+                    (
+                        IntrusionPolicy.management_state.in_(_USABLE_STATES)
+                        | IntrusionPolicy.id.in_(
+                            select(AccessRule.intrusion_policy_id).where(
+                                AccessRule.policy_id == policy_id,
+                                AccessRule.intrusion_policy_id.is_not(None),
+                            )
+                        )
+                    ),
+                )
+                .order_by(IntrusionPolicy.name, IntrusionPolicy.id)
+            )
+        )
+        variable_sets = list(
+            self._session.scalars(
+                select(VariableSet)
+                .where(
+                    VariableSet.organization_id == organization_id,
+                    VariableSet.manager_id == policy.manager_id,
+                    VariableSet.domain_id == policy.domain_id,
+                    (
+                        VariableSet.management_state.in_(_USABLE_STATES)
+                        | VariableSet.id.in_(
+                            select(AccessRule.variable_set_id).where(
+                                AccessRule.policy_id == policy_id,
+                                AccessRule.variable_set_id.is_not(None),
+                            )
+                        )
+                    ),
+                )
+                .order_by(VariableSet.name, VariableSet.id)
+            )
+        )
+        file_policies = list(
+            self._session.scalars(
+                select(FilePolicy)
+                .where(
+                    FilePolicy.organization_id == organization_id,
+                    FilePolicy.manager_id == policy.manager_id,
+                    FilePolicy.domain_id == policy.domain_id,
+                    (
+                        FilePolicy.management_state.in_(_USABLE_STATES)
+                        | FilePolicy.id.in_(
+                            select(AccessRule.file_policy_id).where(
+                                AccessRule.policy_id == policy_id,
+                                AccessRule.file_policy_id.is_not(None),
+                            )
+                        )
+                    ),
+                )
+                .order_by(FilePolicy.name, FilePolicy.id)
+            )
+        )
         return {
             "policy": {
                 "id": policy.id,
@@ -903,6 +1563,11 @@ class SqlAuthorizationRepository:
                 "revision": policy.revision,
             },
             "provider_writable": bool(manager) and not manager.read_only,
+            "firewall_deployment_status": (
+                "SUPPORTED"
+                if provider_capabilities.get("deployment_status") == "SUPPORTED"
+                else "NOT_AVAILABLE"
+            ),
             "provider_type": manager.provider,
             "provider_name": manager.display_name,
             "provider_is_mock": manager.is_mock,
@@ -912,28 +1577,42 @@ class SqlAuthorizationRepository:
                     "id": row.id,
                     "name": row.name,
                     "action": row.action,
+                    "enabled": row.enabled,
+                    "logging": "BEGIN" if row.log_begin else "END" if row.log_end else "NONE",
                     "position": row.position,
                     "management_state": row.management_state,
                     "revision": row.revision,
                     "category_id": row.category_id,
+                    "intrusion_policy_id": row.intrusion_policy_id,
+                    "variable_set_id": row.variable_set_id,
+                    "file_policy_id": row.file_policy_id,
                     **rule_elements[row.id],
                 }
                 for row in rules
             ],
-            "objects": [
-                {
-                    "id": row[0],
-                    "name": row[1],
-                    "object_type": row[2],
-                    "owner_type": "GROUP" if row[3] is not None else "PROVIDER",
-                    "owner_group_id": row[3],
-                    "owner_policy_id": row[4],
-                    "created_by_user_id": row[5],
-                }
-                for row in objects
-            ],
+            "objects": objects,
             "zones": [{"id": row[0], "name": row[1], "direction": row[2]} for row in zones],
             "categories": [{"id": row[0], "name": row[1]} for row in categories],
+            "intrusion_policies": [
+                {
+                    "id": row.id,
+                    "name": row.name,
+                    "default_variable_set_id": next(
+                        (
+                            variable.id
+                            for variable in variable_sets
+                            if variable.native_id == row.default_variable_set_native_id
+                        ),
+                        None,
+                    ),
+                }
+                for row in intrusion_policies
+            ],
+            "variable_sets": [
+                {"id": row.id, "name": row.name, "is_default": row.is_default}
+                for row in variable_sets
+            ],
+            "file_policies": [{"id": row.id, "name": row.name} for row in file_policies],
             "ip_ranges": ranges,
             "object_create": [
                 {
@@ -1263,6 +1942,29 @@ class SqlAdministrationRepository:
                 raise ResourceOutOfScopeError
         if resource in {"object-use-grants", "zone-grants"}:
             self._validate_provider_resource_manager(organization_id, resource, values)
+        if resource == "object-use-grants":
+            self._validate_network_object_grant(organization_id, values)
+
+    def _validate_network_object_grant(
+        self, organization_id: UUID, values: dict[str, object]
+    ) -> None:
+        """Require every assigned network object to fit a Group's authorized ranges."""
+        object_value, object_type = self._session.execute(
+            select(FirewallObject.normalized_value, FirewallObject.object_type).where(
+                FirewallObject.id == values.get("object_id"),
+                FirewallObject.organization_id == organization_id,
+            )
+        ).one_or_none() or (None, None)
+        if object_type != "NETWORK" or not object_value:
+            return
+        ranges, _revision = self.ip_range_grants(
+            UUID(str(values["group_id"])),
+            UUID(str(values["policy_id"])),
+            organization_id,
+        )
+        contained = any(network_is_contained(str(object_value), grant) for grant in ranges)
+        if not ranges or not contained:
+            raise InvalidInputError(details={"code": "NETWORK_OBJECT_OUTSIDE_ASSIGNED_IP_RANGES"})
 
     def _validate_provider_resource_manager(
         self, organization_id: UUID, resource: str, values: dict[str, object]
@@ -1403,6 +2105,26 @@ class SqlSyncRepository:
     def __init__(self, session: Session) -> None:
         self._session = session
 
+    @staticmethod
+    def _resource_snapshot(resource: Any) -> dict[str, object]:
+        values: dict[str, object] = {
+            "name": resource.name,
+            "fingerprint": resource.provider_fingerprint,
+        }
+        for key in (
+            "action",
+            "position",
+            "category_id",
+            "object_type",
+            "normalized_value",
+            "zone_type",
+            "model",
+        ):
+            value = getattr(resource, key, None)
+            if value is not None:
+                values[key] = str(value) if isinstance(value, UUID) else value
+        return values
+
     def manager_context(self, manager_id: UUID) -> tuple[UUID, ProviderKind] | None:
         row = self._session.execute(
             select(FirewallManager.organization_id, FirewallManager.provider).where(
@@ -1431,27 +2153,9 @@ class SqlSyncRepository:
                 expected = {
                     name: CapabilityStatus(status) for name, status in manager.capabilities.items()
                 }
-                read_capabilities = {
-                    "authentication_session",
-                    "manager_tenant_discovery",
-                    "device_discovery",
-                    "access_policy_discovery",
-                    "rule_category_read",
-                    "access_rule_read",
-                    "network_object_read",
-                    "network_groups",
-                    "security_zone_read",
-                }
-                write_promoted = any(
-                    status is not CapabilityStatus.NOT_STARTED
-                    for name, status in expected.items()
-                    if name not in read_capabilities
-                )
                 if (
                     info.evidence_profile is not ProviderEvidenceProfile.REAL
                     or info.capabilities != expected
-                    or info.writable
-                    or write_promoted
                 ):
                     raise CapabilityEvidenceMismatchError
             else:
@@ -1492,6 +2196,19 @@ class SqlSyncRepository:
                 entity_type.manager_id == manager_id, entity_type.native_id == item.native_id
             )
         )
+        observed_snapshot: dict[str, object] = {
+            "name": item.name,
+            "provider_version": item.native_version,
+            "fingerprint": item.fingerprint,
+            "metadata": sanitize_provider_metadata(item.native_metadata),
+        }
+        observed_snapshot.update(
+            {
+                key: str(value) if isinstance(value, UUID) else value
+                for key, value in extra.items()
+                if value is not None
+            }
+        )
         if row is None:
             row = entity_type(
                 organization_id=organization_id,
@@ -1501,6 +2218,7 @@ class SqlSyncRepository:
                 provider_version=item.native_version,
                 provider_fingerprint=item.fingerprint,
                 native_metadata=sanitize_provider_metadata(item.native_metadata),
+                application_snapshot=observed_snapshot,
                 management_state=ResourceState.OBSERVED,
                 revision=1,
                 last_seen_sync_run_id=run_id,
@@ -1509,7 +2227,12 @@ class SqlSyncRepository:
             self._session.add(row)
         else:
             changed = row.provider_fingerprint != item.fingerprint
+            baseline_missing = not row.application_snapshot
             previous = row.provider_fingerprint
+            previous_snapshot = {
+                **self._resource_snapshot(row),
+                "application_snapshot": row.application_snapshot or {},
+            }
             ownership_name_conflict = bool(
                 isinstance(row, FirewallObject)
                 and row.owner_group_id is not None
@@ -1530,7 +2253,15 @@ class SqlSyncRepository:
                     "modified_by_user_id",
                 }:
                     setattr(row, key, value)
-            if changed or ownership_name_conflict:
+            if baseline_missing and not ownership_name_conflict:
+                row.application_snapshot = observed_snapshot
+                row.management_state = (
+                    ResourceState.MANAGED
+                    if getattr(row, "owner_group_id", None) is not None
+                    else ResourceState.OBSERVED
+                )
+                row.revision += 1
+            elif changed or ownership_name_conflict:
                 row.management_state = (
                     ResourceState.CONFLICT if ownership_name_conflict else ResourceState.DRIFTED
                 )
@@ -1545,6 +2276,10 @@ class SqlSyncRepository:
                         status=row.management_state,
                         previous_fingerprint=previous,
                         observed_fingerprint=item.fingerprint,
+                        previous_snapshot=previous_snapshot,
+                        observed_snapshot={
+                            **observed_snapshot,
+                        },
                         details={
                             "summary": (
                                 "Application-owned provider name no longer matches its "
@@ -1570,6 +2305,228 @@ class SqlSyncRepository:
         self, organization_id: UUID, manager_id: UUID, run_id: UUID, item: DiscoveredDomain
     ) -> UUID:
         return self._upsert(ProviderDomain, organization_id, manager_id, run_id, item).id
+
+    def _native_resource_id(
+        self, model: type[SyncedModel], manager_id: UUID, native_id: str | None
+    ) -> UUID | None:
+        if not native_id:
+            return None
+        return self._session.scalar(
+            select(model.id).where(model.manager_id == manager_id, model.native_id == native_id)
+        )
+
+    def _prefixed_group_policies(
+        self, organization_id: UUID, manager_id: UUID, provider_name: str
+    ) -> list[tuple[UUID, UUID]]:
+        """Return active group/policy scopes matching a provider-owned name prefix."""
+        prefix, separator, _component = provider_name.partition("__")
+        if not separator or not prefix:
+            return []
+        return list(
+            self._session.execute(
+                select(Group.id, AccessPolicy.id)
+                .join(
+                    PolicyDelegation,
+                    (PolicyDelegation.group_id == Group.id)
+                    & (PolicyDelegation.organization_id == Group.organization_id),
+                )
+                .join(
+                    AccessPolicy,
+                    (AccessPolicy.id == PolicyDelegation.policy_id)
+                    & (AccessPolicy.organization_id == PolicyDelegation.organization_id),
+                )
+                .where(
+                    Group.organization_id == organization_id,
+                    Group.provider_slug == prefix,
+                    Group.is_active.is_(True),
+                    PolicyDelegation.is_active.is_(True),
+                    AccessPolicy.manager_id == manager_id,
+                    AccessPolicy.management_state.notin_(("MISSING", "CONFLICT")),
+                )
+                .order_by(AccessPolicy.id)
+            )
+        )
+
+    def _adopt_prefixed_object(
+        self,
+        organization_id: UUID,
+        manager_id: UUID,
+        row: FirewallObject,
+        provider_name: str,
+    ) -> None:
+        if row.object_type in _PROVIDER_SHARED_OBJECT_TYPES:
+            # Application catalogs are provider-owned, read-only, and shared
+            # with every delegated group; they never receive group grants.
+            self._session.query(ObjectUseGrant).filter(
+                ObjectUseGrant.organization_id == organization_id,
+                ObjectUseGrant.object_id == row.id,
+            ).delete(synchronize_session=False)
+            row.owner_group_id = None
+            row.owner_policy_id = None
+            row.expected_provider_name = None
+            return
+        scopes = self._prefixed_group_policies(organization_id, manager_id, provider_name)
+        if row.owner_group_id is not None:
+            if row.created_by_user_id is not None:
+                return
+            allowed = any(
+                self._network_object_scope_allowed(row, group_id, policy_id, organization_id)
+                for group_id, policy_id in scopes
+                if group_id == row.owner_group_id
+            )
+            if allowed:
+                return
+            self._session.query(ObjectUseGrant).filter(
+                ObjectUseGrant.organization_id == organization_id,
+                ObjectUseGrant.group_id == row.owner_group_id,
+                ObjectUseGrant.object_id == row.id,
+            ).delete(synchronize_session=False)
+            row.owner_group_id = None
+            row.owner_policy_id = None
+            row.expected_provider_name = None
+            row.management_state = ResourceState.UNMANAGED
+            row.revision += 1
+            return
+        if not scopes:
+            return
+        scopes = [
+            (group_id, policy_id)
+            for group_id, policy_id in scopes
+            if self._network_object_scope_allowed(row, group_id, policy_id, organization_id)
+        ]
+        if not scopes:
+            return
+        group_id = scopes[0][0]
+        row.owner_group_id = group_id
+        row.owner_policy_id = scopes[0][1]
+        row.expected_provider_name = provider_name
+        row.management_state = ResourceState.MANAGED
+        row.revision += 1
+        for _group_id, policy_id in scopes:
+            for permission in ("read", "use"):
+                exists = self._session.scalar(
+                    select(ObjectUseGrant.id).where(
+                        ObjectUseGrant.organization_id == organization_id,
+                        ObjectUseGrant.group_id == group_id,
+                        ObjectUseGrant.policy_id == policy_id,
+                        ObjectUseGrant.object_id == row.id,
+                        ObjectUseGrant.permission == permission,
+                    )
+                )
+                if exists is None:
+                    self._session.add(
+                        ObjectUseGrant(
+                            organization_id=organization_id,
+                            group_id=group_id,
+                            policy_id=policy_id,
+                            object_id=row.id,
+                            permission=permission,
+                        )
+                    )
+
+    def _network_object_scope_allowed(
+        self, row: FirewallObject, group_id: UUID, policy_id: UUID, organization_id: UUID
+    ) -> bool:
+        if row.object_type not in {"NETWORK", "NETWORK_GROUP"}:
+            return True
+        ranges = list(
+            self._session.scalars(
+                select(IpRangeGrant.network).where(
+                    IpRangeGrant.organization_id == organization_id,
+                    IpRangeGrant.policy_id == policy_id,
+                    IpRangeGrant.group_id == group_id,
+                )
+            )
+        )
+        if row.object_type == "NETWORK":
+            return bool(row.normalized_value) and any(
+                network_is_contained(str(row.normalized_value), str(grant)) for grant in ranges
+            )
+        member_ids = list(
+            self._session.scalars(
+                select(ObjectReference.target_object_id).where(
+                    ObjectReference.organization_id == organization_id,
+                    ObjectReference.source_object_id == row.id,
+                )
+            )
+        )
+        if not member_ids:
+            return False
+        members = list(
+            self._session.scalars(
+                select(FirewallObject).where(
+                    FirewallObject.organization_id == organization_id,
+                    FirewallObject.id.in_(member_ids),
+                )
+            )
+        )
+        return len(members) == len(member_ids) and all(
+            member.object_type == "NETWORK"
+            and bool(member.normalized_value)
+            and any(
+                network_is_contained(str(member.normalized_value), str(grant)) for grant in ranges
+            )
+            for member in members
+        )
+
+    def _adopt_prefixed_rule(  # noqa: PLR0913, PLR0917 -- adoption scope is explicit
+        self,
+        organization_id: UUID,
+        manager_id: UUID,
+        policy_id: UUID,
+        category_id: UUID | None,
+        row: AccessRule,
+        provider_name: str,
+    ) -> None:
+        """Adopt only rules inside the matching immutable group category."""
+        if row.owner_group_id is not None or category_id is None:
+            return
+        category = self._session.get(RuleCategory, category_id)
+        if category is None:
+            return
+        scopes = self._prefixed_group_policies(organization_id, manager_id, provider_name)
+        prefix, _separator, _component = provider_name.partition("__")
+        for group_id, delegated_policy_id in scopes:
+            if delegated_policy_id != policy_id or category.name != f"{prefix}__RULES":
+                continue
+            category_mapping = self._session.scalar(
+                select(GroupPolicyCategoryMapping).where(
+                    GroupPolicyCategoryMapping.organization_id == organization_id,
+                    GroupPolicyCategoryMapping.category_id == category.id,
+                )
+            )
+            if category_mapping is not None and (
+                category_mapping.group_id != group_id or category_mapping.policy_id != policy_id
+            ):
+                continue
+            mapping = self._session.scalar(
+                select(GroupPolicyCategoryMapping).where(
+                    GroupPolicyCategoryMapping.organization_id == organization_id,
+                    GroupPolicyCategoryMapping.group_id == group_id,
+                    GroupPolicyCategoryMapping.policy_id == policy_id,
+                )
+            )
+            if mapping is None:
+                mapping = GroupPolicyCategoryMapping(
+                    organization_id=organization_id,
+                    group_id=group_id,
+                    policy_id=policy_id,
+                    category_id=category.id,
+                    expected_category_name=category.name,
+                    sync_state="SYNCED",
+                    revision=1,
+                )
+                self._session.add(mapping)
+            elif mapping.category_id != category.id:
+                continue
+            else:
+                mapping.sync_state = "SYNCED"
+                mapping.expected_category_name = category.name
+                mapping.revision += 1
+            row.owner_group_id = group_id
+            row.management_state = ResourceState.MANAGED
+            row.revision += 1
+            return
 
     def upsert_device(
         self,
@@ -1618,6 +2575,59 @@ class SqlSyncRepository:
             position=item.position,
         ).id
 
+    def upsert_intrusion_policy(
+        self,
+        organization_id: UUID,
+        manager_id: UUID,
+        domain_id: UUID,
+        run_id: UUID,
+        item: DiscoveredIntrusionPolicy,
+    ) -> UUID:
+        return self._upsert(
+            IntrusionPolicy,
+            organization_id,
+            manager_id,
+            run_id,
+            item,
+            domain_id=domain_id,
+            default_variable_set_native_id=item.default_variable_set_native_id,
+        ).id
+
+    def upsert_variable_set(
+        self,
+        organization_id: UUID,
+        manager_id: UUID,
+        domain_id: UUID,
+        run_id: UUID,
+        item: DiscoveredVariableSet,
+    ) -> UUID:
+        return self._upsert(
+            VariableSet,
+            organization_id,
+            manager_id,
+            run_id,
+            item,
+            domain_id=domain_id,
+            is_default=item.is_default,
+        ).id
+
+    def upsert_file_policy(
+        self,
+        organization_id: UUID,
+        manager_id: UUID,
+        domain_id: UUID,
+        run_id: UUID,
+        item: DiscoveredFilePolicy,
+    ) -> UUID:
+        return self._upsert(
+            FilePolicy,
+            organization_id,
+            manager_id,
+            run_id,
+            item,
+            domain_id=domain_id,
+        ).id
+
     def upsert_rule(  # noqa: PLR0913, PLR0917
         self,
         organization_id: UUID,
@@ -1627,7 +2637,22 @@ class SqlSyncRepository:
         run_id: UUID,
         item: DiscoveredRule,
     ) -> UUID:
-        return self._upsert(
+        intrusion_policy_id = self._native_resource_id(
+            IntrusionPolicy, manager_id, item.intrusion_policy_native_id
+        )
+        variable_set_id = self._native_resource_id(
+            VariableSet, manager_id, item.variable_set_native_id
+        )
+        if intrusion_policy_id is not None and variable_set_id is None:
+            default_variable_set_native_id = self._session.scalar(
+                select(IntrusionPolicy.default_variable_set_native_id).where(
+                    IntrusionPolicy.id == intrusion_policy_id
+                )
+            )
+            variable_set_id = self._native_resource_id(
+                VariableSet, manager_id, default_variable_set_native_id
+            )
+        row = self._upsert(
             AccessRule,
             organization_id,
             manager_id,
@@ -1636,8 +2661,25 @@ class SqlSyncRepository:
             policy_id=policy_id,
             category_id=category_id,
             action=item.action,
+            enabled=item.enabled,
+            log_begin=item.log_begin,
+            log_end=item.log_end,
+            intrusion_policy_id=intrusion_policy_id,
+            variable_set_id=variable_set_id,
+            file_policy_id=self._native_resource_id(
+                FilePolicy, manager_id, item.file_policy_native_id
+            ),
             position=item.position,
-        ).id
+        )
+        self._adopt_prefixed_rule(
+            organization_id,
+            manager_id,
+            policy_id,
+            category_id,
+            row,
+            item.name,
+        )
+        return row.id
 
     def upsert_object(
         self,
@@ -1647,7 +2689,7 @@ class SqlSyncRepository:
         run_id: UUID,
         item: DiscoveredObject,
     ) -> UUID:
-        return self._upsert(
+        row = self._upsert(
             FirewallObject,
             organization_id,
             manager_id,
@@ -1657,7 +2699,8 @@ class SqlSyncRepository:
             object_type=item.object_type,
             normalized_value=item.normalized_value,
             sharing_mode=item.sharing_mode,
-        ).id
+        )
+        return row.id
 
     def upsert_zone(
         self,
@@ -1746,6 +2789,22 @@ class SqlSyncRepository:
             if reference.zone_native_id in targets
         )
 
+    def refresh_rule_application_snapshot(
+        self, organization_id: UUID, rule_id: UUID
+    ) -> None:
+        row = self._session.scalar(
+            select(AccessRule).where(
+                AccessRule.id == rule_id,
+                AccessRule.organization_id == organization_id,
+            )
+        )
+        if row is not None and row.management_state not in {
+            ResourceState.DRIFTED,
+            ResourceState.CONFLICT,
+            ResourceState.MISSING,
+        }:
+            row.application_snapshot = self._resource_snapshot(row)
+
     def replace_object_references(
         self,
         organization_id: UUID,
@@ -1767,29 +2826,44 @@ class SqlSyncRepository:
             )
             for target_id in targets.values()
         )
+        row = self._session.get(FirewallObject, source_object_id)
+        if row is not None:
+            self._adopt_prefixed_object(organization_id, manager_id, row, row.name)
 
-    def complete_sync(self, run_id: UUID, manager_id: UUID, resources_seen: int) -> SyncResult:
+    def complete_sync(
+        self,
+        run_id: UUID,
+        manager_id: UUID,
+        resources_seen: int,
+        applications_only: bool = False,
+    ) -> SyncResult:
         for model in (
             ProviderDomain,
             Device,
             AccessPolicy,
+            IntrusionPolicy,
+            VariableSet,
+            FilePolicy,
             RuleCategory,
             AccessRule,
             FirewallObject,
             SecurityZone,
         ):
-            missing_ids = list(
-                self._session.scalars(
-                    select(model.id).where(
-                        model.manager_id == manager_id,
-                        or_(
-                            model.last_seen_sync_run_id.is_(None),
-                            model.last_seen_sync_run_id != run_id,
-                        ),
-                        model.management_state != ResourceState.MISSING,
-                    )
-                )
-            )
+            if applications_only and model is not FirewallObject:
+                continue
+            conditions = [
+                model.manager_id == manager_id,
+                or_(
+                    model.last_seen_sync_run_id.is_(None),
+                    model.last_seen_sync_run_id != run_id,
+                ),
+                model.management_state != ResourceState.MISSING,
+            ]
+            if model is FirewallObject and not applications_only:
+                conditions.append(~model.object_type.in_(_PROVIDER_SHARED_OBJECT_TYPES))
+            elif model is FirewallObject:
+                conditions.append(model.object_type.in_(_PROVIDER_SHARED_OBJECT_TYPES))
+            missing_ids = list(self._session.scalars(select(model.id).where(*conditions)))
             if missing_ids:
                 self._session.execute(
                     update(model)

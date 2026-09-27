@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from uuid import UUID
 
 from firewall_manager.application.authorization import require_action
-from firewall_manager.application.errors import InvalidPaginationError
+from firewall_manager.application.errors import InvalidPaginationError, ResourceOutOfScopeError
 from firewall_manager.application.ports import InventoryRepository
 from firewall_manager.domain.models import Action, Principal
 
@@ -108,3 +108,33 @@ class InventoryService:
     def provider_status(self, principal: Principal) -> list[dict[str, object]]:
         require_action(principal, Action.READ)
         return self._repository.provider_status(principal.organization_id)
+
+    def synchronization_discrepancies(  # noqa: PLR0913, PLR0917 -- explicit filter scope
+        self,
+        principal: Principal,
+        manager_id: UUID | None,
+        policy_id: UUID | None,
+        resource_type: str | None,
+        state: str | None,
+        connection_id: UUID | None,
+    ) -> list[dict[str, object]]:
+        require_action(principal, Action.READ)
+        return self._repository.synchronization_discrepancies(
+            principal.organization_id, manager_id, policy_id, resource_type, state, connection_id
+        )
+
+    def accept_provider_state(self, principal: Principal, drift_id: UUID) -> dict[str, object]:
+        require_action(principal, Action.MANAGE_PROVIDERS)
+        result = self._repository.accept_provider_state(
+            principal.organization_id, drift_id, principal.user_id
+        )
+        if result is None:
+            raise ResourceOutOfScopeError
+        return result
+
+    def reconciliation_proposal(self, principal: Principal, drift_id: UUID) -> dict[str, object]:
+        require_action(principal, Action.RECONCILE)
+        result = self._repository.reconciliation_proposal(principal.organization_id, drift_id)
+        if result is None:
+            raise ResourceOutOfScopeError
+        return result

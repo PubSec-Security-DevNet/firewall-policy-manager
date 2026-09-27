@@ -7,7 +7,7 @@ from collections.abc import Callable
 from typing import cast
 from uuid import UUID
 
-from firewall_manager.application.authorization import AuthorizationService
+from firewall_manager.application.authorization import AuthorizationService, require_action
 from firewall_manager.application.errors import (
     ChangeSetConflictError,
     InvalidChangeSetStateError,
@@ -52,15 +52,21 @@ _OPERATION_CAPABILITY = {
 }
 _OBJECT_CAPABILITY = {
     "NETWORK": ProviderCapability.NETWORK_OBJECT_CREATE,
+    "NETWORK_GROUP": ProviderCapability.NETWORK_OBJECT_CREATE,
     "PORT_SERVICE": ProviderCapability.PORT_SERVICE_OBJECT_CREATE,
+    "PORT_SERVICE_GROUP": ProviderCapability.PORT_SERVICE_OBJECT_CREATE,
     "URL": ProviderCapability.URL_OBJECT_CREATE,
+    "URL_GROUP": ProviderCapability.URL_OBJECT_CREATE,
     "APPLICATION": ProviderCapability.APPLICATION_OBJECT_CREATE,
     "APPLICATION_FILTER": ProviderCapability.APPLICATION_OBJECT_CREATE,
 }
 _OBJECT_MUTATION_CAPABILITY = {
     "NETWORK": ProviderCapability.NETWORK_OBJECT_MUTATION,
+    "NETWORK_GROUP": ProviderCapability.NETWORK_OBJECT_MUTATION,
     "PORT_SERVICE": ProviderCapability.PORT_SERVICE_OBJECT_MUTATION,
+    "PORT_SERVICE_GROUP": ProviderCapability.PORT_SERVICE_OBJECT_MUTATION,
     "URL": ProviderCapability.URL_OBJECT_MUTATION,
+    "URL_GROUP": ProviderCapability.URL_OBJECT_MUTATION,
     "APPLICATION": ProviderCapability.APPLICATION_OBJECT_MUTATION,
     "APPLICATION_FILTER": ProviderCapability.APPLICATION_OBJECT_MUTATION,
 }
@@ -135,6 +141,10 @@ class ChangeSetService:
             if decision.allowed:
                 result.append(row)
         return result
+
+    def list_for_admin(self, principal: Principal) -> list[dict[str, object]]:
+        require_action(principal, Action.MANAGE_PROVIDERS)
+        return self._repository.list_all_change_sets(principal)
 
     def get(
         self, principal: Principal, active_group_id: UUID, change_set_id: UUID
@@ -355,6 +365,7 @@ class ChangeSetService:
             and bool(transactions)
             and operation_kinds
             <= {
+                ChangeOperationKind.CREATE_OBJECT.value,
                 ChangeOperationKind.ENSURE_RULE_CATEGORY.value,
                 ChangeOperationKind.CREATE_RULE.value,
             }
@@ -384,7 +395,10 @@ class ChangeSetService:
                     result.get("status") == "SUCCEEDED"
                     and result.get("mutated") is True
                     and operation_kinds.get(str(result.get("operation_id")))
-                    == ChangeOperationKind.ENSURE_RULE_CATEGORY.value
+                    in {
+                        ChangeOperationKind.ENSURE_RULE_CATEGORY.value,
+                        ChangeOperationKind.CREATE_OBJECT.value,
+                    }
                 )
                 or (
                     result.get("status") in {"FAILED", "CONFLICT", "NOT_ATTEMPTED"}
@@ -696,6 +710,10 @@ class ChangeSetService:
         current = self._load(principal, active_group_id, change_set_id)
         self._repository.delete_change_set(principal, active_group_id, change_set_id)
         self._audit_for(current, principal, "change_set_deleted", "ALLOW")
+
+    def delete_for_admin(self, principal: Principal, change_set_id: UUID) -> None:
+        require_action(principal, Action.MANAGE_PROVIDERS)
+        self._repository.delete_admin_change_set(principal, change_set_id)
 
     def _load(
         self, principal: Principal, active_group_id: UUID, change_set_id: UUID
@@ -1039,6 +1057,15 @@ class ChangeSetService:
         if naming is None:
             raise ResourceOutOfScopeError
         slug = str(naming["group_slug"])
+        group_base_type = {
+            "NETWORK_GROUP": "NETWORK",
+            "PORT_SERVICE_GROUP": "PORT_SERVICE",
+            "URL_GROUP": "URL",
+        }.get(object_type)
+        if group_base_type is not None:
+            return self._evaluate_group_object(
+                context, payload, checks, naming, slug, object_type, group_base_type
+            )
         prefix = requested_name.split("__", 1)[0] if "__" in requested_name else None
         prefix_ok = prefix is None or prefix == slug
         checks.append(
@@ -1138,6 +1165,101 @@ class ChangeSetService:
             )
         return resolution_dict
 
+    def _evaluate_group_object(
+        self,
+        context: DelegatedPolicyContext,
+        payload: dict[str, object],
+        checks: list[dict[str, object]],
+        naming: dict[str, object],
+        slug: str,
+        object_type: str,
+        member_type: str,
+    ) -> dict[str, object]:
+        requested_name = str(payload.get("name", ""))
+        prefix = requested_name.split("__", 1)[0] if "__" in requested_name else None
+        prefix_ok = prefix is None or prefix == slug
+        members = payload.get("member_object_ids")
+        member_ids = [str(item) for item in members] if isinstance(members, list) else []
+        candidates = _as_dict_list(naming["objects"])
+        by_id = {str(item["object_id"]): item for item in candidates}
+        selected = [by_id[item] for item in member_ids if item in by_id]
+        members_ok = bool(member_ids) and len(selected) == len(member_ids)
+        types_ok = members_ok and all(str(item["object_type"]) == member_type for item in selected)
+        protocols = {
+            str(item.get("normalized_value", "")).split("/", 1)[0].casefold()
+            for item in selected
+            if member_type == "PORT_SERVICE" and "/" in str(item.get("normalized_value", ""))
+        }
+        protocol_ok = len(protocols) <= 1
+        self._append_decision(
+            checks,
+            ChangeOperationKind.CREATE_OBJECT,
+            "object_type",
+            object_type,
+            self._authorization.authorize(
+                context,
+                Action.CREATE,
+                AuthorizationResource(AuthorizationResourceType.OBJECT_TYPE, value=object_type),
+            ),
+        )
+        for element, allowed, reason in (
+            (
+                "provider_name_prefix",
+                prefix_ok,
+                "ALLOWED" if prefix_ok else "GROUP_PREFIX_MISMATCH",
+            ),
+            (
+                "group_members",
+                members_ok,
+                "ALLOWED" if members_ok else "GROUP_MEMBERS_REQUIRED",
+            ),
+            (
+                "group_member_types",
+                types_ok,
+                "ALLOWED" if types_ok else "GROUP_MEMBER_TYPE_MISMATCH",
+            ),
+            (
+                "group_protocols",
+                protocol_ok,
+                "ALLOWED" if protocol_ok else "PORT_GROUP_MIXED_PROTOCOLS",
+            ),
+        ):
+            checks.append(
+                {
+                    "operation": ChangeOperationKind.CREATE_OBJECT.value,
+                    "element_type": element,
+                    "element": object_type,
+                    "permission": "provider_group_constraints",
+                    "allowed": allowed,
+                    "reason": reason,
+                }
+            )
+        for item in selected:
+            self._append_decision(
+                checks,
+                ChangeOperationKind.CREATE_OBJECT,
+                "group_member",
+                str(item["object_id"]),
+                self._authorization.authorize(
+                    context,
+                    Action.USE,
+                    AuthorizationResource(
+                        AuthorizationResourceType.OBJECT, UUID(str(item["object_id"]))
+                    ),
+                ),
+            )
+        component = requested_name.split("__", 1)[1] if prefix == slug else requested_name
+        provider_name = self._naming.provider_name(
+            ProviderKind(str(naming["provider"])), slug, component
+        )
+        return {
+            "kind": NamingResolutionKind.NEW_OBJECT_REQUIRED.value,
+            "requested_name": component,
+            "provider_name": provider_name,
+            "normalized_value": "",
+            "member_object_ids": member_ids,
+        }
+
     def _evaluate_object_mutation(
         self,
         context: DelegatedPolicyContext,
@@ -1168,8 +1290,11 @@ class ChangeSetService:
         object_type = str(payload.get("object_type", ""))
         type_matches = object_type == current["object_type"] and object_type in {
             "NETWORK",
+            "NETWORK_GROUP",
             "PORT_SERVICE",
+            "PORT_SERVICE_GROUP",
             "URL",
+            "URL_GROUP",
             "APPLICATION",
             "APPLICATION_FILTER",
         }

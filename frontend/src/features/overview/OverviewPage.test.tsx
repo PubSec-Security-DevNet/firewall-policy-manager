@@ -194,7 +194,7 @@ describe('OverviewPage', () => {
       expect(screen.getByRole('dialog', { name: 'Create firewall object' })).toBeVisible(),
     );
     expect(screen.getByRole('heading', { name: 'Object inventory' })).toBeVisible();
-    expect(screen.getByText(/Individual IP, CIDR subnet, or IP range/)).toBeVisible();
+    expect(screen.getByText(/IPv4 or IPv6 host, CIDR subnet, or IP range/)).toBeVisible();
     expect(document.querySelector('.mantine-Modal-body')).toHaveClass('fm-object-dialog-body');
     await user.type(screen.getByRole('textbox', { name: 'Object name' }), 'web-one');
     await user.type(screen.getByRole('textbox', { name: 'Value' }), '10.20.10.1');

@@ -53,6 +53,7 @@ class ProviderCapability(StrEnum):
     NETWORK_OBJECT_MUTATION = "network_object_mutation"
     NETWORK_GROUPS = "network_groups"
     PORT_OBJECTS_GROUPS = "port_objects_groups"
+    URL_GROUPS = "url_groups"
     SECURITY_ZONE_READ = "security_zone_read"
     SECURITY_ZONE_MUTATION = "security_zone_mutation"
     NETWORK_OBJECT_CREATE = "network_object_create"
@@ -76,7 +77,9 @@ class FirewallObjectType(StrEnum):
     NETWORK = "NETWORK"
     NETWORK_GROUP = "NETWORK_GROUP"
     PORT_SERVICE = "PORT_SERVICE"
+    PORT_SERVICE_GROUP = "PORT_SERVICE_GROUP"
     URL = "URL"
+    URL_GROUP = "URL_GROUP"
     APPLICATION = "APPLICATION"
     APPLICATION_FILTER = "APPLICATION_FILTER"
 
@@ -368,6 +371,7 @@ class ProviderInventory:
     policy_count: int
     object_count: int
     writable: bool
+    evidence_profile: ProviderEvidenceProfile = ProviderEvidenceProfile.REAL
 
 
 @dataclass(frozen=True, slots=True)
@@ -410,6 +414,29 @@ class DiscoveredCategory(NativeResource):
 
 
 @dataclass(frozen=True, slots=True)
+class DiscoveredIntrusionPolicy(NativeResource):
+    """Provider intrusion policy available to access-control rules."""
+
+    domain_native_id: str = ""
+    default_variable_set_native_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DiscoveredFilePolicy(NativeResource):
+    """Provider file policy available to access-control rules."""
+
+    domain_native_id: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class DiscoveredVariableSet(NativeResource):
+    """Provider variable set available to access-control rules."""
+
+    domain_native_id: str = ""
+    is_default: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class DiscoveredZone(NativeResource):
     """Normalized provider security zone."""
 
@@ -445,7 +472,14 @@ class DiscoveredRule(NativeResource):
 
     policy_native_id: str = ""
     category_native_id: str | None = None
+    category_name: str | None = None
     action: str = ""
+    enabled: bool = True
+    log_begin: bool = False
+    log_end: bool = False
+    intrusion_policy_native_id: str | None = None
+    variable_set_native_id: str | None = None
+    file_policy_native_id: str | None = None
     position: int = 0
     object_references: tuple[DiscoveredObjectReference, ...] = ()
     zone_references: tuple[DiscoveredZoneReference, ...] = ()
@@ -487,8 +521,8 @@ class PageRequest:
     cursor: str | None = None
 
     def __post_init__(self) -> None:
-        if not 1 <= self.limit <= 100:
-            msg = "provider page limit must be between 1 and 100"
+        if not 1 <= self.limit <= 1000:
+            msg = "provider page limit must be between 1 and 1000"
             raise ValueError(msg)
 
 

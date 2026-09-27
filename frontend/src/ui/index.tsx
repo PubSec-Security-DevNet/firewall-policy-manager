@@ -69,6 +69,7 @@ export type AppRoute =
   | 'rules'
   | 'objects'
   | 'changes'
+  | 'changesets-admin'
   | 'providers'
   | 'sync'
   | 'users'
@@ -114,7 +115,13 @@ const adminNavigation: NavigationSection[] = [
       { value: 'sync', label: 'Sync & drift', icon: IconArrowsShuffle },
     ],
   },
-  { label: 'Operations', items: [{ value: 'audit', label: 'Audit', icon: IconHistory }] },
+  {
+    label: 'Operations',
+    items: [
+      { value: 'changesets-admin', label: 'All ChangeSets', icon: IconFileDiff },
+      { value: 'audit', label: 'Audit', icon: IconHistory },
+    ],
+  },
 ];
 
 export function AppLayout({

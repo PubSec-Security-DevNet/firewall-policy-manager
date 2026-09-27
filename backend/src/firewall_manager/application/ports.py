@@ -11,10 +11,13 @@ from firewall_manager.domain.models import (
     DiscoveredCategory,
     DiscoveredDevice,
     DiscoveredDomain,
+    DiscoveredFilePolicy,
+    DiscoveredIntrusionPolicy,
     DiscoveredObject,
     DiscoveredObjectReference,
     DiscoveredPolicy,
     DiscoveredRule,
+    DiscoveredVariableSet,
     DiscoveredZone,
     DiscoveredZoneReference,
     PageRequest,
@@ -94,7 +97,13 @@ class AuthorizationRepository(Protocol):
     ) -> bool: ...
 
     def delegated_context_view(
-        self, user_id: UUID, group_id: UUID, policy_id: UUID, organization_id: UUID
+        self,
+        user_id: UUID,
+        group_id: UUID,
+        policy_id: UUID,
+        organization_id: UUID,
+        include_applications: bool = True,
+        include_rules: bool = True,
     ) -> dict[str, object] | None: ...
 
     def delegated_policies(
@@ -253,6 +262,8 @@ class ChangeSetRepository(Protocol):
 
     def list_change_sets(self, principal: Principal, group_id: UUID) -> list[dict[str, object]]: ...
 
+    def list_all_change_sets(self, principal: Principal) -> list[dict[str, object]]: ...
+
     def get_change_set(
         self, principal: Principal, group_id: UUID, change_set_id: UUID
     ) -> dict[str, object] | None: ...
@@ -410,6 +421,8 @@ class ChangeSetRepository(Protocol):
         self, principal: Principal, group_id: UUID, change_set_id: UUID
     ) -> None: ...
 
+    def delete_admin_change_set(self, principal: Principal, change_set_id: UUID) -> None: ...
+
     def record_change_event(
         self,
         principal: Principal,
@@ -471,12 +484,29 @@ class FirewallProvider(ProviderReader, Protocol):
         self, policy_native_id: str, page: PageRequest
     ) -> ProviderPage[DiscoveredCategory]: ...
 
+    async def intrusion_policies(
+        self, domain_native_id: str, page: PageRequest
+    ) -> ProviderPage[DiscoveredIntrusionPolicy]: ...
+
+    async def variable_sets(
+        self, domain_native_id: str, page: PageRequest
+    ) -> ProviderPage[DiscoveredVariableSet]: ...
+
+    async def file_policies(
+        self, domain_native_id: str, page: PageRequest
+    ) -> ProviderPage[DiscoveredFilePolicy]: ...
+
     async def rules(
         self, policy_native_id: str, page: PageRequest
     ) -> ProviderPage[DiscoveredRule]: ...
 
     async def objects(
-        self, domain_native_id: str, page: PageRequest
+        self,
+        domain_native_id: str,
+        page: PageRequest,
+        *,
+        applications_only: bool = False,
+        include_applications: bool = True,
     ) -> ProviderPage[DiscoveredObject]: ...
 
     async def zones(
@@ -512,7 +542,7 @@ class ProviderFactory(Protocol):
 class ProviderSyncDispatcher(Protocol):
     """Queue publisher injected at the delivery composition boundary."""
 
-    def __call__(self, connection_id: UUID) -> object: ...
+    def __call__(self, connection_id: UUID, mode: str = "FULL") -> object: ...
 
 
 class ChangeSetExecutionDispatcher(Protocol):
@@ -563,6 +593,33 @@ class SyncRepository(Protocol):
         item: DiscoveredCategory,
     ) -> UUID: ...
 
+    def upsert_intrusion_policy(
+        self,
+        organization_id: UUID,
+        manager_id: UUID,
+        domain_id: UUID,
+        run_id: UUID,
+        item: DiscoveredIntrusionPolicy,
+    ) -> UUID: ...
+
+    def upsert_variable_set(
+        self,
+        organization_id: UUID,
+        manager_id: UUID,
+        domain_id: UUID,
+        run_id: UUID,
+        item: DiscoveredVariableSet,
+    ) -> UUID: ...
+
+    def upsert_file_policy(
+        self,
+        organization_id: UUID,
+        manager_id: UUID,
+        domain_id: UUID,
+        run_id: UUID,
+        item: DiscoveredFilePolicy,
+    ) -> UUID: ...
+
     def upsert_rule(
         self,
         organization_id: UUID,
@@ -607,6 +664,10 @@ class SyncRepository(Protocol):
         references: Sequence[DiscoveredZoneReference],
     ) -> None: ...
 
+    def refresh_rule_application_snapshot(
+        self, organization_id: UUID, rule_id: UUID
+    ) -> None: ...
+
     def replace_object_references(
         self,
         organization_id: UUID,
@@ -615,7 +676,13 @@ class SyncRepository(Protocol):
         object_native_ids: Sequence[str],
     ) -> None: ...
 
-    def complete_sync(self, run_id: UUID, manager_id: UUID, resources_seen: int) -> SyncResult: ...
+    def complete_sync(
+        self,
+        run_id: UUID,
+        manager_id: UUID,
+        resources_seen: int,
+        applications_only: bool = False,
+    ) -> SyncResult: ...
 
     def fail_sync(
         self, run_id: UUID, status: SyncStatus, resources_seen: int, error_code: str
@@ -642,3 +709,21 @@ class InventoryRepository(OverviewRepository, Protocol):
     ) -> tuple[list[dict[str, object]], int]: ...
 
     def provider_status(self, organization_id: UUID) -> list[dict[str, object]]: ...
+
+    def synchronization_discrepancies(
+        self,
+        organization_id: UUID,
+        manager_id: UUID | None = None,
+        policy_id: UUID | None = None,
+        resource_type: str | None = None,
+        state: str | None = None,
+        connection_id: UUID | None = None,
+    ) -> list[dict[str, object]]: ...
+
+    def accept_provider_state(
+        self, organization_id: UUID, drift_id: UUID, actor_user_id: UUID
+    ) -> dict[str, object] | None: ...
+
+    def reconciliation_proposal(
+        self, organization_id: UUID, drift_id: UUID
+    ) -> dict[str, object] | None: ...

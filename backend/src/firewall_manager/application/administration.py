@@ -1,6 +1,6 @@
 """Authorization administration use cases shared by delivery interfaces."""
 
-from ipaddress import ip_network
+from ipaddress import ip_address, ip_network
 from typing import cast
 from uuid import UUID
 
@@ -9,7 +9,7 @@ from firewall_manager.application.errors import InvalidInputError, ResourceOutOf
 from firewall_manager.application.ports import AdministrationRepository, AuthorizationRepository
 from firewall_manager.domain.models import FirewallObjectType, PolicyCapability, Principal
 from firewall_manager.domain.naming import normalize_provider_slug
-from firewall_manager.domain.networks import normalize_ip_network
+from firewall_manager.domain.networks import normalize_ip_value
 
 _RESOURCE_NAMES = frozenset(
     {
@@ -183,9 +183,12 @@ class AdministrationService:
                 if values.get("status") not in {"ACTIVE", "SUSPENDED"}:
                     raise ValueError
             elif resource == "ip-range-grants":
-                network = normalize_ip_network(str(values.get("network")))
+                network = normalize_ip_value(str(values.get("network")))
                 normalized["network"] = network
-                normalized["ip_version"] = ip_network(network).version
+                if "-" in network:
+                    normalized["ip_version"] = ip_address(network.split("-", 1)[0]).version
+                else:
+                    normalized["ip_version"] = ip_network(network).version
             elif resource == "object-create-grants":
                 object_type = FirewallObjectType(str(values.get("object_type")))
                 if object_type is FirewallObjectType.NETWORK_GROUP:
