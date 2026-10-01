@@ -164,6 +164,7 @@ class SqlProviderConnectionRepository:
             "tls_mode",
             "sync_interval_minutes",
             "applications_sync_interval_minutes",
+            "deployment_schedule_enabled",
         ):
             if key in values:
                 setattr(row, key, values[key])
@@ -645,6 +646,11 @@ class SqlProviderConnectionRepository:
             "applications_last_sync": row.applications_last_sync,
             "applications_last_successful_sync": row.applications_last_successful_sync,
             "applications_next_sync_at": row.applications_next_sync_at,
+            "deployment_schedule_enabled": row.deployment_schedule_enabled,
+            "deployment_status": row.deployment_status,
+            "deployment_next_at": row.deployment_next_at,
+            "deployment_last_started_at": row.deployment_last_started_at,
+            "deployment_last_completed_at": row.deployment_last_completed_at,
             "write_enabled": row.write_enabled,
             "write_validation_mode": False,
             "version_family_tested": version_family_tested,

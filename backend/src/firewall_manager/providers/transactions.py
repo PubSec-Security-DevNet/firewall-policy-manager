@@ -104,6 +104,26 @@ class ProviderTransactionExecutor(Protocol):
     ) -> ProviderExecutionResult: ...
 
 
+class ProviderDeploymentAdapter(Protocol):
+    """Provider-native deployment surface; configuration writes never imply deployment."""
+
+    async def inspect_pending_changes(
+        self, domain_id: str, policy_id: str
+    ) -> dict[str, object]: ...
+
+    async def start_deployment(
+        self, domain_id: str, policy_ids: list[str], device_ids: list[str]
+    ) -> dict[str, object]: ...
+
+    async def deployment_status(self, external_operation_id: str) -> dict[str, object]: ...
+
+    async def rollback_deployment(
+        self, domain_id: str, deployment_operation_id: str, device_ids: list[str]
+    ) -> dict[str, object]: ...
+
+    async def rollback_status(self, external_operation_id: str) -> dict[str, object]: ...
+
+
 class DeterministicMockTransactionExecutor:
     """In-process contract adapter used by provider and ChangeSet behavior tests."""
 

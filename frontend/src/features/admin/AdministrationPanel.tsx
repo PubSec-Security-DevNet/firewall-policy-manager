@@ -17,6 +17,7 @@ import {
   loadAdministration,
   revokeAuthorizationResource,
   updateAdministrativeEnabled,
+  updateGroupApproval,
   updateAdministrativeUserRole,
   upsertAuthorizationResource,
   type AdministrationSnapshot,
@@ -26,6 +27,7 @@ import {
   AppActionButton as ActionButton,
   AppButton as Button,
   AppCard as Card,
+  AppCheckbox as Checkbox,
   AppDataTable,
   AppDialog as Dialog,
   AppEmptyState,
@@ -105,6 +107,12 @@ export function AdministrationPanel({ view }: { view: AdministrationView }) {
         labels={labels}
         onSaved={refresh}
         onToggle={(row) => toggleEnabled('groups', row)}
+        onApprovalToggle={(row) => {
+          const required = !row.approval_required;
+          void updateGroupApproval(String(row.id), required, Number(row.revision))
+            .then(refresh)
+            .catch((error: unknown) => setState(toError(error)));
+        }}
       />
     );
   }
@@ -133,11 +141,13 @@ function GroupsPage({
   labels,
   onSaved,
   onToggle,
+  onApprovalToggle,
 }: {
   snapshot: AdministrationSnapshot;
   labels: Record<string, string>;
   onSaved: () => Promise<void>;
   onToggle: (row: Row) => void;
+  onApprovalToggle: (row: Row) => void;
 }) {
   const [query, setQuery] = useState('');
   const [createOpened, setCreateOpened] = useState(false);
@@ -205,11 +215,17 @@ function GroupsPage({
           <AdminTable
             label="Group directory"
             rows={filtered}
-            fields={['name', 'provider_slug', 'member_count', 'enabled']}
+            fields={['name', 'provider_slug', 'member_count', 'approval_required', 'enabled']}
             labels={labels}
             tone="groups"
             actions={(row) => (
               <Group gap="xs" wrap="nowrap">
+                <ActionButton
+                  intent={row.approval_required ? 'quiet-success' : 'secondary'}
+                  onClick={() => onApprovalToggle(row)}
+                >
+                  {row.approval_required ? 'Approval required' : 'Allow direct execution'}
+                </ActionButton>
                 <ActionButton
                   intent="secondary"
                   leftSection={<IconUserPlus size={14} />}
@@ -722,6 +738,7 @@ function CreateIdentityForm({
   const [primary, setPrimary] = useState('');
   const [secondary, setSecondary] = useState('');
   const [role, setRole] = useState<string | null>('viewer');
+  const [approvalRequired, setApprovalRequired] = useState(false);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   const [saving, setSaving] = useState(false);
   const submit = async () => {
@@ -735,7 +752,11 @@ function CreateIdentityForm({
           identity_subject: secondary.trim(),
           role: role ?? 'viewer',
         }
-      : { name: primary.trim(), provider_slug: secondary.trim().toUpperCase() };
+      : {
+          name: primary.trim(),
+          provider_slug: secondary.trim().toUpperCase(),
+          approval_required: approvalRequired,
+        };
     try {
       await createAdministrativeResource(resource, payload);
       await onSaved();
@@ -789,6 +810,14 @@ function CreateIdentityForm({
             onChange={setRole}
             data={roleOptions}
             allowDeselect={false}
+          />
+        )}
+        {!isUser && (
+          <Checkbox
+            label="Require ChangeSet approval"
+            description="Group members must have a separate approver approve each validated ChangeSet before execution."
+            checked={approvalRequired}
+            onChange={(event) => setApprovalRequired(event.currentTarget.checked)}
           />
         )}
         <FeedbackMessage feedback={feedback} />
@@ -1583,6 +1612,7 @@ const fieldLabels: Record<string, string> = {
   sync_state: 'Sync state',
   member_count: 'Members',
   group_count: 'Groups',
+  approval_required: 'ChangeSet approval',
 };
 
 function formatValue(field: string, value: unknown, labels: Record<string, string>): ReactNode {
@@ -1591,6 +1621,14 @@ function formatValue(field: string, value: unknown, labels: Record<string, strin
       <AppStatusBadge
         value={value ? 'HEALTHY' : 'DISABLED'}
         label={value ? 'Active' : 'Disabled'}
+      />
+    );
+  }
+  if (field === 'approval_required') {
+    return (
+      <AppStatusBadge
+        value={value ? 'REQUIRED' : 'READY'}
+        label={value ? 'Required' : 'Optional'}
       />
     );
   }

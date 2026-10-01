@@ -60,6 +60,7 @@ class Group(TimestampMixin, Base):
     name: Mapped[str] = mapped_column(String(200))
     provider_slug: Mapped[str] = mapped_column(String(64))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    approval_required: Mapped[bool] = mapped_column(Boolean, default=False)
     revision: Mapped[int] = mapped_column(Integer, default=1)
 
 
@@ -87,6 +88,34 @@ class User(TimestampMixin, Base):
         ForeignKey("access_policies.id"), nullable=True
     )
     revision: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class EmailNotification(TimestampMixin, Base):
+    """Durable outbound email work item; message delivery is independent of approval state."""
+
+    __tablename__ = "email_notifications"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "recipient_user_id", "dedupe_key"),
+        Index("ix_email_notifications_due", "status", "next_attempt_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(ForeignKey("organizations.id"), index=True)
+    recipient_user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), index=True)
+    recipient_email: Mapped[str] = mapped_column(String(320))
+    kind: Mapped[str] = mapped_column(String(50))
+    dedupe_key: Mapped[str] = mapped_column(String(300))
+    subject: Mapped[str] = mapped_column(String(255))
+    body: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(20), default="PENDING")
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    last_error: Mapped[str | None] = mapped_column(String(500))
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_owner: Mapped[str | None] = mapped_column(String(200))
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class SecretRecord(TimestampMixin, Base):
@@ -176,6 +205,11 @@ class ProviderConnection(TimestampMixin, Base):
         DateTime(timezone=True)
     )
     applications_next_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deployment_schedule_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    deployment_status: Mapped[str | None] = mapped_column(String(30))
+    deployment_next_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deployment_last_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deployment_last_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     write_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     write_enabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     write_enabled_by_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
@@ -893,6 +927,16 @@ class ChangeSet(TimestampMixin, Base):
     failure_info: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict)
     audit_metadata: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict)
     validated_revision: Mapped[int | None] = mapped_column(Integer)
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    submitted_by_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    approved_by_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
+    approved_revision: Mapped[int | None] = mapped_column(Integer)
+    approval_invalidated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    execution_owner: Mapped[str | None] = mapped_column(String(200))
+    execution_lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    execution_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    execution_operation: Mapped[str | None] = mapped_column(String(100))
 
 
 class ChangeSetOperation(TimestampMixin, Base):
@@ -918,6 +962,7 @@ class ChangeSetOperation(TimestampMixin, Base):
     status: Mapped[str] = mapped_column(String(30), default="DRAFT")
     validation_results: Mapped[list[dict[str, object]]] = mapped_column(JSONB, default=list)
     resolution: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict)
+    rollback_snapshot: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict)
     execution_result: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict)
     failure_info: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict)
     revision: Mapped[int] = mapped_column(Integer, default=1)
@@ -942,6 +987,11 @@ class ProviderTransaction(TimestampMixin, Base):
     failure_info: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict)
     reconciliation_required: Mapped[bool] = mapped_column(Boolean, default=False)
     revision: Mapped[int] = mapped_column(Integer, default=1)
+    lease_owner: Mapped[str | None] = mapped_column(String(200))
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_probe_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    provider_metadata: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict)
 
 
 class Deployment(TimestampMixin, Base):
@@ -953,11 +1003,31 @@ class Deployment(TimestampMixin, Base):
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     organization_id: Mapped[UUID] = mapped_column(ForeignKey("organizations.id"), index=True)
+    provider_connection_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("provider_connections.id"), index=True
+    )
+    manager_id: Mapped[UUID | None] = mapped_column(ForeignKey("firewall_managers.id"), index=True)
     provider_transaction_id: Mapped[UUID] = mapped_column(
         ForeignKey("provider_transactions.id"), index=True
     )
     state: Mapped[str] = mapped_column(String(30))
     external_operation_id: Mapped[str | None] = mapped_column(String(200))
+    rollback_state: Mapped[str | None] = mapped_column(String(30))
+    rollback_external_operation_id: Mapped[str | None] = mapped_column(String(200))
+    rollback_requested_by_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
+    rollback_device_results: Mapped[list[dict[str, object]]] = mapped_column(JSONB, default=list)
+    rollback_failure_info: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict)
+    requested_by_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
+    approved_by_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
+    target_device_ids: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    included_change_set_ids: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    plan_snapshot: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict)
+    pending_change_evidence: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict)
+    device_results: Mapped[list[dict[str, object]]] = mapped_column(JSONB, default=list)
+    failure_info: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict)
+    lease_owner: Mapped[str | None] = mapped_column(String(200))
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     revision: Mapped[int] = mapped_column(Integer, default=1)
 
 

@@ -13,6 +13,8 @@ import {
 import {
   ApiError,
   createProviderConnection,
+  forceProviderDeployment,
+  loadDeployments,
   loadProviderConnections,
   loadProviderGuidance,
   requestProviderSync,
@@ -409,6 +411,9 @@ function ConnectionCard({
   const [newApplicationsSyncInterval, setNewApplicationsSyncInterval] = useState(
     String(connection.applications_sync_interval_minutes),
   );
+  const [newDeploymentScheduleEnabled, setNewDeploymentScheduleEnabled] = useState(
+    connection.deployment_schedule_enabled,
+  );
   const [editing, setEditing] = useState(false);
 
   const run = (operation: () => Promise<unknown>, success: string) => {
@@ -443,6 +448,7 @@ function ConnectionCard({
       display_name: newName,
       sync_interval_minutes: Number(newSyncInterval),
       applications_sync_interval_minutes: Number(newApplicationsSyncInterval),
+      deployment_schedule_enabled: newDeploymentScheduleEnabled,
       ...(connection.provider_type === 'fmc'
         ? { base_endpoint: newEndpoint, tls_mode: newTlsMode }
         : { region: newRegion }),
@@ -456,6 +462,7 @@ function ConnectionCard({
     newName !== connection.display_name ||
     Number(newSyncInterval) !== connection.sync_interval_minutes ||
     Number(newApplicationsSyncInterval) !== connection.applications_sync_interval_minutes ||
+    newDeploymentScheduleEnabled !== connection.deployment_schedule_enabled ||
     (connection.provider_type === 'fmc'
       ? newEndpoint !== connection.base_endpoint || newTlsMode !== connection.tls_mode
       : newRegion !== connection.region);
@@ -517,6 +524,39 @@ function ConnectionCard({
       setBusy(false);
     }
   };
+  const forceDeploy = async () => {
+    if (!window.confirm(`Deploy all pending staged changes for ${connection.display_name} now?`)) return;
+    setBusy(true);
+    setMessage('Deployment batch queued. Waiting for the worker…');
+    try {
+      const result = await forceProviderDeployment(connection.id);
+      if (!('id' in result)) {
+        setMessage('No pending staged changes for this connector.');
+        return;
+      }
+      for (let attempt = 0; attempt < 120; attempt += 1) {
+        await new Promise((resolve) => window.setTimeout(resolve, 1000));
+        const deployments = await loadDeployments();
+        const current = deployments.find((item) => item.id === result.id);
+        const state = current?.state ?? 'READY';
+        setMessage(`Deployment ${state.toLowerCase().replaceAll('_', ' ')}…`);
+        if (['DEPLOYED', 'FAILED', 'PARTIAL', 'UNKNOWN', 'RECONCILIATION_REQUIRED'].includes(state)) {
+          setMessage(
+            state === 'DEPLOYED'
+              ? 'Deployment completed successfully.'
+              : `Deployment ${state.toLowerCase().replaceAll('_', ' ')}.`,
+          );
+          return;
+        }
+      }
+      setMessage('Deployment is still running. The Deployments view will continue to update.');
+    } catch (error: unknown) {
+      setMessage(errorMessage(error));
+    } finally {
+      setBusy(false);
+      void onChanged();
+    }
+  };
 
   return (
     <Card className="fm-provider-card">
@@ -574,6 +614,10 @@ function ConnectionCard({
         <ProviderFact
           label="Application catalog schedule"
           value={`Every ${connection.applications_sync_interval_minutes} minutes`}
+        />
+        <ProviderFact
+          label="Deployment schedule"
+          value={connection.deployment_schedule_enabled ? 'Every 15 minutes' : 'Disabled'}
         />
       </div>
       {(connection.last_error_message || connection.last_error_code) && (
@@ -663,6 +707,14 @@ function ConnectionCard({
           >
             Sync without applications
           </ActionButton>
+          <ActionButton
+            intent="secondary"
+            disabled={connection.lifecycle !== 'ACTIVE' || !connection.write_enabled}
+            loading={busy}
+            onClick={() => void forceDeploy()}
+          >
+            Deploy pending changes now
+          </ActionButton>
         </Group>
         <Group gap="xs" wrap="wrap">
           {connection.lifecycle !== 'RETIRED' && (
@@ -735,6 +787,13 @@ function ConnectionCard({
               value={newSyncInterval}
               onChange={(event) => setNewSyncInterval(event.currentTarget.value)}
             />
+            <Button
+              variant="light"
+              mt="sm"
+              onClick={() => setNewDeploymentScheduleEnabled((value) => !value)}
+            >
+              Automatic deployment: {newDeploymentScheduleEnabled ? 'enabled' : 'disabled'}
+            </Button>
             <Button mt="sm" disabled={!configurationChanged} onClick={saveConfiguration}>
               Save configuration
             </Button>

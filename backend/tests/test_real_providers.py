@@ -1,5 +1,6 @@
-"""Sanitized real-adapter parsing and hard read-only safety tests."""
+"""Sanitized real-adapter parsing, write, deployment, and safety tests."""
 
+import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
@@ -318,6 +319,68 @@ async def test_real_fmc_rule_create_is_guarded_and_normalized() -> None:
 
 
 @pytest.mark.asyncio
+async def test_real_fmc_mutation_reauthenticates_once_after_expired_token() -> None:
+    requests: list[httpx.Request] = []
+    auth_count = 0
+    mutation_count = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:  # noqa: PLR0911
+        nonlocal auth_count, mutation_count
+        requests.append(request)
+        if request.url.path.endswith("/auth/generatetoken"):
+            auth_count += 1
+            return httpx.Response(
+                204,
+                headers={"X-auth-access-token": f"token-{auth_count}"},
+            )
+        if request.url.path.endswith("/policy/accesspolicies/policy-1"):
+            return httpx.Response(200, json={"id": "policy-1", "version": "1"})
+        if request.url.path.endswith("/deployment/deployabledevices"):
+            return _collection([])
+        if request.url.path.endswith("/pendingchanges"):
+            return _collection([])
+        if request.method == "GET" and request.url.path.endswith("/accessrules"):
+            return _collection([])
+        if request.method == "POST" and request.url.path.endswith("/accessrules"):
+            mutation_count += 1
+            if mutation_count == 1:
+                return httpx.Response(401, json={"message": "expired token"})
+            return httpx.Response(
+                201,
+                json={"id": "rule-created-after-reauth", "version": "2"},
+            )
+        raise AssertionError(f"unexpected request: {request.method} {request.url.path}")
+
+    provider = RealFmcProvider(
+        endpoint="https://fmc.example.test",
+        display_name="FMC re-auth test",
+        username="api-user",
+        password=_test_credential("fmc-reauth"),
+        capabilities=_write_capabilities(),
+        transport=httpx.MockTransport(handler),
+        validate_network_target=False,
+        writable=True,
+    )
+
+    result = await provider.execute_transaction(uuid4(), uuid4(), _create_rule_operation())
+
+    assert result.state is ProviderTransactionState.SUCCEEDED
+    assert result.operation_results[0]["provider_resource_id"] == "rule-created-after-reauth"
+    assert auth_count == 2
+    assert mutation_count == 2
+    mutation_tokens = [
+        request.headers.get("x-auth-access-token")
+        for request in requests
+        if request.method == "POST" and request.url.path.endswith("/accessrules")
+    ]
+    assert mutation_tokens == [
+        "token-1",
+        "token-2",
+    ]
+    await provider.aclose()
+
+
+@pytest.mark.asyncio
 async def test_real_mutation_timeout_is_ambiguous_and_never_retried() -> None:
     mutation_attempts = 0
 
@@ -442,6 +505,134 @@ async def test_real_scc_uses_controlled_region_and_discovers_tenant() -> None:
         "scope_type": "TENANT",
     }
     assert all(url.startswith("https://api.eu.security.cisco.com/firewall/") for url in seen)
+    await provider.aclose()
+
+
+@pytest.mark.asyncio
+async def test_real_scc_devices_use_scc_uid_for_deployment() -> None:
+    scc_token = _test_credential("scc-devices")
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["Authorization"] == f"Bearer {scc_token}"
+        if request.url.path == "/firewall/v1/token":
+            return httpx.Response(200, json={"tenantUid": "tenant-1"})
+        assert request.url.path == "/firewall/v1/inventory/devices"
+        return _collection(
+            [
+                {
+                    "uid": "scc-device-1",
+                    "name": "Branch FTD",
+                    "deviceType": "CDFMC_MANAGED_FTD",
+                    "uidOnFmc": "fmc-device-1",
+                    "modelNumber": "Cisco Secure Firewall 1210CP Threat Defense",
+                }
+            ]
+        )
+
+    provider = RealSccProvider(
+        region="eu",
+        display_name="SCC — Europe",
+        token=scc_token,
+        capabilities=_capabilities(),
+        transport=httpx.MockTransport(handler),
+        validate_network_target=False,
+    )
+    devices = await provider.devices("domain-1", PageRequest(limit=100))
+
+    assert devices.items[0].native_id == "scc-device-1"
+    assert devices.items[0].native_metadata["fmc_native_id"] == "fmc-device-1"
+    assert devices.items[0].model == "Cisco Secure Firewall 1210CP Threat Defense"
+    await provider.aclose()
+
+
+@pytest.mark.asyncio
+async def test_real_scc_starts_and_polls_ftd_deployment() -> None:
+    requests: list[httpx.Request] = []
+    scc_token = _test_credential("scc-deployment")
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.headers["Authorization"] == f"Bearer {scc_token}"
+        if request.method == "GET" and request.url.path.endswith("/v1/inventory/devices"):
+            return httpx.Response(
+                200,
+                json={
+                    "count": 3,
+                    "items": [
+                        {
+                            "uid": "device-1",
+                            "uidOnFmc": "fmc-device-1",
+                            "deviceType": "CDFMC_MANAGED_FTD",
+                        },
+                        {
+                            "uid": "device-2",
+                            "uidOnFmc": "fmc-device-2",
+                            "deviceType": "CDFMC_MANAGED_FTD",
+                        },
+                        {"uid": "onprem-device", "deviceType": "ONPREM_FMC_MANAGED_FTD"},
+                    ],
+                },
+            )
+        if request.method == "POST" and request.url.path.endswith("/deployment/rollbackrequests"):
+            assert json.loads(request.content) == {
+                "rollbackDeviceList": [
+                    {"deploymentJobId": "deployment-run-1", "deviceList": ["fmc-device-1"]}
+                ],
+                "type": "RollbackRequest",
+            }
+            return httpx.Response(202, json={"metadata": {"task": {"id": "rollback-task-1"}}})
+        if request.method == "POST":
+            assert request.url.path == "/firewall/v1/inventory/devices/ftds/deploy"
+            assert json.loads(request.content) == {
+                "devices": [
+                    {"uid": "device-1", "selectedPolicyTypes": ["FULL_DEPLOY"]},
+                    {"uid": "device-2", "selectedPolicyTypes": ["FULL_DEPLOY"]},
+                ],
+                "ignoreWarnings": True,
+            }
+            return httpx.Response(202, json={"entityUid": "deployment-run-1"})
+        assert request.method == "GET"
+        if request.url.path.endswith("/runs/deployment-run-1"):
+            return httpx.Response(
+                200,
+                json={
+                    "uid": "deployment-run-1",
+                    "deploymentRunStatus": "DEPLOY_COMPLETED",
+                    "deviceDeploymentStatuses": [{"uid": "device-1", "status": "DONE"}],
+                },
+            )
+        assert request.url.path.endswith("/job/taskstatuses/rollback-task-1")
+        return httpx.Response(
+            200,
+            json={
+                "status": "SUCCEEDED",
+                "deviceResults": [{"deviceUUID": "fmc-device-1", "status": "SUCCEEDED"}],
+            },
+        )
+
+    provider = RealSccProvider(
+        region="eu",
+        display_name="SCC — Europe",
+        token=scc_token,
+        capabilities=_capabilities(),
+        transport=httpx.MockTransport(handler),
+        validate_network_target=False,
+        writable=True,
+    )
+    started = await provider.start_deployment(
+        "tenant-1", ["policy-1"], ["device-1", "device-2", "onprem-device", "device-1"]
+    )
+    status = await provider.deployment_status(str(started["external_operation_id"]))
+
+    assert started["external_operation_id"] == "deployment-run-1"
+    assert status["state"] == "DEPLOYED"
+    assert status["provider_status"] == "DEPLOY_COMPLETED"
+    assert status["devices"] == [{"uid": "device-1", "status": "DONE"}]
+    rollback = await provider.rollback_deployment("domain-1", "deployment-run-1", ["device-1"])
+    rollback_status = await provider.rollback_status(str(rollback["external_operation_id"]))
+    assert rollback["external_operation_id"] == "domain-1:rollback-task-1"
+    assert rollback_status["state"] == "ROLLED_BACK"
+    assert [request.method for request in requests] == ["GET", "POST", "GET", "GET", "POST", "GET"]
     await provider.aclose()
 
 

@@ -7,12 +7,19 @@ import {
   IconShieldCheck,
 } from '@tabler/icons-react';
 
-import { loadDelegatedPolicies, type Overview, type Session } from '../../api/client';
+import {
+  loadDelegatedPolicies,
+  loadPendingApprovals,
+  type Overview,
+  type Session,
+} from '../../api/client';
+import { ApprovalsPage } from '../approvals/ApprovalsPage';
 import { DevelopmentUserSelector } from '../auth/DevelopmentUserSelector';
 import { DelegatedWorkspace } from '../delegated/DelegatedWorkspace';
 import { AuditPage, SyncDriftPage } from '../operations/OperationsPages';
 import { ProviderConnectionsPanel } from '../provider-connections/ProviderConnectionsPanel';
 import { AdminChangeSetsPanel } from '../changesets/AdminChangeSetsPanel';
+import { DeploymentsPage } from '../deployments/DeploymentsPage';
 import {
   AppCard,
   AppEmptyState,
@@ -61,6 +68,19 @@ function StandaloneState({ children }: { children: React.ReactNode }) {
 
 function ReadyApplication({ overview, session }: { overview: Overview; session: Session }) {
   const [route, setRoute] = useState<AppRoute>('home');
+  const [changeSetDetailsId, setChangeSetDetailsId] = useState<string>();
+  const [approvalCount, setApprovalCount] = useState(0);
+  useEffect(() => {
+    if (!['approver', 'firewall_admin', 'admin'].includes(session.role)) return;
+    const refreshApprovals = () => {
+      void loadPendingApprovals()
+        .then((result) => setApprovalCount(result.count))
+        .catch(() => undefined);
+    };
+    refreshApprovals();
+    const timer = window.setInterval(refreshApprovals, 15_000);
+    return () => window.clearInterval(timer);
+  }, [session.role]);
   const storageKey = `firewall-manager.active-context.${session.user_id}`;
   const storedContext = readStoredContext(storageKey);
   const initialGroupId = session.groups.some((group) => group.id === storedContext?.groupId)
@@ -154,6 +174,7 @@ function ReadyApplication({ overview, session }: { overview: Overview; session: 
       workingGroup={workingContext.group}
       workingPolicy={workingContext.policy}
       session={session}
+      approvalCount={approvalCount}
       route={route}
       onRouteChange={setRoute}
       headerActions={<DevelopmentUserSelector compact />}
@@ -206,8 +227,19 @@ function ReadyApplication({ overview, session }: { overview: Overview; session: 
           title="All ChangeSets"
           description="Organization-wide ChangeSet status and cleanup for administrators."
         >
-          <AdminChangeSetsPanel />
+          <AdminChangeSetsPanel initialDetailsId={changeSetDetailsId} />
         </AppPage>
+      )}
+      {route === 'deployments' && admin && (
+        <DeploymentsPage
+          onViewChangeSet={(changeSetId) => {
+            setChangeSetDetailsId(changeSetId);
+            setRoute('changesets-admin');
+          }}
+        />
+      )}
+      {route === 'approvals' && ['approver', 'firewall_admin', 'admin'].includes(session.role) && (
+        <ApprovalsPage />
       )}
       {route === 'sync' && admin && <SyncDriftPage activeGroupId={workingContext.groupId} />}
       {route === 'audit' && admin && <AuditPage />}

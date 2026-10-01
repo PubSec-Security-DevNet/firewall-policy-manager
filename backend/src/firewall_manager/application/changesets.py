@@ -187,6 +187,197 @@ class ChangeSetService:
         self._audit_for(current, principal, "operation_added", "ALLOW", {"kind": kind.value})
         return self.preflight(principal, active_group_id, change_set_id)
 
+    def create_rollback(  # noqa: PLR0912, PLR0915 -- inverse operation mapping is explicit
+        self, principal: Principal, active_group_id: UUID, change_set_id: UUID
+    ) -> dict[str, object]:
+        """Create a compensating ChangeSet from the original operation snapshots."""
+        original = self._load(principal, active_group_id, change_set_id)
+        inverse: list[tuple[ChangeOperationKind, dict[str, object]]] = []
+
+        def require_unchanged(
+            resource_type: str, resource_id: object, snapshot: dict[str, object]
+        ) -> None:
+            expected = snapshot.get("revision")
+            if expected is None:
+                raise InvalidChangeSetStateError(
+                    details={"code": "ROLLBACK_SNAPSHOT_MISSING", "resource_id": str(resource_id)}
+                )
+            current = (
+                self._repository.rule_revision(UUID(str(resource_id)), principal.organization_id)
+                if resource_type == "rule"
+                else self._repository.object_revision(
+                    UUID(str(resource_id)), principal.organization_id
+                )
+            )
+            management_state = (
+                self._repository.rule_management_state(
+                    UUID(str(resource_id)), principal.organization_id
+                )
+                if resource_type == "rule"
+                else self._repository.object_management_state(
+                    UUID(str(resource_id)), principal.organization_id
+                )
+            )
+            if current != int(expected) + 1 and management_state != "MANAGED":
+                raise InvalidChangeSetStateError(
+                    details={
+                        "code": "ROLLBACK_CONFLICT",
+                        "resource_type": resource_type,
+                        "resource_id": str(resource_id),
+                        "expected_revision": int(expected) + 1,
+                        "current_revision": current,
+                    }
+                )
+
+        for operation in reversed(_as_dict_list(original["operations"])):
+            kind = ChangeOperationKind(str(operation["kind"]))
+            payload = _as_dict(operation.get("payload", {}))
+            snapshot = _as_dict(operation.get("rollback_snapshot", {}))
+            state = _as_dict(snapshot.get("state", {}))
+            if kind is ChangeOperationKind.ENSURE_RULE_CATEGORY:
+                continue
+            if kind is ChangeOperationKind.CREATE_RULE:
+                native_id = _as_dict(operation.get("execution_result", {})).get(
+                    "provider_resource_id"
+                )
+                rule_id = (
+                    self._repository.rule_id_by_native(
+                        UUID(str(operation["manager_id"])),
+                        str(native_id),
+                        principal.organization_id,
+                    )
+                    if native_id
+                    else None
+                )
+                if rule_id is None:
+                    raise InvalidChangeSetStateError(
+                        details={
+                            "code": "ROLLBACK_RESOURCE_NOT_FOUND",
+                            "operation": str(operation["id"]),
+                        }
+                    )
+                if self._repository.rule_revision(rule_id, principal.organization_id) != 1:
+                    raise InvalidChangeSetStateError(
+                        details={"code": "ROLLBACK_CONFLICT", "resource_id": str(rule_id)}
+                    )
+                inverse.append((ChangeOperationKind.DELETE_RULE, {"rule_id": str(rule_id)}))
+            elif kind is ChangeOperationKind.MODIFY_RULE:
+                rule_id = state.get("resource_id") or payload.get("rule_id")
+                if not rule_id or not state:
+                    raise InvalidChangeSetStateError(
+                        details={
+                            "code": "ROLLBACK_SNAPSHOT_MISSING",
+                            "operation": str(operation["id"]),
+                        }
+                    )
+                require_unchanged("rule", rule_id, snapshot)
+                inverse_state = dict(state)
+                # Category authorization is independent from restoring the rule's
+                # other fields. Do not re-submit an unchanged drifted category.
+                inverse_state.pop("category_id", None)
+                inverse.append(
+                    (
+                        ChangeOperationKind.MODIFY_RULE,
+                        {"rule_id": str(rule_id), **inverse_state},
+                    )
+                )
+            elif kind is ChangeOperationKind.MOVE_RULE:
+                rule_id = state.get("resource_id") or payload.get("rule_id")
+                if not rule_id or "position" not in state:
+                    raise InvalidChangeSetStateError(
+                        details={
+                            "code": "ROLLBACK_SNAPSHOT_MISSING",
+                            "operation": str(operation["id"]),
+                        }
+                    )
+                require_unchanged("rule", rule_id, snapshot)
+                inverse.append(
+                    (
+                        ChangeOperationKind.MOVE_RULE,
+                        {"rule_id": str(rule_id), "position": state["position"]},
+                    )
+                )
+            elif kind is ChangeOperationKind.DELETE_RULE:
+                if not state:
+                    raise InvalidChangeSetStateError(
+                        details={
+                            "code": "ROLLBACK_SNAPSHOT_MISSING",
+                            "operation": str(operation["id"]),
+                        }
+                    )
+                require_unchanged("rule", state.get("resource_id"), snapshot)
+                inverse.append((ChangeOperationKind.CREATE_RULE, state))
+            elif kind is ChangeOperationKind.CREATE_OBJECT:
+                native_id = _as_dict(operation.get("execution_result", {})).get(
+                    "provider_resource_id"
+                )
+                object_id = (
+                    self._repository.object_id_by_native(
+                        UUID(str(operation["manager_id"])),
+                        str(native_id),
+                        principal.organization_id,
+                    )
+                    if native_id
+                    else None
+                )
+                if object_id is None:
+                    raise InvalidChangeSetStateError(
+                        details={
+                            "code": "ROLLBACK_RESOURCE_NOT_FOUND",
+                            "operation": str(operation["id"]),
+                        }
+                    )
+                if self._repository.object_revision(object_id, principal.organization_id) != 1:
+                    raise InvalidChangeSetStateError(
+                        details={"code": "ROLLBACK_CONFLICT", "resource_id": str(object_id)}
+                    )
+                inverse.append(
+                    (
+                        ChangeOperationKind.DELETE_OBJECT,
+                        {"object_id": str(object_id), "object_type": payload.get("object_type")},
+                    )
+                )
+            elif kind is ChangeOperationKind.MODIFY_OBJECT:
+                object_id = state.get("resource_id") or payload.get("object_id")
+                if not object_id or not state:
+                    raise InvalidChangeSetStateError(
+                        details={
+                            "code": "ROLLBACK_SNAPSHOT_MISSING",
+                            "operation": str(operation["id"]),
+                        }
+                    )
+                require_unchanged("object", object_id, snapshot)
+                inverse.append(
+                    (ChangeOperationKind.MODIFY_OBJECT, {"object_id": str(object_id), **state})
+                )
+            elif kind is ChangeOperationKind.DELETE_OBJECT:
+                if not state:
+                    raise InvalidChangeSetStateError(
+                        details={
+                            "code": "ROLLBACK_SNAPSHOT_MISSING",
+                            "operation": str(operation["id"]),
+                        }
+                    )
+                require_unchanged("object", state.get("resource_id"), snapshot)
+                inverse.append((ChangeOperationKind.CREATE_OBJECT, state))
+        if not inverse:
+            raise InvalidChangeSetStateError(details={"code": "ROLLBACK_NOT_SUPPORTED"})
+        policy_id = UUID(str(original["access_policy_id"]))
+        result = self.create(
+            principal,
+            active_group_id,
+            policy_id,
+            f"Rollback: {original['title']}",
+            f"Compensating ChangeSet for {original['id']}; "
+            "generated from application state snapshots.",
+        )
+        rollback_id = UUID(str(result["id"]))
+        for kind, inverse_payload in inverse:
+            self._repository.add_operation(
+                principal, active_group_id, rollback_id, kind.value, inverse_payload
+            )
+        return self.preflight(principal, active_group_id, rollback_id)
+
     def update_operation(
         self,
         principal: Principal,
@@ -269,6 +460,26 @@ class ChangeSetService:
             "change_set_preflight",
             "ALLOW" if valid else "DENY",
             {"operation_count": len(results), "state": state},
+        )
+        return result
+
+    def approve(
+        self, principal: Principal, active_group_id: UUID, change_set_id: UUID
+    ) -> dict[str, object]:
+        """Approve exactly the validated revision; edits invalidate this evidence."""
+        require_action(principal, Action.APPROVE)
+        current = self._load(principal, active_group_id, change_set_id)
+        if current["state"] != ChangeSetState.READY.value:
+            raise InvalidChangeSetStateError
+        result = self._repository.approve_change_set(principal, active_group_id, change_set_id)
+        self._audit_for(
+            current,
+            principal,
+            "change_set_approved",
+            "ALLOW",
+            {
+                "approved_revision": result.get("approved_revision"),
+            },
         )
         return result
 
@@ -465,9 +676,14 @@ class ChangeSetService:
         change_set_id: UUID,
         *,
         queued: bool = False,
+        execution_owner: str | None = None,
     ) -> dict[str, object]:
-        if queued and not self._repository.claim_queued_execution(
-            principal, active_group_id, change_set_id
+        if queued and not (
+            self._repository.claim_queued_execution(
+                principal, active_group_id, change_set_id, execution_owner
+            )
+            if execution_owner is not None
+            else self._repository.claim_queued_execution(principal, active_group_id, change_set_id)
         ):
             raise InvalidChangeSetStateError(details={"code": "CHANGE_SET_ALREADY_CLAIMED"})
         change_set = self._load(principal, active_group_id, change_set_id)

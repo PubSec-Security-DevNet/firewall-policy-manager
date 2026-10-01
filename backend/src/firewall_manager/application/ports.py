@@ -134,6 +134,15 @@ class AdministrationRepository(Protocol):
         expected_revision: int,
     ) -> dict[str, object]: ...
 
+    def update_group_approval(
+        self,
+        organization_id: UUID,
+        actor_user_id: UUID,
+        group_id: UUID,
+        approval_required: bool,
+        expected_revision: int,
+    ) -> dict[str, object]: ...
+
     def update_user_role(
         self,
         organization_id: UUID,
@@ -260,7 +269,13 @@ class ChangeSetRepository(Protocol):
         audit_metadata: dict[str, object],
     ) -> dict[str, object]: ...
 
+    def approve_change_set(
+        self, principal: Principal, group_id: UUID, change_set_id: UUID
+    ) -> dict[str, object]: ...
+
     def list_change_sets(self, principal: Principal, group_id: UUID) -> list[dict[str, object]]: ...
+
+    def list_pending_approvals(self, principal: Principal) -> list[dict[str, object]]: ...
 
     def list_all_change_sets(self, principal: Principal) -> list[dict[str, object]]: ...
 
@@ -286,6 +301,22 @@ class ChangeSetRepository(Protocol):
         kind: str,
         payload: dict[str, object],
     ) -> dict[str, object]: ...
+
+    def rule_id_by_native(
+        self, manager_id: UUID, native_id: str, organization_id: UUID
+    ) -> UUID | None: ...
+
+    def object_id_by_native(
+        self, manager_id: UUID, native_id: str, organization_id: UUID
+    ) -> UUID | None: ...
+
+    def rule_revision(self, rule_id: UUID, organization_id: UUID) -> int | None: ...
+
+    def object_revision(self, object_id: UUID, organization_id: UUID) -> int | None: ...
+
+    def rule_management_state(self, rule_id: UUID, organization_id: UUID) -> str | None: ...
+
+    def object_management_state(self, object_id: UUID, organization_id: UUID) -> str | None: ...
 
     def update_operation(
         self,
@@ -370,7 +401,7 @@ class ChangeSetRepository(Protocol):
     def commit_change_set_queue(self) -> None: ...
 
     def claim_queued_execution(
-        self, principal: Principal, group_id: UUID, change_set_id: UUID
+        self, principal: Principal, group_id: UUID, change_set_id: UUID, owner: str | None = None
     ) -> bool: ...
 
     def manager_execution_target(
@@ -664,9 +695,7 @@ class SyncRepository(Protocol):
         references: Sequence[DiscoveredZoneReference],
     ) -> None: ...
 
-    def refresh_rule_application_snapshot(
-        self, organization_id: UUID, rule_id: UUID
-    ) -> None: ...
+    def refresh_rule_application_snapshot(self, organization_id: UUID, rule_id: UUID) -> None: ...
 
     def replace_object_references(
         self,

@@ -19,6 +19,7 @@ from firewall_manager.api.dependencies import (
     ProviderSyncDispatcherDependency,
     RepositoryDependency,
     SecretStoreDependency,
+    SessionDependency,
 )
 from firewall_manager.api.schemas import (
     ActiveGroupResponse,
@@ -32,18 +33,23 @@ from firewall_manager.api.schemas import (
     DefaultContextResponse,
     DelegatedContextResponse,
     DelegatedPolicySummary,
+    DeploymentPlanRequest,
+    DeploymentResponse,
+    DeploymentRollbackRequest,
     DevelopmentIdentityResponse,
     DraftCategoryOperationRequest,
     DraftObjectOperationRequest,
     DraftOperationUpdateRequest,
     DraftRuleOperationRequest,
     EnabledUpdateRequest,
+    GroupApprovalUpdateRequest,
     GroupCreateRequest,
     HealthResponse,
     ManagerResponse,
     ObjectResponse,
     OverviewResponse,
     PageResponse,
+    PendingApprovalsResponse,
     PolicyResponse,
     ProviderConnectionCreateRequest,
     ProviderConnectionPageResponse,
@@ -63,15 +69,24 @@ from firewall_manager.api.schemas import (
     UserRoleUpdateRequest,
 )
 from firewall_manager.application.administration import AdministrationService
+from firewall_manager.application.authorization import require_action
 from firewall_manager.application.changesets import ChangeSetService
 from firewall_manager.application.delegated import DelegatedPolicyService
-from firewall_manager.application.errors import ResourceOutOfScopeError
+from firewall_manager.application.deployments import DeploymentService
+from firewall_manager.application.errors import InvalidChangeSetStateError, ResourceOutOfScopeError
 from firewall_manager.application.inventory import InventoryService
 from firewall_manager.application.overview import OverviewService
 from firewall_manager.application.ports import ProviderFactory, ProviderReader
 from firewall_manager.application.provider_connections import ProviderConnectionService
 from firewall_manager.application.reconciliation import ReconciliationService
-from firewall_manager.domain.models import ChangeOperationKind, DelegatedPolicyContext, ProviderKind
+from firewall_manager.domain.models import (
+    Action,
+    ChangeOperationKind,
+    ChangeSetState,
+    DelegatedPolicyContext,
+    ProviderKind,
+)
+from firewall_manager.persistence.models import ChangeSet, Deployment
 from firewall_manager.providers.transactions import (
     HttpMockTransactionExecutor,
     ProviderTransactionExecutor,
@@ -227,6 +242,16 @@ async def list_change_sets(
         principal, active_group_id
     )
     return [ChangeSetResponse.model_validate(item) for item in result]
+
+
+@router.get("/approvals/pending", tags=["approvals"])
+async def pending_approvals(
+    principal: PrincipalDependency,
+    change_set_repository: ChangeSetRepositoryDependency,
+) -> PendingApprovalsResponse:
+    require_action(principal, Action.APPROVE)
+    result = change_set_repository.list_pending_approvals(principal)
+    return PendingApprovalsResponse(count=len(result), items=result)
 
 
 @router.get("/changesets/{change_set_id}", tags=["change-sets"])
@@ -389,6 +414,149 @@ async def refresh_change_set(
         principal, body.active_group_id, change_set_id
     )
     return ChangeSetResponse.model_validate(result)
+
+
+@router.post("/changesets/{change_set_id}/approve", tags=["change-sets"])
+async def approve_change_set(
+    change_set_id: UUID,
+    body: ChangeSetActionRequest,
+    principal: PrincipalDependency,
+    authorization_repository: AuthorizationRepositoryDependency,
+    change_set_repository: ChangeSetRepositoryDependency,
+) -> ChangeSetResponse:
+    result = _change_set_service(authorization_repository, change_set_repository).approve(
+        principal, body.active_group_id, change_set_id
+    )
+    return ChangeSetResponse.model_validate(result)
+
+
+@router.post("/deployments/plan", status_code=201, tags=["deployments"])
+async def create_deployment_plan(
+    body: DeploymentPlanRequest, principal: PrincipalDependency, session: SessionDependency
+) -> DeploymentResponse:
+    result = DeploymentService(session).plan(principal, body.change_set_id, body.target_device_ids)
+    session.commit()
+    return DeploymentResponse.model_validate(result)
+
+
+@router.get("/deployments", tags=["deployments"])
+async def list_deployments(
+    principal: PrincipalDependency, session: SessionDependency
+) -> list[DeploymentResponse]:
+    return [
+        DeploymentResponse.model_validate(item)
+        for item in DeploymentService(session).list(principal)
+    ]
+
+
+@router.get("/deployments/{deployment_id}/changesets", tags=["deployments"])
+async def list_deployment_change_sets(
+    deployment_id: UUID,
+    principal: PrincipalDependency,
+    session: SessionDependency,
+    authorization_repository: AuthorizationRepositoryDependency,
+    change_set_repository: ChangeSetRepositoryDependency,
+) -> list[ChangeSetResponse]:
+    deployment = session.get(Deployment, deployment_id)
+    if deployment is None or deployment.organization_id != principal.organization_id:
+        raise ResourceOutOfScopeError
+    service = _change_set_service(authorization_repository, change_set_repository)
+    result: list[ChangeSetResponse] = []
+    for change_set_id in deployment.included_change_set_ids:
+        change_set = session.get(ChangeSet, UUID(change_set_id))
+        if change_set is None:
+            continue
+        result.append(
+            ChangeSetResponse.model_validate(
+                service.get(principal, change_set.acting_group_id, change_set.id)
+            )
+        )
+    return result
+
+
+@router.post(
+    "/admin/provider-connections/{connection_id}/deploy", status_code=202, tags=["deployments"]
+)
+async def force_connector_deployment(
+    connection_id: UUID, principal: PrincipalDependency, session: SessionDependency
+) -> DeploymentResponse | dict[str, object]:
+    result = DeploymentService(session).queue_connector(principal, connection_id, force=True)
+    session.commit()
+    if result.get("id"):
+        from firewall_manager.worker.tasks import execute_deployment_batch  # noqa: PLC0415
+
+        execute_deployment_batch.send(str(result["id"]))
+    if result.get("status") == "NO_PENDING_CHANGES":
+        return result
+    return DeploymentResponse.model_validate(result)
+
+
+@router.post("/deployments/{deployment_id}/approve", tags=["deployments"])
+async def approve_deployment(
+    deployment_id: UUID, principal: PrincipalDependency, session: SessionDependency
+) -> DeploymentResponse:
+    result = DeploymentService(session).approve(principal, deployment_id)
+    session.commit()
+    return DeploymentResponse.model_validate(result)
+
+
+@router.post("/deployments/{deployment_id}/retry", status_code=202, tags=["deployments"])
+async def retry_deployment(
+    deployment_id: UUID, principal: PrincipalDependency, session: SessionDependency
+) -> DeploymentResponse | dict[str, object]:
+    result = DeploymentService(session).retry(principal, deployment_id)
+    session.commit()
+    if result.get("id"):
+        from firewall_manager.worker.tasks import execute_deployment_batch  # noqa: PLC0415
+
+        execute_deployment_batch.send(str(result["id"]))
+    if result.get("status") == "NO_PENDING_CHANGES":
+        return result
+    return DeploymentResponse.model_validate(result)
+
+
+@router.post("/deployments/{deployment_id}/rollback", status_code=201, tags=["deployments"])
+async def rollback_deployment(  # noqa: PLR0913, PLR0917 -- explicit security dependencies
+    deployment_id: UUID,
+    body: DeploymentRollbackRequest,
+    principal: PrincipalDependency,
+    session: SessionDependency,
+    authorization_repository: AuthorizationRepositoryDependency,
+    change_set_repository: ChangeSetRepositoryDependency,
+    dispatch: ChangeSetExecutionDispatcherDependency,
+) -> list[ChangeSetResponse]:
+    deployment = next(
+        (
+            item
+            for item in DeploymentService(session).list(principal)
+            if item["id"] == deployment_id
+        ),
+        None,
+    )
+    if deployment is None:
+        raise InvalidChangeSetStateError(details={"code": "ROLLBACK_CHANGESET_SCOPE_UNCLEAR"})
+    included_ids = {UUID(value) for value in deployment["included_change_set_ids"]}
+    if not set(body.selected_change_set_ids).issubset(included_ids):
+        raise ResourceOutOfScopeError
+    service = _change_set_service(authorization_repository, change_set_repository)
+    results: list[ChangeSetResponse] = []
+    for original_id in body.selected_change_set_ids:
+        original = session.get(ChangeSet, original_id)
+        if original is None or original.organization_id != principal.organization_id:
+            raise ResourceOutOfScopeError
+        rollback = service.create_rollback(principal, original.acting_group_id, original.id)
+        if rollback["state"] == ChangeSetState.READY.value and not rollback.get(
+            "approval_required"
+        ):
+            rollback = service.queue_execution(
+                principal,
+                original.acting_group_id,
+                UUID(str(rollback["id"])),
+                dispatch,
+            )
+        results.append(ChangeSetResponse.model_validate(rollback))
+    session.commit()
+    return results
 
 
 @router.post("/changesets/{change_set_id}/execute", status_code=202, tags=["change-sets"])
@@ -751,6 +919,19 @@ async def update_enabled(  # noqa: PLR0913, PLR0917 -- FastAPI dependency signat
     return AdministrationService(
         authorization_repository, administration_repository
     ).update_enabled(principal, resource, resource_id, body.enabled, body.expected_revision)
+
+
+@router.patch("/admin/groups/{group_id}/approval", tags=["administration"])
+async def update_group_approval(
+    group_id: UUID,
+    body: GroupApprovalUpdateRequest,
+    principal: PrincipalDependency,
+    authorization_repository: AuthorizationRepositoryDependency,
+    administration_repository: AdministrationRepositoryDependency,
+) -> dict[str, object]:
+    return AdministrationService(
+        authorization_repository, administration_repository
+    ).update_group_approval(principal, group_id, body.approval_required, body.expected_revision)
 
 
 @router.patch("/admin/users/{user_id}/role", tags=["administration"])

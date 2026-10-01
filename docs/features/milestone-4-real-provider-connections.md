@@ -3,7 +3,8 @@
 ## Outcome
 
 Milestone 4 adds unlimited, persistent FMC and SCC connections while retaining a hard
-configuration-read-only boundary for every real provider. Each connection owns an application UUID,
+configuration-write boundary that is enabled only for explicitly approved non-production
+connections. Each connection owns an application UUID,
 encrypted credential reference, safe routing/TLS configuration, provider manager namespace,
 version-specific capability evidence, scopes, health, schedule, revision, and audit history.
 
@@ -68,12 +69,25 @@ root key must not be changed until a reviewed old-key-to-new-key ciphertext migr
 exists. Backup and disaster recovery must preserve the database ciphertext and matching root key
 through separate controls. The complete operating procedure is in `docs/OPERATIONS.md`.
 
-## Evidence and test boundary
+## Provider write, deployment, and rollback boundary
 
 Successful live reads create evidence rows keyed by connection, actual provider version, and
-capability. Only exercised reads become `READ_ONLY`/`TESTED`; real mutations remain `NOT_STARTED`.
-Fixture tests validate parsing/error/safety behavior but do not constitute live Cisco compatibility
-evidence.
+capability. Only exercised reads become `READ_ONLY`/`TESTED`. FMC and SCC provider mutation,
+deployment start, status polling, and failure handling are enabled only for explicitly approved
+non-production connections with the required capability evidence. Fixture tests validate parsing,
+retry/error/safety behavior; they do not constitute live Cisco compatibility evidence.
+
+Deployments are connector-level batches rather than ChangeSet-level jobs. The scheduler exposes a
+`SCHEDULED` row immediately when staged work exists, waits for the connector's 15-minute interval,
+and sends all active staged changes together. Administrators can force a connector deployment or
+disable its automatic schedule. The deployment details view preserves provider status, timestamps,
+included ChangeSets, device mappings, and retryable failure details.
+
+Rollback is implemented as a compensating ChangeSet generated from stored operation snapshots. It
+supports selecting one or more ChangeSets from a deployment and follows the normal approval and
+deployment workflow. Deployments without snapshots, or with conflicting provider revisions, are
+reported as not eligible rather than attempting an unsafe reversal. The former provider-native
+rollback fields remain only for compatibility with historical records.
 
 Live probes are explicitly gated by `RUN_REAL_FMC_TESTS` / `RUN_REAL_SCC_TESTS` plus
 `REAL_PROVIDER_NON_PRODUCTION_ACK=non-production-read-only`. They issue read-only discovery calls

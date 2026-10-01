@@ -186,6 +186,7 @@ class DelegatedRuleResponse(BaseModel):
     logging: Literal["NONE", "BEGIN", "END"] = "NONE"
     position: int
     management_state: str
+    firewall_state: Literal["DEPLOYED", "UNDEPLOYED", "NOT_PRESENT", "UNKNOWN"] = "UNKNOWN"
     revision: int
     category_id: UUID | None = None
     intrusion_policy_id: UUID | None = None
@@ -206,6 +207,7 @@ class DelegatedObjectResponse(BaseModel):
     name: str
     object_type: str
     management_state: str = "OBSERVED"
+    firewall_state: Literal["DEPLOYED", "UNDEPLOYED", "NOT_PRESENT", "UNKNOWN"] = "UNKNOWN"
     owner_type: Literal["GROUP", "PROVIDER"] = "PROVIDER"
     owner_group_id: UUID | None = None
     owner_policy_id: UUID | None = None
@@ -276,11 +278,17 @@ class UserCreateRequest(BaseModel):
 class GroupCreateRequest(BaseModel):
     name: str
     provider_slug: str
+    approval_required: bool = False
 
 
 class EnabledUpdateRequest(BaseModel):
     enabled: bool
     expected_revision: int
+
+
+class GroupApprovalUpdateRequest(BaseModel):
+    approval_required: bool
+    expected_revision: int = Field(ge=1)
 
 
 class UserRoleUpdateRequest(BaseModel):
@@ -373,6 +381,11 @@ class ProviderConnectionResponse(BaseModel):
     applications_last_sync: datetime | None
     applications_last_successful_sync: datetime | None
     applications_next_sync_at: datetime | None
+    deployment_schedule_enabled: bool = True
+    deployment_status: str | None = None
+    deployment_next_at: datetime | None = None
+    deployment_last_started_at: datetime | None = None
+    deployment_last_completed_at: datetime | None = None
     write_enabled: bool = False
     write_validation_mode: bool = False
     version_family_tested: bool = False
@@ -428,6 +441,7 @@ class ProviderConnectionUpdateRequest(BaseModel):
     tls_mode: Literal["SYSTEM", "CUSTOM_CA"] | None = None
     sync_interval_minutes: int | None = Field(default=None, ge=5, le=10080)
     applications_sync_interval_minutes: int | None = Field(default=None, ge=60, le=43200)
+    deployment_schedule_enabled: bool | None = None
 
 
 class ProviderCredentialUpdateRequest(BaseModel):
@@ -598,6 +612,7 @@ class ChangeSetOperationResponse(BaseModel):
     status: str
     validation_results: list[dict[str, object]]
     resolution: dict[str, object]
+    rollback_snapshot: dict[str, object]
     execution_result: dict[str, object]
     failure_info: dict[str, object]
     revision: int
@@ -616,6 +631,11 @@ class ProviderTransactionResponse(BaseModel):
     revision: int
     created_at: datetime
     updated_at: datetime
+    lease_owner: str | None = None
+    lease_until: datetime | None = None
+    heartbeat_at: datetime | None = None
+    last_probe_at: datetime | None = None
+    provider_metadata: dict[str, object] = Field(default_factory=dict)
 
 
 class ChangeSetResponse(BaseModel):
@@ -626,12 +646,23 @@ class ChangeSetResponse(BaseModel):
     creator_email: str | None = None
     active_group_id: UUID
     access_policy_id: UUID
+    approval_required: bool = False
     target_policy_ids: list[str]
     title: str
     description: str
     state: str
     revision: int
     validated_revision: int | None
+    submitted_at: datetime | None = None
+    submitted_by_user_id: UUID | None = None
+    approved_at: datetime | None = None
+    approved_by_user_id: UUID | None = None
+    approved_revision: int | None = None
+    approval_invalidated_at: datetime | None = None
+    execution_owner: str | None = None
+    execution_lease_until: datetime | None = None
+    execution_heartbeat_at: datetime | None = None
+    execution_operation: str | None = None
     provider_revision_snapshot: dict[str, object]
     validation_results: list[dict[str, object]]
     execution_results: dict[str, object]
@@ -641,3 +672,50 @@ class ChangeSetResponse(BaseModel):
     updated_at: datetime
     operations: list[ChangeSetOperationResponse]
     transactions: list[ProviderTransactionResponse]
+
+
+class PendingApprovalsResponse(BaseModel):
+    count: int
+    items: list[ChangeSetResponse]
+
+
+class DeploymentPlanRequest(BaseModel):
+    change_set_id: UUID
+    target_device_ids: list[str] = Field(default_factory=list, max_length=500)
+
+
+class DeploymentActionRequest(BaseModel):
+    deployment_id: UUID
+
+
+class DeploymentRollbackRequest(BaseModel):
+    selected_change_set_ids: list[UUID] = Field(min_length=1, max_length=100)
+
+
+class DeploymentResponse(BaseModel):
+    id: UUID
+    organization_id: UUID
+    provider_transaction_id: UUID
+    provider_connection_id: UUID | None = None
+    manager_id: UUID | None = None
+    state: str
+    external_operation_id: str | None = None
+    rollback_state: str | None = None
+    rollback_external_operation_id: str | None = None
+    rollback_requested_by_user_id: UUID | None = None
+    rollback_device_results: list[dict[str, object]]
+    rollback_failure_info: dict[str, object]
+    rollback_eligible: bool = False
+    rollback_unavailable_reason: str | None = None
+    requested_by_user_id: UUID | None = None
+    approved_by_user_id: UUID | None = None
+    target_device_ids: list[str]
+    device_names: dict[str, str] = Field(default_factory=dict)
+    included_change_set_ids: list[str]
+    plan_snapshot: dict[str, object]
+    pending_change_evidence: dict[str, object]
+    device_results: list[dict[str, object]]
+    failure_info: dict[str, object]
+    revision: int
+    created_at: datetime
+    updated_at: datetime

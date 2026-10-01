@@ -22,14 +22,14 @@ import {
 
 const DELETABLE_STATES = new Set(['DRAFT', 'VALIDATION_FAILED', 'READY']);
 
-export function AdminChangeSetsPanel() {
+export function AdminChangeSetsPanel({ initialDetailsId }: { initialDetailsId?: string } = {}) {
   const [items, setItems] = useState<ChangeSet[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [deletingId, setDeletingId] = useState('');
   const [executingId, setExecutingId] = useState('');
   const [retryingId, setRetryingId] = useState('');
-  const [detailsId, setDetailsId] = useState('');
+  const [detailsId, setDetailsId] = useState(initialDetailsId ?? '');
   const selected = items.find((item) => item.id === detailsId);
 
   const load = () => {

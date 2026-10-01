@@ -79,6 +79,24 @@ class AdministrationService:
             expected_revision,
         )
 
+    def update_group_approval(
+        self,
+        principal: Principal,
+        group_id: UUID,
+        approval_required: bool,
+        expected_revision: int,
+    ) -> dict[str, object]:
+        self._require_admin(principal)
+        if expected_revision < 1:
+            raise InvalidInputError
+        return self._repository.update_group_approval(
+            principal.organization_id,
+            principal.user_id,
+            group_id,
+            approval_required,
+            expected_revision,
+        )
+
     def update_user_role(
         self, principal: Principal, user_id: UUID, role: str, expected_revision: int
     ) -> dict[str, object]:

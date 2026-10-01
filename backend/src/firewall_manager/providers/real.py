@@ -129,7 +129,8 @@ class _ProviderMutationConflictError(Exception):
 class _AmbiguousMutationError(Exception):
     """The request may have reached the provider and must not be retried blindly."""
 
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, details: Mapping[str, object] | None = None) -> None:
+        self.details = dict(details or {})
         self.code = code
         super().__init__(code)
 
@@ -334,6 +335,160 @@ class CiscoReadOnlyProvider:
     async def aclose(self) -> None:
         """Close the operation-scoped verified HTTP transport."""
         await self._client.aclose()
+
+    async def inspect_pending_changes(self, domain_id: str, policy_id: str) -> dict[str, object]:
+        """Return bounded provider evidence; incomplete provider scope fails closed."""
+        warning = await self._pending_change_warning(domain_id, policy_id)
+        return warning or {"pending_change_count": 0, "scope_known": True, "changes": []}
+
+    async def start_deployment(
+        self, domain_id: str, policy_ids: list[str], device_ids: list[str]
+    ) -> dict[str, object]:
+        # Deployment is intentionally gated by the connector's explicit write_enabled flag in
+        # _mutate_json, not by stale capability evidence. Dev sources are used to establish that
+        # evidence, so requiring prior evidence here would make first real deployment impossible.
+        if not device_ids or not policy_ids:
+            raise ProviderContractError
+        deployable = await self._get_with_params(
+            self._config_path(domain_id, "deployment/deployabledevices"),
+            {"offset": 0, "limit": 1000, "expanded": True},
+        )
+        raw_items = deployable.get("items", []) if isinstance(deployable, dict) else []
+        provider_device_ids: list[str] = []
+        device_evidence: list[dict[str, object]] = []
+        if isinstance(raw_items, list):
+            for item in raw_items:
+                if not isinstance(item, dict):
+                    continue
+                device_evidence.append(
+                    {
+                        "id": str(item.get("id") or ""),
+                        "can_be_deployed": item.get("canBeDeployed"),
+                        "is_deploying": item.get("isDeploying"),
+                        "up_to_date": item.get("upToDate"),
+                        "message": str(item.get("message") or "")[:300],
+                    }
+                )
+                if item.get("canBeDeployed") is False or item.get("isDeploying") is True:
+                    continue
+                device = item.get("device")
+                if isinstance(device, dict) and device.get("id"):
+                    provider_device_ids.append(str(device["id"]))
+                elif item.get("deviceId"):
+                    provider_device_ids.append(str(item["deviceId"]))
+                members = item.get("deviceMembers")
+                if isinstance(members, list):
+                    provider_device_ids.extend(
+                        str(member["id"])
+                        for member in members
+                        if isinstance(member, dict) and member.get("id")
+                    )
+                if (
+                    not isinstance(device, dict)
+                    and not isinstance(members, list)
+                    and item.get("id")
+                ):
+                    provider_device_ids.append(str(item["id"]))
+        provider_device_ids = list(dict.fromkeys(provider_device_ids))
+        if not provider_device_ids:
+            raise ProviderContractError(
+                details={
+                    "code": "NO_DEPLOYABLE_DEVICES",
+                    "provider_device_evidence": device_evidence[:20],
+                    "provider_messages": [
+                        {"message": "FMC reported no devices currently eligible for deployment."}
+                    ],
+                }
+            )
+        # FMC starts a full deployment through deploymentrequests.  The
+        # deployabledevices collection is read-only; posting to its /deploy
+        # subresource with a policyList is rejected by real FMC instances.
+        response = await self._mutate_json(
+            "POST",
+            self._config_path(domain_id, "deployment/deploymentrequests"),
+            {
+                "deviceList": provider_device_ids,
+                "forceDeploy": False,
+                "ignoreWarning": True,
+                "type": "DeploymentRequest",
+                # 0 tells FMC to use the current pending-change timestamp.
+                "version": "0",
+            },
+        )
+        metadata = response.get("metadata")
+        task = metadata.get("task") if isinstance(metadata, dict) else None
+        task_id = task.get("id") if isinstance(task, dict) else None
+        if not task_id:
+            task_id = response.get("taskId") or response.get("id")
+        if not task_id:
+            raise ProviderContractError
+        return {
+            # Preserve the domain because FMC task status is domain-scoped.
+            "external_operation_id": f"{domain_id}:{task_id}",
+            "provider": response,
+        }
+
+    async def deployment_status(self, external_operation_id: str) -> dict[str, object]:
+        # Status polling is read-only and must remain available while deployment evidence is being
+        # collected; the connector lifecycle and provider response still determine the result.
+        try:
+            domain_id, task_id = external_operation_id.split(":", 1)
+        except ValueError as exc:
+            raise ProviderContractError from exc
+        response = await self._get(self._config_path(domain_id, f"job/taskstatuses/{task_id}"))
+        if not isinstance(response, dict):
+            raise ProviderContractError
+        status = str(response.get("status") or response.get("state") or "UNKNOWN").upper()
+        normalized = {
+            "COMPLETED": "DEPLOYED",
+            "SUCCESS": "DEPLOYED",
+            "SUCCEEDED": "DEPLOYED",
+            "DEPLOYED": "DEPLOYED",
+            "FAILED": "FAILED",
+            "ERROR": "FAILED",
+        }.get(status, "DEPLOYING")
+        return {
+            "state": normalized,
+            "provider_status": status,
+            "provider": response,
+            "devices": response.get("deviceResults", []),
+        }
+
+    async def rollback_deployment(
+        self, domain_id: str, deployment_operation_id: str, device_ids: list[str]
+    ) -> dict[str, object]:
+        """Request FMC rollback for the devices in a completed deployment task."""
+        try:
+            operation_domain, task_id = deployment_operation_id.split(":", 1)
+        except ValueError as exc:
+            raise ProviderContractError from exc
+        if operation_domain != domain_id or not task_id or not device_ids:
+            raise ProviderContractError
+        response = await self._mutate_json(
+            "POST",
+            self._config_path(domain_id, "deployment/rollbackrequests"),
+            {
+                "rollbackDeviceList": [
+                    {"deploymentJobId": task_id, "deviceList": list(dict.fromkeys(device_ids))}
+                ],
+                "type": "RollbackRequest",
+            },
+        )
+        metadata = response.get("metadata")
+        task = metadata.get("task") if isinstance(metadata, dict) else None
+        rollback_task_id = task.get("id") if isinstance(task, dict) else None
+        rollback_task_id = rollback_task_id or response.get("taskId") or response.get("id")
+        if not rollback_task_id:
+            raise ProviderContractError
+        return {
+            "external_operation_id": f"{domain_id}:{rollback_task_id}",
+            "provider": response,
+        }
+
+    async def rollback_status(self, external_operation_id: str) -> dict[str, object]:
+        result = await self.deployment_status(external_operation_id)
+        state = result["state"]
+        return {**result, "state": "ROLLED_BACK" if state == "DEPLOYED" else state}
 
     async def information(self) -> ProviderInfo:
         await self._ensure_identity()
@@ -996,7 +1151,17 @@ class CiscoReadOnlyProvider:
             # requested index, preserving its configuration while treating any post-delete failure
             # as ambiguous so reconciliation—not a blind retry—repairs the local/native ID mapping.
             body = dict(current)
-            for field in ("id", "links", "metadata", "version"):
+            for field in (
+                "id",
+                "links",
+                "metadata",
+                "version",
+                "ruleIndex",
+                "position",
+                "startIndex",
+                "endIndex",
+                "section",
+            ):
                 body.pop(field, None)
             await self._mutate_json("DELETE", f"{base}/{rule_id}", None)
             try:
@@ -1012,11 +1177,14 @@ class CiscoReadOnlyProvider:
             except (_ProviderMutationConflictError, _AmbiguousMutationError, ProviderError) as exc:
                 raise _AmbiguousMutationError("RULE_REORDER_RECONCILIATION_REQUIRED") from exc
             return self._provider_resource(response), True
-        body = dict(current)
+        # Build the PUT body from normalized ChangeSet intent instead of copying the provider's
+        # read representation. FMC read objects contain response-only fields and nested shapes
+        # (for example metadata.ruleIndex and some objects containers) that PUT rejects.
+        body = self._rule_payload(payload, include_empty=True)
         body["id"] = rule_id
-        # On update an explicit empty container is meaningful: it clears a match
-        # criterion that may already exist on the provider rule.
-        body.update(self._rule_payload(payload, include_empty=True))
+        # Keep FMC's normal rule-reference containers (for example
+        # {"objects": [{"id": ...}]}). Flattening them changes this into a bulk-style
+        # payload and causes FMC to reject the request even when bulk=true is supplied.
         response = await self._mutate_json("PUT", f"{base}/{rule_id}", body)
         return self._provider_resource(response), True
 
@@ -1141,17 +1309,20 @@ class CiscoReadOnlyProvider:
             raise _ProviderMutationConflictError("STALE_PROVIDER_REVISION")
         return current
 
-    async def _mutate_json(
+    async def _mutate_json(  # noqa: PLR0913 -- transport retry controls are explicit
         self,
         method: str,
         path: str,
         payload: dict[str, object] | None,
         *,
         params: dict[str, str | int | bool] | None = None,
+        ensure_identity: bool = True,
+        retry_auth: bool = True,
     ) -> Mapping[str, Any]:
         """Send a mutation exactly once; transport/5xx outcomes are always ambiguous."""
         await self._ensure_target_safe()
-        await self._ensure_identity()
+        if ensure_identity:
+            await self._ensure_identity()
         headers = (
             {"X-auth-access-token": self._access_token or ""}
             if self.kind is ProviderKind.FMC
@@ -1171,9 +1342,23 @@ class CiscoReadOnlyProvider:
                 raise ProviderTlsValidationError from exc
             raise _AmbiguousMutationError("MUTATION_TRANSPORT_RESULT_UNKNOWN") from exc
         if response.status_code >= 500 or response.status_code == 429:
-            raise _AmbiguousMutationError("MUTATION_PROVIDER_RESULT_UNKNOWN")
+            raise _AmbiguousMutationError(
+                "MUTATION_PROVIDER_RESULT_UNKNOWN",
+                self._provider_validation_details(response),
+            )
         if response.status_code in {409, 412}:
             raise _ProviderMutationConflictError("STALE_PROVIDER_REVISION")
+        if response.status_code == 401 and self.kind is ProviderKind.FMC and retry_auth:
+            self._access_token = None
+            await self._authenticate_fmc()
+            return await self._mutate_json(
+                method,
+                path,
+                payload,
+                params=params,
+                ensure_identity=False,
+                retry_auth=False,
+            )
         if response.status_code in {400, 422}:
             raise _ProviderMutationConflictError(
                 "PROVIDER_VALIDATION_ERROR",
@@ -1191,29 +1376,87 @@ class CiscoReadOnlyProvider:
         return cast("Mapping[str, Any]", value)
 
     @staticmethod
-    def _provider_validation_details(response: httpx.Response) -> dict[str, object]:
+    def _provider_validation_details(  # noqa: PLR0912 -- normalize version-specific error envelopes
+        response: httpx.Response,
+    ) -> dict[str, object]:
         """Retain only bounded, user-actionable fields from a provider error response."""
         details: dict[str, object] = {"provider_status": response.status_code}
         try:
             payload = response.json()
         except ValueError:
+            text = response.text.strip()
+            if text:
+                details["provider_messages"] = [{"message": text[:500]}]
             return details
         if not isinstance(payload, dict):
+            try:
+                serialized = json.dumps(payload, default=str)
+            except (TypeError, ValueError):
+                serialized = str(payload)
+            if serialized.strip():
+                details["provider_messages"] = [{"message": serialized[:1000]}]
             return details
         messages = payload.get("messages")
         if not isinstance(messages, list):
-            return details
+            messages = payload.get("errors")
+        if not isinstance(messages, list):
+            messages = [payload]
         safe_messages: list[dict[str, str]] = []
         for message in messages[:3]:
             if not isinstance(message, dict):
                 continue
             safe_message: dict[str, str] = {}
-            for field in ("errorCode", "code", "description", "details", "location"):
+            for field in (
+                "errorCode",
+                "code",
+                "description",
+                "details",
+                "location",
+                "message",
+                "error",
+                "reason",
+                "field",
+                "messages",
+                "error_description",
+                "validationErrors",
+                "validation_errors",
+                "title",
+                "status",
+                "type",
+                "path",
+            ):
                 value = message.get(field)
                 if isinstance(value, (str, int, float)) and str(value).strip():
                     safe_message[field] = str(value).strip()[:500]
             if safe_message:
                 safe_messages.append(safe_message)
+        if not safe_messages and isinstance(payload, dict):
+            # Cisco responses differ across FMC/SCC versions. Preserve bounded scalar fields when
+            # the response does not use the documented messages/errors envelope.
+            for field, value in list(payload.items())[:12]:
+                if isinstance(value, (str, int, float, bool)) and str(value).strip():
+                    safe_messages.append({str(field)[:80]: str(value)[:500]})
+
+        # Some FMC/SCC versions wrap the useful message several levels deep. Include bounded
+        # scalar paths so the UI can show the actual rejection without retaining arbitrary JSON.
+        def collect_nested(value: object, path: str = "", depth: int = 0) -> None:
+            if len(safe_messages) >= 10 or depth > 4:
+                return
+            if isinstance(value, dict):
+                for key, nested in list(value.items())[:20]:
+                    lowered = str(key).lower()
+                    if any(secret in lowered for secret in ("password", "token", "secret", "auth")):
+                        continue
+                    collect_nested(nested, f"{path}.{key}".strip("."), depth + 1)
+            elif isinstance(value, list):
+                for index, nested in enumerate(value[:10]):
+                    collect_nested(nested, f"{path}[{index}]", depth + 1)
+            elif isinstance(value, (str, int, float, bool)) and str(value).strip():
+                candidate = f"{path}: {str(value).strip()[:500]}"
+                if not any(item.get("message") == candidate for item in safe_messages):
+                    safe_messages.append({"message": candidate})
+
+        collect_nested(payload)
         if safe_messages:
             details["provider_messages"] = safe_messages
         return details
@@ -1314,7 +1557,9 @@ class CiscoReadOnlyProvider:
                 else:
                     application_objects.append(reference)
             body["applications"] = {
-                "objects": application_objects,
+                # FMC calls this member `applications`; `objects` is not a valid
+                # field in the AccessRule application container.
+                "applications": application_objects,
                 "applicationFilters": application_filters,
             }
         return body
@@ -1685,7 +1930,12 @@ class CiscoReadOnlyProvider:
         if response.status_code in {301, 302, 303, 307, 308}:
             raise ProviderUnavailableError(details={"code": "CROSS_ORIGIN_REDIRECT_REFUSED"})
         if response.status_code == 401:
-            raise ProviderAuthenticationError
+            raise ProviderAuthenticationError(
+                details={
+                    "http_status": response.status_code,
+                    "provider_status": response.reason_phrase,
+                }
+            )
         if response.status_code == 403:
             raise ProviderPermissionError
         if response.status_code == 429:

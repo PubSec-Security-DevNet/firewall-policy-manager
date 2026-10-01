@@ -898,6 +898,7 @@ function RulesWorkspace({
                   <RuleFeatureIcons rule={rule} context={context} />
                   <ResourceStateNotice
                     state={rule.management_state}
+                    firewallState={rule.firewall_state}
                     deploymentStatus={context.firewall_deployment_status}
                     pending={trackedRuleOperations.some(
                       ({ changeSet, operation }) =>
@@ -1068,26 +1069,36 @@ function RuleFeatureIcons({
 function ResourceStateNotice({
   state,
   pending = false,
+  firewallState,
   deploymentStatus,
 }: {
   state?: string;
   pending?: boolean;
+  firewallState?: 'DEPLOYED' | 'UNDEPLOYED' | 'NOT_PRESENT' | 'UNKNOWN';
   deploymentStatus?: 'SUPPORTED' | 'NOT_AVAILABLE';
 }) {
   const currentState = state ?? 'UNKNOWN';
-  const unverified = deploymentStatus === 'NOT_AVAILABLE';
+  const unverified = deploymentStatus === 'NOT_AVAILABLE' && !firewallState;
   const label = pending
     ? 'Deployment pending: this resource has an unexecuted or in-progress ChangeSet.'
+    : firewallState
+      ? firewallStateLabel(firewallState)
     : unverified
       ? 'Firewall deployment has not been verified. Managed means synchronized to FMC/SCC only.'
       : resourceStateLabel(currentState);
-  if (!pending && currentState === 'MANAGED' && !unverified) return null;
+  if (!pending && currentState === 'MANAGED' && !unverified && !firewallState) return null;
   return (
     <AppTooltip label={label} withArrow>
       <span className="fm-resource-state-notice" aria-label={label}>
         <IconAlertTriangle size={16} stroke={2} />
         <span>
-          {pending ? 'DEPLOYING' : unverified ? 'FW UNVERIFIED' : resourceStateChip(currentState)}
+          {pending
+            ? 'DEPLOYING'
+            : firewallState
+              ? `FW ${firewallState.replace('_', ' ')}`
+              : unverified
+                ? 'FW UNKNOWN'
+                : resourceStateChip(currentState)}
         </span>
       </span>
     </AppTooltip>
@@ -1119,6 +1130,19 @@ function resourceStateLabel(state: string) {
 
 function resourceStateChip(state: string) {
   return state === 'OBSERVED' ? 'NOT DEPLOYED' : state;
+}
+
+function firewallStateLabel(state: 'DEPLOYED' | 'UNDEPLOYED' | 'NOT_PRESENT' | 'UNKNOWN') {
+  switch (state) {
+    case 'DEPLOYED':
+      return 'This resource is present in the application and has been confirmed deployed to the firewall.';
+    case 'UNDEPLOYED':
+      return 'This resource is present in the application/provider configuration but has not been confirmed deployed to the firewall.';
+    case 'NOT_PRESENT':
+      return 'This resource is not present on the firewall.';
+    default:
+      return 'The application has not confirmed whether this resource is deployed to the firewall.';
+  }
 }
 
 function CreateRuleDialog({
@@ -2451,6 +2475,7 @@ function ObjectsWorkspace({
                       <Text fw={650}>{object.name}</Text>
                       <ResourceStateNotice
                         state={object.management_state}
+                        firewallState={object.firewall_state}
                         deploymentStatus={context.firewall_deployment_status}
                         pending={trackedObjectOperations.some(
                           ({ changeSet, operation }) =>

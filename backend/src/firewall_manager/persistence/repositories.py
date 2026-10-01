@@ -47,6 +47,8 @@ from firewall_manager.persistence.models import (
     AccessRule,
     AuditEvent,
     ChangeSet,
+    ChangeSetOperation,
+    Deployment,
     Device,
     DirectUserPolicyGrant,
     DriftRecord,
@@ -770,10 +772,7 @@ class SqlOverviewRepository:
             latest_sync is None
             or latest_sync.complete is not True
             or row.status not in {"DRIFTED", "CONFLICT", "MISSING"}
-            or (
-                row.status != "MISSING"
-                and resource.last_seen_sync_run_id != latest_sync.id
-            )
+            or (row.status != "MISSING" and resource.last_seen_sync_run_id != latest_sync.id)
         ):
             return None
         # Provider-only resources remain OBSERVED/UNMANAGED; accepting state never adopts them.
@@ -1272,6 +1271,103 @@ class SqlAuthorizationRepository:
         user.revision += 1
         return True
 
+    def _firewall_resource_states(  # noqa: PLR0912 -- explicit resource/deployment state mapping
+        self,
+        manager_id: UUID,
+        policy_id: UUID,
+        rules: list[AccessRule],
+        object_rows: list[tuple[object, ...]],
+        deployment_supported: bool,
+    ) -> dict[UUID, str]:
+        """Return provider/device state separately from application management state."""
+        states: dict[UUID, str] = {
+            row.id: (
+                "NOT_PRESENT"
+                if row.management_state == "MISSING"
+                else "UNDEPLOYED"
+                if deployment_supported and row.management_state == "MANAGED"
+                else "UNKNOWN"
+            )
+            for row in rules
+        }
+        states.update(
+            {
+                row[0]: (
+                    "NOT_PRESENT"
+                    if row[4] == "MISSING"
+                    else "UNDEPLOYED"
+                    if deployment_supported and row[4] == "MANAGED"
+                    else "UNKNOWN"
+                )
+                for row in object_rows
+            }
+        )
+        if not deployment_supported:
+            return states
+        deployments = list(
+            self._session.scalars(
+                select(Deployment)
+                .where(Deployment.manager_id == manager_id)
+                .order_by(Deployment.updated_at.desc())
+            )
+        )
+        change_set_ids = [
+            change_set_id
+            for deployment in deployments
+            for change_set_id in deployment.included_change_set_ids
+        ]
+        if not change_set_ids:
+            return states
+        operations = list(
+            self._session.scalars(
+                select(ChangeSetOperation).where(
+                    ChangeSetOperation.manager_id == manager_id,
+                    ChangeSetOperation.access_policy_id == policy_id,
+                    ChangeSetOperation.change_set_id.in_(change_set_ids),
+                )
+            )
+        )
+        operations_by_change_set: dict[str, list[ChangeSetOperation]] = {}
+        for operation in operations:
+            operations_by_change_set.setdefault(str(operation.change_set_id), []).append(operation)
+        rules_by_name = {row.name: row.id for row in rules}
+        objects_by_name = {(row[1], row[2]): row[0] for row in object_rows}
+        for deployment in deployments:
+            deployment_state = str(deployment.state)
+            if deployment_state == "DEPLOYED":
+                provider_state = "DEPLOYED"
+            elif deployment_state in {
+                "SCHEDULED",
+                "READY",
+                "DEPLOYING",
+                "FAILED",
+                "UNKNOWN",
+                "RECONCILIATION_REQUIRED",
+            }:
+                provider_state = "UNDEPLOYED"
+            else:
+                continue
+            for change_set_id in deployment.included_change_set_ids:
+                for operation in operations_by_change_set.get(str(change_set_id), []):
+                    payload = operation.payload
+                    resource_id = None
+                    if operation.kind in {"CREATE_RULE", "MODIFY_RULE", "DELETE_RULE"}:
+                        resource_id = payload.get("rule_id") or rules_by_name.get(
+                            str(payload.get("name") or "")
+                        )
+                    elif operation.kind in {"CREATE_OBJECT", "MODIFY_OBJECT", "DELETE_OBJECT"}:
+                        resource_id = payload.get("object_id") or objects_by_name.get(
+                            (str(payload.get("name") or ""), str(payload.get("object_type") or ""))
+                        )
+                    if resource_id is None:
+                        continue
+                    resource_uuid = UUID(str(resource_id))
+                    if operation.kind.startswith("DELETE_") and provider_state == "DEPLOYED":
+                        states[resource_uuid] = "NOT_PRESENT"
+                    elif resource_uuid in states:
+                        states[resource_uuid] = provider_state
+        return states
+
     def delegated_context_view(  # noqa: PLR0913, PLR0917 -- explicit context filters
         self,
         user_id: UUID,
@@ -1477,6 +1573,15 @@ class SqlAuthorizationRepository:
                 connection and connection.write_enabled and not manager.is_mock
             ),
         )
+        firewall_states = self._firewall_resource_states(
+            policy.manager_id,
+            policy_id,
+            rules,
+            object_rows,
+            provider_capabilities.get("deployment_status") == "SUPPORTED",
+        )
+        for item in objects:
+            item["firewall_state"] = firewall_states.get(item["id"], "UNKNOWN")
         categories = list(
             self._session.execute(
                 select(RuleCategory.id, RuleCategory.name)
@@ -1586,6 +1691,7 @@ class SqlAuthorizationRepository:
                     "intrusion_policy_id": row.intrusion_policy_id,
                     "variable_set_id": row.variable_set_id,
                     "file_policy_id": row.file_policy_id,
+                    "firewall_state": firewall_states.get(row.id, "UNKNOWN"),
                     **rule_elements[row.id],
                 }
                 for row in rules
@@ -1809,6 +1915,7 @@ class SqlAdministrationRepository:
             name=str(values["name"]),
             provider_slug=str(values["provider_slug"]),
             is_active=True,
+            approval_required=bool(values.get("approval_required", False)),
             revision=1,
         )
         self._save(row)
@@ -1837,6 +1944,27 @@ class SqlAdministrationRepository:
         self._session.flush()
         self._audit_change(organization_id, actor_user_id, row.id, resource)
         return self._user_dict(row) if isinstance(row, User) else self._group_dict(row)
+
+    def update_group_approval(
+        self,
+        organization_id: UUID,
+        actor_user_id: UUID,
+        group_id: UUID,
+        approval_required: bool,
+        expected_revision: int,
+    ) -> dict[str, object]:
+        row = self._session.scalar(
+            select(Group).where(Group.id == group_id, Group.organization_id == organization_id)
+        )
+        if row is None:
+            raise ResourceOutOfScopeError
+        if row.revision != expected_revision:
+            raise StaleWriteError
+        row.approval_required = approval_required
+        row.revision += 1
+        self._audit_change(organization_id, actor_user_id, row.id, "group_approval_policy")
+        self._session.flush()
+        return self._group_dict(row)
 
     def update_user_role(
         self,
@@ -2095,6 +2223,7 @@ class SqlAdministrationRepository:
             "name": row.name,
             "provider_slug": row.provider_slug,
             "enabled": row.is_active,
+            "approval_required": row.approval_required,
             "revision": row.revision,
         }
 
@@ -2239,6 +2368,24 @@ class SqlSyncRepository:
                 and row.expected_provider_name
                 and item.name != row.expected_provider_name
             )
+            desired_snapshot = row.application_snapshot or {}
+            observed_managed_fields = {
+                "name": item.name,
+                **{
+                    key: value
+                    for key, value in extra.items()
+                    if key in {"action", "enabled", "position", "category_id"}
+                },
+            }
+            representation_only_change = (
+                isinstance(row, AccessRule)
+                and row.owner_group_id is not None
+                and all(
+                    key not in desired_snapshot
+                    or str(desired_snapshot[key]) == str(value)
+                    for key, value in observed_managed_fields.items()
+                )
+            )
             row.name = item.name
             row.provider_version = item.native_version
             row.provider_fingerprint = item.fingerprint
@@ -2260,6 +2407,13 @@ class SqlSyncRepository:
                     if getattr(row, "owner_group_id", None) is not None
                     else ResourceState.OBSERVED
                 )
+                row.revision += 1
+            elif representation_only_change:
+                # Provider representations can change fingerprints after a successful
+                # application-owned update (metadata/version/link changes) even when
+                # the managed rule fields are unchanged. Do not turn that into a
+                # false authorization drift.
+                row.management_state = ResourceState.MANAGED
                 row.revision += 1
             elif changed or ownership_name_conflict:
                 row.management_state = (
@@ -2789,9 +2943,7 @@ class SqlSyncRepository:
             if reference.zone_native_id in targets
         )
 
-    def refresh_rule_application_snapshot(
-        self, organization_id: UUID, rule_id: UUID
-    ) -> None:
+    def refresh_rule_application_snapshot(self, organization_id: UUID, rule_id: UUID) -> None:
         row = self._session.scalar(
             select(AccessRule).where(
                 AccessRule.id == rule_id,

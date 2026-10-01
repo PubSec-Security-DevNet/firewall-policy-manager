@@ -543,11 +543,7 @@ class DeterministicMockProvider:
                 in {FirewallObjectType.APPLICATION, FirewallObjectType.APPLICATION_FILTER}
             ]
         elif not include_applications:
-            objects = [
-                x
-                for x in objects
-                if x.object_type is not FirewallObjectType.APPLICATION
-            ]
+            objects = [x for x in objects if x.object_type is not FirewallObjectType.APPLICATION]
         return self._page(objects, page)
 
     async def zones(self, domain_native_id: str, page: PageRequest) -> ProviderPage[DiscoveredZone]:
@@ -677,6 +673,42 @@ class DeterministicMockProvider:
     def transaction_result(self, external_operation_id: str) -> ProviderExecutionResult | None:
         """Return the retained result used to reconcile ambiguous mock outcomes."""
         return self._transactions.get(external_operation_id)
+
+    async def inspect_pending_changes(self, domain_id: str, policy_id: str) -> dict[str, object]:
+        return {
+            "pending_change_count": 0,
+            "scope_known": True,
+            "changes": [],
+            "domain_id": domain_id,
+            "policy_id": policy_id,
+        }
+
+    async def start_deployment(
+        self, domain_id: str, policy_ids: list[str], device_ids: list[str]
+    ) -> dict[str, object]:
+        deployment_id = str(
+            uuid5(
+                NAMESPACE_URL,
+                f"deployment:{domain_id}:{','.join(sorted(policy_ids))}:{','.join(sorted(device_ids))}",
+            )
+        )
+        return {"external_operation_id": deployment_id, "provider": self.kind.value}
+
+    async def deployment_status(self, external_operation_id: str) -> dict[str, object]:
+        return {"state": "DEPLOYED", "provider_status": "SUCCESS", "devices": []}
+
+    async def rollback_deployment(
+        self, domain_id: str, deployment_operation_id: str, device_ids: list[str]
+    ) -> dict[str, object]:
+        return {
+            "external_operation_id": str(
+                uuid5(NAMESPACE_URL, f"rollback:{domain_id}:{deployment_operation_id}:{device_ids}")
+            ),
+            "provider": self.kind.value,
+        }
+
+    async def rollback_status(self, external_operation_id: str) -> dict[str, object]:
+        return {"state": "ROLLED_BACK", "provider_status": "SUCCESS", "devices": []}
 
     def _apply_operation(
         self,

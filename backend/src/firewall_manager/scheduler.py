@@ -6,7 +6,12 @@ import time
 from collections.abc import Callable
 
 from firewall_manager.config import get_settings
-from firewall_manager.worker.tasks import enqueue_scheduled_provider_syncs, record_worker_heartbeat
+from firewall_manager.worker.tasks import (
+    deliver_email_notifications,
+    enqueue_scheduled_deployments,
+    enqueue_scheduled_provider_syncs,
+    record_worker_heartbeat,
+)
 
 _running = True
 logger = logging.getLogger(__name__)
@@ -26,6 +31,8 @@ def main() -> None:
     while _running:
         _enqueue_safely(record_worker_heartbeat.send)
         _enqueue_safely(enqueue_scheduled_provider_syncs.send)
+        _enqueue_safely(deliver_email_notifications.send)
+        _enqueue_safely(enqueue_scheduled_deployments.send)
         deadline = time.monotonic() + interval
         while _running and time.monotonic() < deadline:
             time.sleep(max(0.0, min(1.0, deadline - time.monotonic())))

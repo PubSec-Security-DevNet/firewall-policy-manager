@@ -5,6 +5,7 @@ import {
   Burger,
   Button,
   Card,
+  Checkbox,
   Container,
   Divider,
   Drawer,
@@ -46,6 +47,7 @@ import {
   IconLockAccess,
   IconPackages,
   IconPlugConnected,
+  IconRocket,
   IconSearch,
   IconServerCog,
   IconShieldCheck,
@@ -70,6 +72,8 @@ export type AppRoute =
   | 'objects'
   | 'changes'
   | 'changesets-admin'
+  | 'approvals'
+  | 'deployments'
   | 'providers'
   | 'sync'
   | 'users'
@@ -119,8 +123,15 @@ const adminNavigation: NavigationSection[] = [
     label: 'Operations',
     items: [
       { value: 'changesets-admin', label: 'All ChangeSets', icon: IconFileDiff },
+      { value: 'deployments', label: 'Deployments', icon: IconRocket },
       { value: 'audit', label: 'Audit', icon: IconHistory },
     ],
+  },
+];
+const approvalNavigation: NavigationSection[] = [
+  {
+    label: 'Approvals',
+    items: [{ value: 'approvals', label: 'Pending approvals', icon: IconBell }],
   },
 ];
 
@@ -132,6 +143,7 @@ export function AppLayout({
   workingPolicy,
   route,
   onRouteChange,
+  approvalCount = 0,
 }: {
   children: ReactNode;
   headerActions?: ReactNode;
@@ -140,10 +152,16 @@ export function AppLayout({
   workingPolicy?: string;
   route?: AppRoute;
   onRouteChange?: (route: AppRoute) => void;
+  approvalCount?: number;
 }) {
   const [opened, { toggle, close }] = useDisclosure(false);
+  const canApprove = ['approver', 'firewall_admin', 'admin'].includes(session?.role ?? '');
   const navigation =
-    session?.role === 'admin' ? [...baseNavigation, ...adminNavigation] : baseNavigation;
+    session?.role === 'admin'
+      ? [...baseNavigation, ...adminNavigation, ...approvalNavigation]
+      : canApprove
+        ? [...baseNavigation, ...approvalNavigation]
+        : baseNavigation;
   const navbar = (
     <Stack h="100%" gap={0}>
       <div className="fm-working-context">
@@ -247,9 +265,24 @@ export function AppLayout({
                 <IconSearch size={18} />
               </Button>
             </Tooltip>
-            <Tooltip label="No new notifications">
-              <Button variant="subtle" color="gray" px={8} aria-label="Notifications">
+            <Tooltip
+              label={
+                approvalCount ? `${approvalCount} approval(s) pending` : 'No pending approvals'
+              }
+            >
+              <Button
+                variant="subtle"
+                color="gray"
+                px={8}
+                aria-label={approvalCount ? `${approvalCount} pending approvals` : 'Notifications'}
+                onClick={() => onRouteChange?.('approvals')}
+              >
                 <IconBell size={18} />
+                {approvalCount > 0 && (
+                  <Badge size="xs" color="red" circle>
+                    {approvalCount > 99 ? '99+' : approvalCount}
+                  </Badge>
+                )}
               </Button>
             </Tooltip>
             {session && (
@@ -430,6 +463,7 @@ const statusColors: Record<string, string> = {
   COMPLETED: 'teal',
   SUCCESS: 'teal',
   READY: 'teal',
+  SCHEDULED: 'yellow',
   OBSERVED: 'blue',
   ACTIVE: 'blue',
   OWNED: 'blue',
@@ -577,6 +611,7 @@ export {
   Alert as AppAlert,
   Badge as AppBadge,
   Button as AppButton,
+  Checkbox as AppCheckbox,
   Container as AppContainer,
   Divider as AppDivider,
   Drawer as AppDrawer,

@@ -31,6 +31,37 @@ export type DelegatedPolicy = components['schemas']['DelegatedPolicySummary'];
 export type DelegatedContext = components['schemas']['DelegatedContextResponse'];
 export type AdministrationSnapshot = components['schemas']['AdministrationSnapshotResponse'];
 export type ChangeSet = components['schemas']['ChangeSetResponse'];
+export interface PendingApprovals {
+  count: number;
+  items: ChangeSet[];
+}
+export interface Deployment {
+  id: string;
+  organization_id: string;
+  provider_transaction_id: string;
+  provider_connection_id: string | null;
+  state: string;
+  external_operation_id: string | null;
+  rollback_state: string | null;
+  rollback_external_operation_id: string | null;
+  rollback_requested_by_user_id: string | null;
+  rollback_device_results: Array<Record<string, unknown>>;
+  rollback_failure_info: Record<string, unknown>;
+  rollback_eligible: boolean;
+  rollback_unavailable_reason: string | null;
+  requested_by_user_id: string | null;
+  approved_by_user_id: string | null;
+  target_device_ids: string[];
+  device_names: Record<string, string>;
+  included_change_set_ids: string[];
+  plan_snapshot: Record<string, unknown>;
+  pending_change_evidence: Record<string, unknown>;
+  device_results: Array<Record<string, unknown>>;
+  failure_info: Record<string, unknown>;
+  revision: number;
+  created_at: string;
+  updated_at: string;
+}
 type ErrorEnvelope = components['schemas']['ErrorEnvelope'];
 
 export class ApiError extends Error {
@@ -38,6 +69,7 @@ export class ApiError extends Error {
     message: string,
     readonly code: string,
     readonly correlationId: string,
+    readonly details: Record<string, unknown> = {},
   ) {
     super(message);
   }
@@ -101,6 +133,11 @@ export interface ProviderConnection {
   applications_last_sync: string | null;
   applications_last_successful_sync: string | null;
   applications_next_sync_at: string | null;
+  deployment_schedule_enabled: boolean;
+  deployment_status: string | null;
+  deployment_next_at: string | null;
+  deployment_last_started_at: string | null;
+  deployment_last_completed_at: string | null;
   write_enabled: boolean;
   write_validation_mode: boolean;
   version_family_tested: boolean;
@@ -147,7 +184,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!response.ok) {
     const payload = (await response.json()) as ErrorEnvelope;
-    throw new ApiError(payload.error.message, payload.error.code, payload.error.correlation_id);
+    throw new ApiError(
+      payload.error.message,
+      payload.error.code,
+      payload.error.correlation_id,
+      payload.error.details,
+    );
   }
   if (response.status === 204) return undefined as T;
   return (await response.json()) as T;
@@ -269,6 +311,15 @@ export async function updateProviderConnection(
   );
 }
 
+export async function forceProviderDeployment(
+  connectionId: string,
+): Promise<ProviderConnection | { status: string; connection_id: string }> {
+  return request<ProviderConnection | { status: string; connection_id: string }>(
+    `/api/v1/admin/provider-connections/${encodeURIComponent(connectionId)}/deploy`,
+    { method: 'POST', body: '{}' },
+  );
+}
+
 export async function loadDelegatedPolicies(activeGroupId: string): Promise<DelegatedPolicy[]> {
   return get<DelegatedPolicy[]>(
     `/api/v1/delegated/policies?active_group_id=${encodeURIComponent(activeGroupId)}`,
@@ -335,6 +386,23 @@ export async function updateAdministrativeEnabled(
   );
 }
 
+export async function updateGroupApproval(
+  groupId: string,
+  approvalRequired: boolean,
+  expectedRevision: number,
+): Promise<Record<string, unknown>> {
+  return request<Record<string, unknown>>(
+    `/api/v1/admin/groups/${encodeURIComponent(groupId)}/approval`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify({
+        approval_required: approvalRequired,
+        expected_revision: expectedRevision,
+      }),
+    },
+  );
+}
+
 export async function updateAdministrativeUserRole(
   userId: string,
   role: string,
@@ -364,6 +432,10 @@ export async function loadChangeSets(activeGroupId: string): Promise<ChangeSet[]
   return get<ChangeSet[]>(
     `/api/v1/changesets?active_group_id=${encodeURIComponent(activeGroupId)}`,
   );
+}
+
+export async function loadPendingApprovals(): Promise<PendingApprovals> {
+  return get<PendingApprovals>('/api/v1/approvals/pending');
 }
 
 export async function loadAdminChangeSets(): Promise<ChangeSet[]> {
@@ -446,12 +518,48 @@ export async function addDraftObject(
 export async function changeSetAction(
   changeSetId: string,
   activeGroupId: string,
-  action: 'preflight' | 'refresh' | 'execute' | 'retry' | 'cancel',
+  action: 'preflight' | 'refresh' | 'execute' | 'retry' | 'cancel' | 'approve',
 ): Promise<ChangeSet> {
   return request<ChangeSet>(`/api/v1/changesets/${encodeURIComponent(changeSetId)}/${action}`, {
     method: 'POST',
     body: JSON.stringify({ active_group_id: activeGroupId }),
   });
+}
+
+export async function approveChangeSet(
+  changeSetId: string,
+  activeGroupId: string,
+): Promise<ChangeSet> {
+  return changeSetAction(changeSetId, activeGroupId, 'approve');
+}
+
+export async function loadDeployments(): Promise<Deployment[]> {
+  return get<Deployment[]>('/api/v1/deployments');
+}
+
+export async function loadDeploymentChangeSets(deploymentId: string): Promise<ChangeSet[]> {
+  return get<ChangeSet[]>(
+    `/api/v1/deployments/${encodeURIComponent(deploymentId)}/changesets`,
+  );
+}
+
+export async function retryDeployment(
+  deploymentId: string,
+): Promise<Deployment | { status: string; connection_id: string }> {
+  return request<Deployment | { status: string; connection_id: string }>(
+    `/api/v1/deployments/${encodeURIComponent(deploymentId)}/retry`,
+    { method: 'POST', body: '{}' },
+  );
+}
+
+export async function rollbackDeployment(
+  deploymentId: string,
+  selectedChangeSetIds: string[],
+): Promise<ChangeSet[]> {
+  return request<ChangeSet[]>(
+    `/api/v1/deployments/${encodeURIComponent(deploymentId)}/rollback`,
+    { method: 'POST', body: JSON.stringify({ selected_change_set_ids: selectedChangeSetIds }) },
+  );
 }
 
 export interface Inventory {

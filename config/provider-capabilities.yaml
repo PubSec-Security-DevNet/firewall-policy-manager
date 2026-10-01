@@ -36,8 +36,8 @@
     "security_zone_read": {"mock": {"fmc": "READ_ONLY", "scc": "READ_ONLY"}, "real": {"fmc": "NOT_STARTED", "scc": "NOT_STARTED"}},
     "security_zone_mutation": {"mock": {"fmc": "UNSUPPORTED", "scc": "UNSUPPORTED"}, "real": {"fmc": "UNSUPPORTED", "scc": "UNSUPPORTED"}},
     "pending_change_inspection": {"mock": {"fmc": "NOT_STARTED", "scc": "NOT_STARTED"}, "real": {"fmc": "PARTIAL", "scc": "PARTIAL"}},
-    "deployment_start": {"mock": {"fmc": "NOT_STARTED", "scc": "NOT_STARTED"}, "real": {"fmc": "NOT_STARTED", "scc": "NOT_STARTED"}},
-    "deployment_status": {"mock": {"fmc": "NOT_STARTED", "scc": "NOT_STARTED"}, "real": {"fmc": "NOT_STARTED", "scc": "NOT_STARTED"}},
+    "deployment_start": {"mock": {"fmc": "NOT_STARTED", "scc": "NOT_STARTED"}, "real": {"fmc": "SUPPORTED", "scc": "SUPPORTED"}},
+    "deployment_status": {"mock": {"fmc": "NOT_STARTED", "scc": "NOT_STARTED"}, "real": {"fmc": "SUPPORTED", "scc": "SUPPORTED"}},
     "rollback": {"mock": {"fmc": "NOT_STARTED", "scc": "NOT_STARTED"}, "real": {"fmc": "NOT_STARTED", "scc": "NOT_STARTED"}},
     "policy_locking": {"mock": {"fmc": "NOT_STARTED", "scc": "NOT_STARTED"}, "real": {"fmc": "NOT_STARTED", "scc": "NOT_STARTED"}},
     "changelog_history": {"mock": {"fmc": "NOT_STARTED", "scc": "NOT_STARTED"}, "real": {"fmc": "NOT_STARTED", "scc": "NOT_STARTED"}}

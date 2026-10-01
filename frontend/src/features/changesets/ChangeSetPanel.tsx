@@ -314,6 +314,7 @@ export function ChangeSetDetails({
   context?: DelegatedContext;
 }) {
   const failures = failureCodes(item);
+  const providerDetails = providerFailureDetails(item);
   const pendingWarnings = pendingChangeWarnings(item);
   return (
     <Stack gap="md">
@@ -351,6 +352,15 @@ export function ChangeSetDetails({
       {failures.length > 0 && (
         <Alert color="red" title="Failure details">
           {failures.map(humanize).join(' · ')}
+          {providerDetails.length > 0 && (
+            <Stack gap={2} mt="xs">
+              {providerDetails.map((detail, index) => (
+                <Text key={`${detail}-${index}`} size="sm">
+                  {detail}
+                </Text>
+              ))}
+            </Stack>
+          )}
         </Alert>
       )}
 
@@ -608,6 +618,38 @@ function failureCodes(item: ChangeSet) {
   item.operations.forEach((operation) => visit(operation.failure_info));
   item.transactions.forEach((transaction) => visit(transaction.failure_info));
   return [...codes];
+}
+
+function providerFailureDetails(item: ChangeSet) {
+  const details: string[] = [];
+  const visit = (value: unknown): void => {
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+      return;
+    }
+    if (typeof value !== 'object' || value === null) return;
+    const recordValue = value as Record<string, unknown>;
+    if (typeof recordValue.provider_status === 'number' || typeof recordValue.provider_status === 'string') {
+      details.push(`Provider returned HTTP ${String(recordValue.provider_status)}`);
+    }
+    if (Array.isArray(recordValue.provider_messages)) {
+      recordValue.provider_messages.forEach((message) => {
+        const entry = record(message);
+        const text =
+          stringValue(entry.description) ||
+          stringValue(entry.details) ||
+          stringValue(entry.message) ||
+          stringValue(entry.error) ||
+          stringValue(entry.reason) ||
+          stringValue(entry.messages);
+        if (text) details.push(text);
+      });
+    }
+    Object.values(recordValue).forEach(visit);
+  };
+  item.transactions.forEach((transaction) => visit(transaction.failure_info));
+  item.operations.forEach((operation) => visit(operation.failure_info));
+  return [...new Set(details)].slice(0, 5);
 }
 
 function pendingChangeWarnings(item: ChangeSet) {

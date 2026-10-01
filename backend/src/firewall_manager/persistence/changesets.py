@@ -5,7 +5,7 @@
 import hashlib
 import ipaddress
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from uuid import UUID, uuid4
 
@@ -26,10 +26,12 @@ from firewall_manager.persistence.models import (
     AuditEvent,
     ChangeSet,
     ChangeSetOperation,
+    EmailNotification,
     FilePolicy,
     FirewallManager,
     FirewallObject,
     Group,
+    GroupMembership,
     GroupPolicyCategoryMapping,
     IntrusionPolicy,
     ObjectReference,
@@ -237,6 +239,30 @@ class SqlChangeSetRepository:
         )
         return [self._change_set_dict(row) for row in rows]
 
+    def list_pending_approvals(self, principal: Principal) -> list[dict[str, object]]:
+        rows = list(
+            self._session.scalars(
+                select(ChangeSet)
+                .join(Group, Group.id == ChangeSet.acting_group_id)
+                .join(
+                    GroupMembership,
+                    (GroupMembership.group_id == Group.id)
+                    & (GroupMembership.organization_id == Group.organization_id),
+                )
+                .where(
+                    ChangeSet.organization_id == principal.organization_id,
+                    ChangeSet.state == ChangeSetState.READY.value,
+                    ChangeSet.principal_id != principal.user_id,
+                    Group.approval_required.is_(True),
+                    Group.is_active.is_(True),
+                    GroupMembership.user_id == principal.user_id,
+                    GroupMembership.status == "ACTIVE",
+                )
+                .order_by(ChangeSet.updated_at.asc(), ChangeSet.id),
+            )
+        )
+        return [self._change_set_dict(row) for row in rows]
+
     def list_all_change_sets(self, principal: Principal) -> list[dict[str, object]]:
         rows = list(
             self._session.scalars(
@@ -319,6 +345,62 @@ class SqlChangeSetRepository:
         self._session.flush()
         return self._operation_dict(row)
 
+    def rule_id_by_native(
+        self, manager_id: UUID, native_id: str, organization_id: UUID
+    ) -> UUID | None:
+        return self._session.scalar(
+            select(AccessRule.id).where(
+                AccessRule.manager_id == manager_id,
+                AccessRule.native_id == native_id,
+                AccessRule.organization_id == organization_id,
+            )
+        )
+
+    def object_id_by_native(
+        self, manager_id: UUID, native_id: str, organization_id: UUID
+    ) -> UUID | None:
+        return self._session.scalar(
+            select(FirewallObject.id).where(
+                FirewallObject.manager_id == manager_id,
+                FirewallObject.native_id == native_id,
+                FirewallObject.organization_id == organization_id,
+            )
+        )
+
+    def rule_revision(self, rule_id: UUID, organization_id: UUID) -> int | None:
+        row = self._session.scalar(
+            select(AccessRule.revision).where(
+                AccessRule.id == rule_id,
+                AccessRule.organization_id == organization_id,
+            )
+        )
+        return int(row) if row is not None else None
+
+    def object_revision(self, object_id: UUID, organization_id: UUID) -> int | None:
+        row = self._session.scalar(
+            select(FirewallObject.revision).where(
+                FirewallObject.id == object_id,
+                FirewallObject.organization_id == organization_id,
+            )
+        )
+        return int(row) if row is not None else None
+
+    def rule_management_state(self, rule_id: UUID, organization_id: UUID) -> str | None:
+        return self._session.scalar(
+            select(AccessRule.management_state).where(
+                AccessRule.id == rule_id,
+                AccessRule.organization_id == organization_id,
+            )
+        )
+
+    def object_management_state(self, object_id: UUID, organization_id: UUID) -> str | None:
+        return self._session.scalar(
+            select(FirewallObject.management_state).where(
+                FirewallObject.id == object_id,
+                FirewallObject.organization_id == organization_id,
+            )
+        )
+
     def update_operation(
         self,
         principal: Principal,
@@ -394,6 +476,7 @@ class SqlChangeSetRepository:
             result = by_id.get(operation.id)
             if result is None:
                 continue
+            operation.rollback_snapshot = self._rollback_snapshot(operation)
             operation.validation_results = _as_dict_list(result.get("checks", []))
             operation.resolution = _as_dict(result.get("resolution", {}))
             operation.expected_revisions = _as_str_dict(result.get("expected_revisions", {}))
@@ -405,6 +488,54 @@ class SqlChangeSetRepository:
         row.state = state
         row.revision += 1
         row.validated_revision = row.revision
+        if state == ChangeSetState.READY.value:
+            group = self._session.scalar(
+                select(Group).where(
+                    Group.id == group_id, Group.organization_id == principal.organization_id
+                )
+            )
+            if group is not None and group.approval_required:
+                approvers = self._session.scalars(
+                    select(User)
+                    .join(GroupMembership, GroupMembership.user_id == User.id)
+                    .where(
+                        GroupMembership.organization_id == principal.organization_id,
+                        GroupMembership.group_id == group_id,
+                        GroupMembership.status == "ACTIVE",
+                        User.organization_id == principal.organization_id,
+                        User.is_active.is_(True),
+                        User.role.in_(("approver", "firewall_admin", "admin")),
+                        User.id != principal.user_id,
+                    )
+                ).all()
+                dedupe_key = f"changeset-approval:{row.id}:{row.revision}"
+                for approver in approvers:
+                    exists = self._session.scalar(
+                        select(EmailNotification.id).where(
+                            EmailNotification.organization_id == principal.organization_id,
+                            EmailNotification.recipient_user_id == approver.id,
+                            EmailNotification.dedupe_key == dedupe_key,
+                        )
+                    )
+                    if exists is None:
+                        self._session.add(
+                            EmailNotification(
+                                organization_id=principal.organization_id,
+                                recipient_user_id=approver.id,
+                                recipient_email=approver.email,
+                                kind="CHANGESET_APPROVAL_REQUIRED",
+                                dedupe_key=dedupe_key,
+                                subject=f"Approval required: {row.title}"[:255],
+                                body=(
+                                    f"A ChangeSet is waiting for your approval.\n\n"
+                                    f"Title: {row.title}\n"
+                                    f"Group: {group.name}\n"
+                                    f"Submitted by: {principal.email}\n"
+                                    f"Revision: {row.revision}\n\n"
+                                    "Open the Approvals page in Firewall Manager to review it."
+                                ),
+                            )
+                        )
         self._session.flush()
         return self._change_set_dict(row)
 
@@ -751,22 +882,144 @@ class SqlChangeSetRepository:
         row = self._owned_row(principal, group_id, change_set_id)
         if (
             row is None
-            or row.state != ChangeSetState.READY.value
+            or row.state
+            not in (
+                {ChangeSetState.APPROVED.value}
+                if bool(self._change_set_dict(row).get("approval_required"))
+                else {ChangeSetState.READY.value, ChangeSetState.APPROVED.value}
+            )
             or row.validated_revision != row.revision
         ):
             raise InvalidChangeSetStateError
         row.state = ChangeSetState.QUEUED.value
+        row.submitted_at = datetime.now(UTC)
+        row.submitted_by_user_id = principal.user_id
         row.revision += 1
         row.validated_revision = row.revision
         self._session.flush()
         return self._change_set_dict(row)
+
+    def approve_change_set(
+        self, principal: Principal, group_id: UUID, change_set_id: UUID
+    ) -> dict[str, object]:
+        row = self._owned_row(principal, group_id, change_set_id)
+        if row is None or row.state != ChangeSetState.READY.value:
+            raise InvalidChangeSetStateError
+        member = self._session.scalar(
+            select(GroupMembership).where(
+                GroupMembership.organization_id == principal.organization_id,
+                GroupMembership.group_id == group_id,
+                GroupMembership.user_id == principal.user_id,
+                GroupMembership.status == "ACTIVE",
+            )
+        )
+        if member is None:
+            raise ResourceOutOfScopeError
+        if row.principal_id == principal.user_id:
+            raise InvalidChangeSetStateError(details={"code": "SEPARATION_OF_DUTY"})
+        row.state = ChangeSetState.APPROVED.value
+        row.approved_at = datetime.now(UTC)
+        row.approved_by_user_id = principal.user_id
+        row.approved_revision = row.revision
+        row.revision += 1
+        row.validated_revision = row.revision
+        self._session.flush()
+        return self._change_set_dict(row)
+
+    def recover_expired_execution_leases(self, *, now: datetime | None = None) -> list[UUID]:
+        current = now or datetime.now(UTC)
+        rows = list(
+            self._session.scalars(
+                select(ChangeSet)
+                .where(
+                    ChangeSet.state == ChangeSetState.EXECUTING.value,
+                    ChangeSet.execution_lease_until.is_not(None),
+                    ChangeSet.execution_lease_until < current,
+                )
+                .with_for_update(skip_locked=True)
+            )
+        )
+        recovered: list[UUID] = []
+        for row in rows:
+            transactions = list(
+                self._session.scalars(
+                    select(ProviderTransaction).where(
+                        ProviderTransaction.change_set_id == row.id,
+                        ProviderTransaction.state.in_(("EXECUTING", "AMBIGUOUS")),
+                    )
+                )
+            )
+            row.execution_owner = None
+            row.execution_lease_until = None
+            row.execution_heartbeat_at = current
+            if transactions:
+                row.failure_info = {
+                    "code": "EXECUTION_LEASE_EXPIRED",
+                    "recovery": "RECONCILIATION_REQUIRED",
+                    "transaction_ids": [str(item.id) for item in transactions],
+                }
+                row.state = ChangeSetState.RECONCILIATION_REQUIRED.value
+                for transaction in transactions:
+                    transaction.state = "RECONCILIATION_REQUIRED"
+                    transaction.reconciliation_required = True
+                    transaction.failure_info = {"code": "EXECUTION_LEASE_EXPIRED"}
+                    transaction.revision += 1
+            else:
+                row.failure_info = {"code": "EXECUTION_LEASE_EXPIRED", "recovery": "ELIGIBLE"}
+                row.state = ChangeSetState.QUEUED.value
+            row.revision += 1
+            if row.state == ChangeSetState.QUEUED.value:
+                recovered.append(row.id)
+        self._session.flush()
+        return recovered
+
+    def acquire_execution_lease(
+        self, change_set_id: UUID, owner: str, *, lease_seconds: int = 120
+    ) -> bool:
+        now = datetime.now(UTC)
+        result = self._session.execute(
+            update(ChangeSet)
+            .where(
+                ChangeSet.id == change_set_id,
+                ChangeSet.state == ChangeSetState.EXECUTING.value,
+                (
+                    ChangeSet.execution_lease_until.is_(None)
+                    | (ChangeSet.execution_lease_until < now)
+                ),
+            )
+            .values(
+                execution_owner=owner,
+                execution_lease_until=now + timedelta(seconds=lease_seconds),
+                execution_heartbeat_at=now,
+            )
+        )
+        self._session.flush()
+        return bool(cast("CursorResult[Any]", result).rowcount)
+
+    def heartbeat_execution_lease(
+        self, change_set_id: UUID, owner: str, *, lease_seconds: int = 120
+    ) -> bool:
+        now = datetime.now(UTC)
+        result = self._session.execute(
+            update(ChangeSet)
+            .where(
+                ChangeSet.id == change_set_id,
+                ChangeSet.execution_owner == owner,
+            )
+            .values(
+                execution_lease_until=now + timedelta(seconds=lease_seconds),
+                execution_heartbeat_at=now,
+            )
+        )
+        self._session.flush()
+        return bool(cast("CursorResult[Any]", result).rowcount)
 
     def commit_change_set_queue(self) -> None:
         """Commit the unique queue claim before a fast worker can consume it."""
         self._session.commit()
 
     def claim_queued_execution(
-        self, principal: Principal, group_id: UUID, change_set_id: UUID
+        self, principal: Principal, group_id: UUID, change_set_id: UUID, owner: str | None = None
     ) -> bool:
         """Atomically allow only one worker delivery to execute provider writes."""
         claimed = self._session.execute(
@@ -778,7 +1031,15 @@ class SqlChangeSetRepository:
                 ChangeSet.principal_id == principal.user_id,
                 ChangeSet.state == ChangeSetState.QUEUED.value,
             )
-            .values(state=ChangeSetState.EXECUTING.value, updated_at=datetime.now(UTC))
+            .values(
+                state=ChangeSetState.EXECUTING.value,
+                updated_at=datetime.now(UTC),
+                execution_owner=owner,
+                execution_lease_until=(datetime.now(UTC) + timedelta(seconds=120))
+                if owner
+                else None,
+                execution_heartbeat_at=datetime.now(UTC) if owner else None,
+            )
             .execution_options(synchronize_session=False)
         )
         self._session.commit()
@@ -1690,6 +1951,7 @@ class SqlChangeSetRepository:
                 User.organization_id == row.organization_id,
             )
         )
+        group = self._session.get(Group, row.acting_group_id) if row.acting_group_id else None
         return {
             "id": row.id,
             "organization_id": row.organization_id,
@@ -1697,6 +1959,7 @@ class SqlChangeSetRepository:
             "creator_display_name": creator.display_name if creator else None,
             "creator_email": creator.email if creator else None,
             "active_group_id": row.acting_group_id,
+            "approval_required": bool(group.approval_required) if group else False,
             "access_policy_id": row.access_policy_id,
             "target_policy_ids": row.target_policy_ids,
             "title": row.title,
@@ -1704,6 +1967,16 @@ class SqlChangeSetRepository:
             "state": row.state,
             "revision": row.revision,
             "validated_revision": row.validated_revision,
+            "submitted_at": row.submitted_at,
+            "submitted_by_user_id": row.submitted_by_user_id,
+            "approved_at": row.approved_at,
+            "approved_by_user_id": row.approved_by_user_id,
+            "approved_revision": row.approved_revision,
+            "approval_invalidated_at": row.approval_invalidated_at,
+            "execution_owner": row.execution_owner,
+            "execution_lease_until": row.execution_lease_until,
+            "execution_heartbeat_at": row.execution_heartbeat_at,
+            "execution_operation": row.execution_operation,
             "provider_revision_snapshot": row.provider_revision_snapshot,
             "validation_results": row.validation_results,
             "execution_results": row.execution_results,
@@ -1736,12 +2009,41 @@ class SqlChangeSetRepository:
             "status": row.status,
             "validation_results": row.validation_results,
             "resolution": row.resolution,
+            "rollback_snapshot": row.rollback_snapshot,
             "execution_result": row.execution_result,
             "failure_info": row.failure_info,
             "revision": row.revision,
             "created_at": row.created_at,
             "updated_at": row.updated_at,
         }
+
+    def _rollback_snapshot(self, operation: ChangeSetOperation) -> dict[str, object]:
+        """Capture the normalized state immediately before a ChangeSet is validated."""
+        payload = operation.payload
+        kind = operation.kind
+        if kind in {"MODIFY_RULE", "DELETE_RULE", "MOVE_RULE"} and payload.get("rule_id"):
+            rule = self._session.get(AccessRule, UUID(str(payload["rule_id"])))
+            if rule is not None:
+                return {
+                    "resource_type": "rule",
+                    "resource_id": str(rule.id),
+                    "provider_native_id": rule.native_id,
+                    "revision": rule.revision,
+                    "fingerprint": rule.provider_fingerprint,
+                    "state": self._rule_application_snapshot(rule),
+                }
+        if kind in {"MODIFY_OBJECT", "DELETE_OBJECT"} and payload.get("object_id"):
+            item = self._session.get(FirewallObject, UUID(str(payload["object_id"])))
+            if item is not None:
+                return {
+                    "resource_type": "object",
+                    "resource_id": str(item.id),
+                    "provider_native_id": item.native_id,
+                    "revision": item.revision,
+                    "fingerprint": item.provider_fingerprint,
+                    "state": self._object_application_snapshot(item),
+                }
+        return {"resource_type": "none"}
 
     @staticmethod
     def _transaction_dict(row: ProviderTransaction) -> dict[str, object]:
@@ -1753,6 +2055,11 @@ class SqlChangeSetRepository:
             "failure_info": row.failure_info,
             "reconciliation_required": row.reconciliation_required,
             "external_operation_id": row.external_operation_id,
+            "lease_owner": row.lease_owner,
+            "lease_until": row.lease_until,
+            "heartbeat_at": row.heartbeat_at,
+            "last_probe_at": row.last_probe_at,
+            "provider_metadata": row.provider_metadata,
             "revision": row.revision,
             "created_at": row.created_at,
             "updated_at": row.updated_at,
