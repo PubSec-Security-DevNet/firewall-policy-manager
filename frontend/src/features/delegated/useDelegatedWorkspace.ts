@@ -124,7 +124,7 @@ export function useDelegatedWorkspace(
           refreshing = false;
         });
     };
-    const timer = window.setInterval(refresh, 3_000);
+    const timer = window.setInterval(refresh, 10_000);
     return () => {
       current = false;
       window.clearInterval(timer);

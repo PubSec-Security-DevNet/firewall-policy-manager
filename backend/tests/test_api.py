@@ -17,7 +17,7 @@ from firewall_manager.domain.models import (
     ProviderInventory,
     ProviderKind,
 )
-from firewall_manager.main import app
+from firewall_manager.main import HEALTH_PROBE_PATHS, app
 
 
 class FakeRepository:
@@ -249,6 +249,14 @@ def test_live_endpoint_and_correlation_id() -> None:
     response = TestClient(app).get("/api/v1/health/live", headers={"X-Correlation-ID": "test-id"})
     assert response.status_code == 200
     assert response.headers["X-Correlation-ID"] == "test-id"
+
+
+def test_operational_probe_paths_bypass_application_rate_limit() -> None:
+    assert {
+        "/api/v1/health/live",
+        "/api/v1/health/ready",
+        "/api/v1/metrics",
+    } == HEALTH_PROBE_PATHS
 
 
 def test_overview_uses_application_service_contract() -> None:

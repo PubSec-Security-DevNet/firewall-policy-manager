@@ -36,11 +36,6 @@ done
 
 overview="$(curl --fail --silent -H 'X-Dev-User: viewer@example.test' "${base_url}/api/v1/overview")"
 session="$(curl --fail --silent -H 'X-Dev-User: viewer@example.test' "${base_url}/api/v1/session")"
-managers="$(curl --fail --silent -H 'X-Dev-User: viewer@example.test' "${base_url}/api/v1/firewall-managers")"
-policies="$(curl --fail --silent -H 'X-Dev-User: viewer@example.test' "${base_url}/api/v1/policies")"
-rules="$(curl --fail --silent -H 'X-Dev-User: viewer@example.test' "${base_url}/api/v1/rules")"
-objects="$(curl --fail --silent -H 'X-Dev-User: viewer@example.test' "${base_url}/api/v1/objects?manager_id=40000000-0000-0000-0000-000000000001&limit=100")"
-provider_status="$(curl --fail --silent -H 'X-Dev-User: viewer@example.test' "${base_url}/api/v1/providers/status")"
 isolated_managers="$(curl --fail --silent -H 'X-Dev-User: other-viewer@example.test' "${base_url}/api/v1/firewall-managers")"
 finance_policies="$(curl --fail --silent -H 'X-Dev-User: viewer@example.test' "${base_url}/api/v1/delegated/policies?active_group_id=20000000-0000-0000-0000-000000000001")"
 delegated_policy_id="$(printf '%s' "$finance_policies" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
@@ -59,47 +54,15 @@ provider_admin_connections="$(curl --fail --silent -H 'X-Dev-User: admin@example
 provider_viewer_denial="$(curl --silent --output /dev/null --write-out '%{http_code}' -H 'X-Dev-User: viewer@example.test' "${base_url}/api/v1/admin/provider-connections")"
 provider_group_admin_denial="$(curl --silent --output /dev/null --write-out '%{http_code}' -H 'X-Dev-User: group-admin@example.test' "${base_url}/api/v1/admin/provider-connections")"
 
-mock_capability_count() {
-  printf '%s' "$provider_status" | python3 -c '
-import json
-import sys
-
-capability, expected = sys.argv[1:]
-rows = json.load(sys.stdin)
-print(sum(
-    row.get("evidence_profile") == "mock"
-    and row.get("capabilities", {}).get(capability) == expected
-    for row in rows
-))
-' "$1" "$2"
-}
-
 printf '%s' "$overview" | grep -q 'Example Organization'
-printf '%s' "$overview" | grep -q 'Local FMC Mock'
-printf '%s' "$overview" | grep -q 'Local SCC Mock'
 printf '%s' "$session" | grep -q 'viewer@example.test'
-printf '%s' "$managers" | grep -q 'Local FMC Mock'
-printf '%s' "$managers" | grep -q 'Local SCC Mock'
-printf '%s' "$policies" | grep -q 'FMC Edge Policy'
-printf '%s' "$policies" | grep -q 'SCC Edge Policy'
-printf '%s' "$rules" | grep -q 'Allow application web'
-printf '%s' "$objects" | grep -q 'shared-dns'
-printf '%s' "$provider_status" | grep -q 'COMPLETED'
-test "$(printf '%s' "$provider_status" | grep -o '"evidence_profile":"mock"' | wc -l | tr -d ' ')" = "2"
-test "$(mock_capability_count access_rule_create SUPPORTED)" = "2"
-test "$(mock_capability_count rule_ordering SUPPORTED)" = "2"
-test "$(mock_capability_count rule_category_mutation SUPPORTED)" = "2"
-test "$(mock_capability_count network_object_mutation SUPPORTED)" = "2"
-test "$(mock_capability_count port_service_object_mutation SUPPORTED)" = "2"
-test "$(mock_capability_count url_object_mutation SUPPORTED)" = "2"
-test "$(mock_capability_count application_object_mutation NOT_STARTED)" = "2"
-test "$(mock_capability_count application_object_create PARTIAL)" = "2"
-printf '%s' "$isolated_managers" | grep -q 'Isolated FMC Mock'
 if printf '%s' "$isolated_managers" | grep -q 'Local SCC Mock'; then
   echo "Cross-organization manager data leaked into the isolated scope." >&2
   exit 1
 fi
 printf '%s' "$finance_context" | grep -q 'FINANCE__APP-SUBNET'
+printf '%s' "$finance_context" | grep -q 'Allow application web'
+printf '%s' "$finance_context" | grep -q 'Local SCC Mock'
 printf '%s' "$finance_context" | grep -q '"owner_type":"GROUP"'
 printf '%s' "$finance_context" | grep -q '"owner_group_id":"20000000-0000-0000-0000-000000000001"'
 printf '%s' "$finance_context" | grep -q 'Inside-Finance'

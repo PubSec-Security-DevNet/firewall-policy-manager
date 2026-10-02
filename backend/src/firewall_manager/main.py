@@ -33,6 +33,14 @@ from firewall_manager.security.oidc import COOKIE_NAME
 from firewall_manager.security.redaction import SecretRedactionFilter
 from firewall_manager.worker.tasks import execute_change_set, synchronize_provider_connection
 
+HEALTH_PROBE_PATHS = frozenset(
+    {
+        "/api/v1/health/live",
+        "/api/v1/health/ready",
+        "/api/v1/metrics",
+    }
+)
+
 
 def dispatch_provider_sync(connection_id: UUID, mode: str = "FULL") -> object:
     """Publish one connection UUID after the repository has committed its queue state."""
@@ -107,13 +115,22 @@ def create_app() -> FastAPI:  # noqa: PLR0915 -- composition root owns all proce
         """Apply a bounded per-process API limit and browser security headers."""
         now = time.monotonic()
         client = request.client.host if request.client else "unknown"
-        if request.url.path.startswith("/api/") and not request.url.path.endswith("/health/live"):
+        if settings.app_environment in {"development", "test"}:
+            development_user = request.headers.get("X-Dev-User", "").strip().lower()
+            if development_user:
+                client = f"{client}:dev:{development_user}"
+        if request.url.path.startswith("/api/") and request.url.path not in HEALTH_PROBE_PATHS:
+            request_limit = settings.api_rate_limit_requests
+            if settings.app_environment == "development" and settings.dev_auth_enabled:
+                # Development UI polling and multiple local tabs should not exhaust the
+                # production-sized default while the development identity remains bounded.
+                request_limit = max(request_limit, 5_000)
             started = rate_window_started.get(client, now)
             if now - started >= settings.api_rate_limit_window_seconds:
                 rate_window_started[client] = now
                 rate_counts[client] = 0
             rate_counts[client] = rate_counts.get(client, 0) + 1
-            if rate_counts[client] > settings.api_rate_limit_requests:
+            if rate_counts[client] > request_limit:
                 response = JSONResponse(
                     status_code=429,
                     content={

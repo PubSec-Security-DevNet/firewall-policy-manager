@@ -213,6 +213,7 @@ class DelegatedObjectResponse(BaseModel):
     id: UUID
     name: str
     object_type: str
+    normalized_value: str | None = None
     management_state: str = "OBSERVED"
     firewall_state: Literal["DEPLOYED", "UNDEPLOYED", "NOT_PRESENT", "UNKNOWN"] = "UNKNOWN"
     owner_type: Literal["GROUP", "PROVIDER"] = "PROVIDER"

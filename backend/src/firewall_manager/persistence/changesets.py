@@ -1226,6 +1226,8 @@ class SqlChangeSetRepository:
                     FirewallObject, UUID(str(payload["object_id"])), organization_id
                 )
                 provider_payload["object_native_id"] = item.native_id
+                provider_payload["normalized_value"] = item.normalized_value
+                provider_payload["provider_name"] = item.expected_provider_name
                 if item.provider_version:
                     provider_payload["expected_object_version"] = item.provider_version
                 provider_payload["expected_provider_name"] = item.expected_provider_name

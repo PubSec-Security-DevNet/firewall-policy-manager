@@ -41,7 +41,7 @@ from firewall_manager.domain.models import (
     SyncResult,
     SyncStatus,
 )
-from firewall_manager.domain.networks import network_is_contained
+from firewall_manager.domain.networks import network_is_contained, normalize_ip_network
 from firewall_manager.persistence.models import (
     AccessPolicy,
     AccessRule,
@@ -98,6 +98,18 @@ SyncedModel = TypeVar(
     SecurityZone,
     VariableSet,
 )
+
+
+def _same_managed_object_value(object_type: object, expected: object, observed: object) -> bool:
+    """Treat provider host/CIDR normalization as the same managed network value."""
+    if str(expected) == str(observed):
+        return True
+    if str(object_type) != FirewallObjectType.NETWORK.value:
+        return False
+    try:
+        return normalize_ip_network(str(expected)) == normalize_ip_network(str(observed))
+    except ValueError:
+        return False
 _SENSITIVE_METADATA_PARTS = ("secret", "password", "token", "authorization", "private_key")
 _USABLE_STATES = ("OBSERVED", "UNMANAGED", "MANAGED")
 _CONTEXT_RESOURCE_STATES = (
@@ -2163,11 +2175,14 @@ class SqlAdministrationRepository:
         ).one_or_none() or (None, None)
         if object_type != "NETWORK" or not object_value:
             return
-        ranges, _revision = self.ip_range_grants(
-            UUID(str(values["group_id"])),
-            UUID(str(values["policy_id"])),
-            organization_id,
+        range_rows = self._session.execute(
+            select(IpRangeGrant.network).where(
+                IpRangeGrant.organization_id == organization_id,
+                IpRangeGrant.group_id == values["group_id"],
+                IpRangeGrant.policy_id == values["policy_id"],
+            )
         )
+        ranges = [str(network) for (network,) in range_rows]
         contained = any(network_is_contained(str(object_value), grant) for grant in ranges)
         if not ranges or not contained:
             raise InvalidInputError(details={"code": "NETWORK_OBJECT_OUTSIDE_ASSIGNED_IP_RANGES"})
@@ -2455,11 +2470,41 @@ class SqlSyncRepository:
                     if key in {"action", "enabled", "position", "category_id"}
                 },
             }
+            if isinstance(row, RuleCategory):
+                # Category position is provider-managed ordering metadata. The
+                # application owns the mapped category name, not its placement.
+                observed_managed_fields.pop("position", None)
+            if isinstance(row, FirewallObject) and row.owner_group_id is not None:
+                observed_managed_fields.update(
+                    {
+                        "object_type": extra.get("object_type"),
+                        "normalized_value": extra.get("normalized_value"),
+                    }
+                )
+            provider_owned = getattr(row, "owner_group_id", None) is None
+            if isinstance(row, RuleCategory):
+                provider_owned = (
+                    self._session.scalar(
+                        select(GroupPolicyCategoryMapping.id).where(
+                            GroupPolicyCategoryMapping.category_id == row.id,
+                            GroupPolicyCategoryMapping.organization_id == organization_id,
+                        )
+                    )
+                    is None
+                )
             representation_only_change = (
-                isinstance(row, AccessRule)
-                and row.owner_group_id is not None
+                isinstance(row, (AccessRule, FirewallObject, RuleCategory))
+                and not provider_owned
                 and all(
-                    key not in desired_snapshot or str(desired_snapshot[key]) == str(value)
+                    key not in desired_snapshot
+                    or (
+                        isinstance(row, FirewallObject)
+                        and key == "normalized_value"
+                        and _same_managed_object_value(
+                            desired_snapshot.get("object_type"), desired_snapshot[key], value
+                        )
+                    )
+                    or str(desired_snapshot[key]) == str(value)
                     for key, value in observed_managed_fields.items()
                 )
             )
@@ -2492,6 +2537,13 @@ class SqlSyncRepository:
                 # false authorization drift.
                 row.management_state = ResourceState.MANAGED
                 row.revision += 1
+            elif provider_owned:
+                # Provider-owned inventory is observed state, not application drift.
+                # Clear legacy false-positive drift classifications and never create
+                # new drift records for provider-owned changes.
+                if changed or row.management_state != ResourceState.OBSERVED:
+                    row.management_state = ResourceState.OBSERVED
+                    row.revision += 1
             elif changed or ownership_name_conflict:
                 row.management_state = (
                     ResourceState.CONFLICT if ownership_name_conflict else ResourceState.DRIFTED

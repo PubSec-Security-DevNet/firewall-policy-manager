@@ -149,7 +149,8 @@ export function AdminChangeSetsPanel({ initialDetailsId }: { initialDetailsId?: 
                   <Button size="xs" variant="subtle" onClick={() => setDetailsId(item.id)}>
                     View details
                   </Button>
-                  {item.state === 'READY' && (
+                  {(!item.approval_required && item.state === 'READY') ||
+                  (item.approval_required && item.state === 'APPROVED') ? (
                     <Button
                       size="xs"
                       variant="light"
@@ -159,7 +160,7 @@ export function AdminChangeSetsPanel({ initialDetailsId }: { initialDetailsId?: 
                     >
                       Execute
                     </Button>
-                  )}
+                  ) : null}
                   {DELETABLE_STATES.has(item.state) && (
                     <Button
                       size="xs"

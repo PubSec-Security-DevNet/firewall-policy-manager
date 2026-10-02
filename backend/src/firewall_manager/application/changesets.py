@@ -256,7 +256,15 @@ class ChangeSetService:
                             "operation": str(operation["id"]),
                         }
                     )
-                if self._repository.rule_revision(rule_id, principal.organization_id) != 1:
+                # A CREATE_RULE rollback remains safe after provider synchronization has
+                # advanced the local observation revision.  The resource must still be
+                # manager-owned; revision 1 is only the pre-sync revision and is not a
+                # reliable conflict check after repeated successful syncs.
+                if (
+                    self._repository.rule_revision(rule_id, principal.organization_id) != 1
+                    and self._repository.rule_management_state(rule_id, principal.organization_id)
+                    != "MANAGED"
+                ):
                     raise InvalidChangeSetStateError(
                         details={"code": "ROLLBACK_CONFLICT", "resource_id": str(rule_id)}
                     )
@@ -517,16 +525,30 @@ class ChangeSetService:
     ) -> dict[str, object]:
         """Durably claim a validated ChangeSet and publish its security context."""
         change_set = self._load(principal, active_group_id, change_set_id)
+        executable_states = (
+            {ChangeSetState.APPROVED.value}
+            if bool(change_set.get("approval_required"))
+            else {ChangeSetState.READY.value, ChangeSetState.APPROVED.value}
+        )
         if (
-            change_set["state"] != ChangeSetState.READY.value
+            change_set["state"] not in executable_states
             or change_set["validated_revision"] != change_set["revision"]
         ):
-            raise InvalidChangeSetStateError(details={"required_state": ChangeSetState.READY.value})
+            raise InvalidChangeSetStateError(details={"required_state": sorted(executable_states)})
         queued = self._repository.queue_execution(principal, active_group_id, change_set_id)
         self._audit_for(change_set, principal, "change_set_submitted", "QUEUED")
         self._repository.commit_change_set_queue()
         try:
-            dispatch(change_set_id, principal.user_id, active_group_id, principal.organization_id)
+            # Execute under the original ChangeSet creator's authorization context.
+            # An administrator may approve/queue an approval-required ChangeSet, but
+            # the worker must reauthorize the operations against the delegated user's
+            # grants that were preflighted and persisted on the ChangeSet.
+            dispatch(
+                change_set_id,
+                UUID(str(change_set["creator_id"])),
+                active_group_id,
+                principal.organization_id,
+            )
         except Exception as exc:
             self._repository.set_execution_state(
                 principal,

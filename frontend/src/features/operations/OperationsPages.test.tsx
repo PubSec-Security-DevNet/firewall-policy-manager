@@ -5,11 +5,18 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { appTheme } from '../../ui/theme';
-import { AuditPage, SyncDriftPage } from './OperationsPages';
+import { AuditPage, resourceTypeLabel, SyncDriftPage } from './OperationsPages';
 
 afterEach(() => vi.restoreAllMocks());
 
 describe('operations pages', () => {
+  it('uses the same human-readable resource labels for provider-only rows', () => {
+    expect(resourceTypeLabel('access_rules')).toBe('Rule');
+    expect(resourceTypeLabel('firewall_objects')).toBe('Object');
+    expect(resourceTypeLabel('rule_categories')).toBe('Rule category');
+    expect(resourceTypeLabel('new_provider_resource')).toBe('New Provider Resource');
+  });
+
   it('presents provider synchronization failures and drift without fabricating remediation', async () => {
     vi.stubGlobal(
       'fetch',
@@ -117,8 +124,9 @@ describe('operations pages', () => {
       </MantineProvider>,
     );
     expect(await screen.findByText('Platform Admin')).toBeVisible();
-    await userEvent.setup().click(screen.getByText('View details'));
-    expect(screen.getByText(/Authorization Revision: 4/)).toBeVisible();
+    const user = userEvent.setup();
+    await user.click(screen.getByText('View details'));
+    expect(await screen.findByText(/Authorization Revision: 4/)).toBeInTheDocument();
     expect(screen.queryByText(/must-not-render/)).not.toBeInTheDocument();
     const results = await axe.run(container, { rules: { 'color-contrast': { enabled: false } } });
     expect(results.violations).toHaveLength(0);

@@ -134,8 +134,8 @@ export function ProviderConnectionsPanel() {
 
       <Card>
         <AppSection
-          title="Provider connections"
-          description="Manage FMC and Security Cloud Control connectivity, synchronization, and production writes."
+          title="Connected provider inventory"
+          description="Review connection health, synchronization status, and provider operations."
           actions={
             <Group gap="sm">
               <AppStatusBadge

@@ -1779,6 +1779,8 @@ export interface components {
             name: string;
             /** Object Type */
             object_type: string;
+            /** Normalized Value */
+            normalized_value?: string | null;
             /** Owner Group Id */
             owner_group_id?: string | null;
             /** Owner Policy Id */

@@ -263,7 +263,7 @@ function ReadyApplication({ overview, session }: { overview: Overview; session: 
         <AppPage
           eyebrow="Infrastructure"
           title="Provider connections"
-          description="Read-only FMC and Security Cloud Control integrations, connection health, and credential lifecycle."
+          description="Manage FMC and Security Cloud Control connectivity, synchronization, and production writes."
         >
           <ProviderConnectionsPanel />
         </AppPage>

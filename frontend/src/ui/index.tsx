@@ -288,7 +288,7 @@ export function AppLayout({
               </Button>
             </Tooltip>
             {session && (
-              <div>
+              <div className="fm-session-identity">
                 <Text size="xs" fw={650} ta="right">
                   {session.email}
                 </Text>
@@ -328,7 +328,7 @@ export function AppPage({
 }) {
   return (
     <Stack gap="lg">
-      <header className="fm-page-header">
+      <div className="fm-page-header">
         <div>
           {eyebrow && (
             <Text className="fm-eyebrow" mb={4}>
@@ -345,7 +345,7 @@ export function AppPage({
           )}
         </div>
         {actions && <Group>{actions}</Group>}
-      </header>
+      </div>
       {children}
     </Stack>
   );

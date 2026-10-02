@@ -378,7 +378,7 @@ def execute_deployment_batch(deployment_id: str) -> None:
     asyncio.run(_execute_deployment_batch(UUID(deployment_id)))
 
 
-async def _execute_deployment_batch(deployment_id: UUID) -> None:  # noqa: PLR0912, PLR0915
+async def _execute_deployment_batch(deployment_id: UUID) -> None:  # noqa: PLR0911, PLR0912, PLR0915
     settings = get_settings()
     with new_session() as session:
         owner = f"deployment:{os.uname().nodename}:{os.getpid()}:{uuid4()}"
@@ -535,24 +535,7 @@ async def _execute_deployment_batch(deployment_id: UUID) -> None:  # noqa: PLR09
                 connection.deployment_last_completed_at = datetime.now(UTC)
             elif any(str(item.get("state")) == "FAILED" for item in statuses):
                 deployment.state = "FAILED"
-                provider_messages: list[dict[str, str]] = []
-                for status in statuses:
-                    provider = status.get("provider")
-                    if not isinstance(provider, dict):
-                        continue
-                    for field in ("errorMsg", "errorMessage", "failureReason"):
-                        message = provider.get(field)
-                        if message:
-                            provider_messages.append(
-                                {"field": field, "message": str(message)[:1000]}
-                            )
-                deployment.failure_info = {
-                    "code": "PROVIDER_DEPLOYMENT_FAILED",
-                    "provider_statuses": [
-                        str(item.get("provider_status") or "UNKNOWN") for item in statuses
-                    ],
-                    "provider_messages": provider_messages,
-                }
+                deployment.failure_info = deployment_failure_info(statuses)
                 deployment.device_results = [
                     item for status in statuses for item in status.get("devices", [])
                 ]
@@ -587,7 +570,12 @@ async def _execute_deployment_batch(deployment_id: UUID) -> None:  # noqa: PLR09
             deployment.heartbeat_at = datetime.now(UTC)
             deployment.lease_until = datetime.now(UTC) + timedelta(minutes=10)
             session.commit()
-            raise
+            # The failure is now durable and visible through the deployment API.  Re-raising
+            # after committing turns an expected provider rejection (for example, no FMC
+            # deployable devices) into an unhandled Dramatiq error and obscures the operator
+            # state.  The deployment actor has no retry budget, so return after recording the
+            # terminal failure and let the normal lease cleanup run.
+            return
         finally:
             current = session.get(Deployment, deployment_id)
             if current is not None and current.lease_owner == owner:
@@ -596,6 +584,24 @@ async def _execute_deployment_batch(deployment_id: UUID) -> None:  # noqa: PLR09
                 current.heartbeat_at = datetime.now(UTC)
                 session.commit()
             await provider.aclose()
+
+
+def deployment_failure_info(statuses: list[dict[str, object]]) -> dict[str, object]:
+    """Normalize provider deployment errors without shadowing the live adapter instance."""
+    provider_messages: list[dict[str, str]] = []
+    for status in statuses:
+        provider_payload = status.get("provider")
+        if not isinstance(provider_payload, dict):
+            continue
+        for field in ("errorMsg", "errorMessage", "failureReason"):
+            message = provider_payload.get(field)
+            if message:
+                provider_messages.append({"field": field, "message": str(message)[:1000]})
+    return {
+        "code": "PROVIDER_DEPLOYMENT_FAILED",
+        "provider_statuses": [str(item.get("provider_status") or "UNKNOWN") for item in statuses],
+        "provider_messages": provider_messages,
+    }
 
 
 async def _synchronize_provider_connection(connection_id: UUID, mode: str = "FULL") -> None:

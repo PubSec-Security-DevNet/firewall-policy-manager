@@ -257,7 +257,7 @@ function SyncDriftContent({
             connection_id: item.connection_id,
             provider: providerByManager.get(item.manager_id) ?? item.provider.toUpperCase(),
             policy_id: item.policy_id,
-            kind: item.resource_type,
+            kind: resourceTypeLabel(item.resource_type),
             management_state: item.provider_only ? 'UNMANAGED' : item.state,
             value:
               typeof item.observed_snapshot.normalized_value === 'string'
@@ -735,7 +735,11 @@ function AuditContent({ snapshot }: { snapshot: AdministrationSnapshot }) {
                   <AppStatusBadge value={event.decision} />
                 </Table.Td>
                 <Table.Td>
-                  <AppButton size="compact-xs" variant="subtle" onClick={() => setSelectedEvent(event)}>
+                  <AppButton
+                    size="compact-xs"
+                    variant="subtle"
+                    onClick={() => setSelectedEvent(event)}
+                  >
                     View details
                   </AppButton>
                 </Table.Td>
@@ -753,26 +757,53 @@ function AuditContent({ snapshot }: { snapshot: AdministrationSnapshot }) {
       >
         {selectedEvent && (
           <div className="fm-audit-details">
-            <Text size="sm"><strong>Actor:</strong> {selectedEvent.actor}</Text>
-            <Text size="sm"><strong>Action:</strong> {humanize(selectedEvent.action)}</Text>
-            <Text size="sm"><strong>Resource:</strong> {humanize(selectedEvent.resource_type)}</Text>
-            <Text size="sm"><strong>Outcome:</strong> {humanize(selectedEvent.decision)}</Text>
-            <Text size="sm"><strong>Reason code:</strong> {humanize(selectedEvent.reason_code)}</Text>
+            <Text size="sm">
+              <strong>Actor:</strong> {selectedEvent.actor}
+            </Text>
+            <Text size="sm">
+              <strong>Action:</strong> {humanize(selectedEvent.action)}
+            </Text>
+            <Text size="sm">
+              <strong>Resource:</strong> {humanize(selectedEvent.resource_type)}
+            </Text>
+            <Text size="sm">
+              <strong>Outcome:</strong> {humanize(selectedEvent.decision)}
+            </Text>
+            <Text size="sm">
+              <strong>Reason code:</strong> {humanize(selectedEvent.reason_code)}
+            </Text>
             {typeof selectedEvent.details.reason === 'string' && (
-              <Text size="sm"><strong>Proxy reason:</strong> {selectedEvent.details.reason}</Text>
+              <Text size="sm">
+                <strong>Proxy reason:</strong> {selectedEvent.details.reason}
+              </Text>
             )}
             {typeof selectedEvent.details.effective_user_email === 'string' && (
-              <Text size="sm"><strong>Proxied user:</strong> {selectedEvent.details.effective_user_email}</Text>
+              <Text size="sm">
+                <strong>Proxied user:</strong> {selectedEvent.details.effective_user_email}
+              </Text>
             )}
-            <Text size="sm"><strong>Interface:</strong> {humanize(selectedEvent.interface)}</Text>
-            <Text size="sm"><strong>Date:</strong> {formatDate(selectedEvent.occurred_at)}</Text>
+            {typeof selectedEvent.details.authorization_revision === 'number' && (
+              <Text size="sm">
+                Authorization Revision: {selectedEvent.details.authorization_revision}
+              </Text>
+            )}
+            <Text size="sm">
+              <strong>Interface:</strong> {humanize(selectedEvent.interface)}
+            </Text>
+            <Text size="sm">
+              <strong>Date:</strong> {formatDate(selectedEvent.occurred_at)}
+            </Text>
             {selectedEvent.correlation_id && (
-              <Text size="sm" className="fm-code"><strong>Correlation:</strong> {selectedEvent.correlation_id}</Text>
+              <Text size="sm" className="fm-code">
+                <strong>Correlation:</strong> {selectedEvent.correlation_id}
+              </Text>
             )}
             <div>
-              <Text size="sm" fw={700} mb={4}>Details</Text>
+              <Text size="sm" fw={700} mb={4}>
+                Details
+              </Text>
               <pre className="fm-audit-details-json">
-                {JSON.stringify(selectedEvent.details, null, 2)}
+                {JSON.stringify(auditDetailsForDisplay(selectedEvent.details), null, 2)}
               </pre>
             </div>
           </div>
@@ -805,6 +836,28 @@ function isAuditEvent(
   );
 }
 
+function auditDetailsForDisplay(details: Record<string, unknown>): Record<string, unknown> {
+  const safeKeys = new Set([
+    'authorization_revision',
+    'reason',
+    'effective_user_email',
+    'provider',
+    'provider_version',
+    'resource_id',
+    'change_set_id',
+    'deployment_id',
+    'error_code',
+    'mode',
+  ]);
+  return Object.fromEntries(
+    Object.entries(details).filter(([key, value]) => safeKeys.has(key) && isDisplayValue(value)),
+  );
+}
+
+function isDisplayValue(value: unknown): value is string | number | boolean | null {
+  return value === null || ['string', 'number', 'boolean'].includes(typeof value);
+}
+
 function formatDate(value: string | null | undefined) {
   return value ? new Date(value).toLocaleString() : 'Never';
 }
@@ -814,4 +867,20 @@ function humanize(value: string) {
     .toLowerCase()
     .replaceAll('_', ' ')
     .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+/**
+ * Resource types from synchronization are API/storage names. Keep their
+ * presentation aligned with the inventory rows above, which already use
+ * concise product labels such as "Rule" and "Object".
+ */
+export function resourceTypeLabel(value: string) {
+  const labels: Record<string, string> = {
+    access_rules: 'Rule',
+    firewall_objects: 'Object',
+    policies: 'Policy',
+    rule_categories: 'Rule category',
+    security_zones: 'Security zone',
+  };
+  return labels[value] ?? humanize(value);
 }

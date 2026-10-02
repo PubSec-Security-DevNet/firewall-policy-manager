@@ -77,3 +77,27 @@ def test_stale_queue_message_cannot_restart_a_disabled_connection(
 
     assert session.rolled_back is True
     assert repository.finished is False
+
+
+def test_deployment_failure_info_preserves_provider_payload_fields() -> None:
+    failure = tasks.deployment_failure_info(
+        [
+            {
+                "state": "FAILED",
+                "provider_status": "DEPLOY_FAILED",
+                "provider": {
+                    "errorMsg": "Device is not eligible for deployment",
+                    "failureReason": "VALIDATION_FAILED",
+                },
+            }
+        ]
+    )
+
+    assert failure == {
+        "code": "PROVIDER_DEPLOYMENT_FAILED",
+        "provider_statuses": ["DEPLOY_FAILED"],
+        "provider_messages": [
+            {"field": "errorMsg", "message": "Device is not eligible for deployment"},
+            {"field": "failureReason", "message": "VALIDATION_FAILED"},
+        ],
+    }

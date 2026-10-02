@@ -5,7 +5,19 @@ import reactRefresh from 'eslint-plugin-react-refresh';
 import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
-  { ignores: ['dist', 'coverage', 'src/api/schema.d.ts', 'eslint.config.js'] },
+  {
+    ignores: [
+      'dist',
+      'coverage',
+      'src/api/schema.d.ts',
+      'eslint.config.js',
+      'e2e/cdp-release-candidate.mjs',
+      'e2e/milestone9-cdp.mjs',
+      'e2e/milestone9-full-cdp.mjs',
+      'e2e/milestone9-functions-cdp.mjs',
+      'e2e/milestone9-fixture-cdp.mjs',
+    ],
+  },
   eslint.configs.recommended,
   ...tseslint.configs.recommendedTypeChecked,
   {

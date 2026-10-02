@@ -11,6 +11,13 @@
     "lint": "eslint . --max-warnings 0",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "e2e": "playwright test",
+    "e2e:cdp": "node e2e/cdp-release-candidate.mjs",
+    "e2e:cdp:m9": "node e2e/milestone9-cdp.mjs",
+    "e2e:cdp:m9:full": "node e2e/milestone9-full-cdp.mjs",
+    "e2e:cdp:m9:all": "node e2e/milestone9-coverage-cdp.mjs",
+    "e2e:cdp:m9:functions": "node e2e/milestone9-functions-cdp.mjs",
+    "e2e:cdp:m9:fixture": "node e2e/milestone9-fixture-cdp.mjs",
     "api:generate": "openapi-typescript ../openapi.json -o src/api/schema.d.ts"
   },
   "dependencies": {
@@ -22,6 +29,7 @@
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
+    "@playwright/test": "^1.55.1",
     "@testing-library/jest-dom": "6.8.0",
     "@testing-library/react": "16.3.0",
     "@testing-library/user-event": "14.6.1",

@@ -582,12 +582,13 @@ export async function addDraftObject(
   changeSetId: string,
   activeGroupId: string,
   object: Record<string, unknown>,
+  kind: 'CREATE_OBJECT' | 'MODIFY_OBJECT' | 'DELETE_OBJECT' = 'CREATE_OBJECT',
 ): Promise<ChangeSet> {
   return request<ChangeSet>(
     `/api/v1/changesets/${encodeURIComponent(changeSetId)}/operations/objects`,
     {
       method: 'POST',
-      body: JSON.stringify({ active_group_id: activeGroupId, object }),
+      body: JSON.stringify({ active_group_id: activeGroupId, kind, object }),
     },
   );
 }

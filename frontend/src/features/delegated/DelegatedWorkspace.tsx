@@ -142,7 +142,7 @@ export function DelegatedWorkspace({
         });
     };
     refresh();
-    const timer = window.setInterval(refresh, 3_000);
+    const timer = window.setInterval(refresh, 10_000);
     return () => {
       current = false;
       window.clearInterval(timer);
@@ -1025,9 +1025,13 @@ function RuleFeatureIcons({
   rule: DelegatedContext['rules'][number];
   context: DelegatedContext;
 }) {
-  const intrusion = context.intrusion_policies.find((item) => item.id === rule.intrusion_policy_id);
-  const variableSet = context.variable_sets.find((item) => item.id === rule.variable_set_id);
-  const filePolicy = context.file_policies.find((item) => item.id === rule.file_policy_id);
+  const intrusion = (context.intrusion_policies ?? []).find(
+    (item) => item.id === rule.intrusion_policy_id,
+  );
+  const variableSet = (context.variable_sets ?? []).find(
+    (item) => item.id === rule.variable_set_id,
+  );
+  const filePolicy = (context.file_policies ?? []).find((item) => item.id === rule.file_policy_id);
   const features = [
     {
       key: 'logging',
@@ -1083,9 +1087,9 @@ function ResourceStateNotice({
     ? 'Deployment pending: this resource has an unexecuted or in-progress ChangeSet.'
     : firewallState
       ? firewallStateLabel(firewallState)
-    : unverified
-      ? 'Firewall deployment has not been verified. Managed means synchronized to FMC/SCC only.'
-      : resourceStateLabel(currentState);
+      : unverified
+        ? 'Firewall deployment has not been verified. Managed means synchronized to FMC/SCC only.'
+        : resourceStateLabel(currentState);
   if (!pending && currentState === 'MANAGED' && !unverified && !firewallState) return null;
   return (
     <AppTooltip label={label} withArrow>
@@ -1206,15 +1210,15 @@ function CreateRuleDialog({
     .filter((object) => object.object_type === 'APPLICATION')
     .map(selectOption);
   const selectedFilterIds = new Set(applicationFilters.map((item) => item.value));
-  const intrusionPolicies = context.intrusion_policies.map((item) => ({
+  const intrusionPolicies = (context.intrusion_policies ?? []).map((item) => ({
     value: item.id,
     label: item.name,
   }));
-  const variableSets = context.variable_sets.map((item) => ({
+  const variableSets = (context.variable_sets ?? []).map((item) => ({
     value: item.id,
     label: item.is_default ? `${item.name} (default)` : item.name,
   }));
-  const filePolicies = context.file_policies.map((item) => ({
+  const filePolicies = (context.file_policies ?? []).map((item) => ({
     value: item.id,
     label: item.name,
   }));
@@ -1402,7 +1406,7 @@ function CreateRuleDialog({
                   const next = value ?? 'true';
                   setEnabled(next);
                   if (next === 'true' && intrusionPolicyId && !variableSetId) {
-                    const selected = context.intrusion_policies.find(
+                    const selected = (context.intrusion_policies ?? []).find(
                       (item) => item.id === intrusionPolicyId,
                     );
                     setVariableSetId(selected?.default_variable_set_id ?? null);
@@ -1442,7 +1446,9 @@ function CreateRuleDialog({
                 value={intrusionPolicyId}
                 onChange={(value) => {
                   setIntrusionPolicyId(value);
-                  const selected = context.intrusion_policies.find((item) => item.id === value);
+                  const selected = (context.intrusion_policies ?? []).find(
+                    (item) => item.id === value,
+                  );
                   if (value && enabled === 'true') {
                     setVariableSetId(selected?.default_variable_set_id ?? null);
                   } else if (!value) {
@@ -1462,8 +1468,9 @@ function CreateRuleDialog({
                   if (value) setVariableSetId(value);
                   else if (enabled === 'true' && intrusionPolicyId) {
                     setVariableSetId(
-                      context.intrusion_policies.find((item) => item.id === intrusionPolicyId)
-                        ?.default_variable_set_id ?? null,
+                      (context.intrusion_policies ?? []).find(
+                        (item) => item.id === intrusionPolicyId,
+                      )?.default_variable_set_id ?? null,
                     );
                   } else setVariableSetId(null);
                 }}
@@ -1731,7 +1738,7 @@ function EditRuleDialog({
     if (rule?.variable_set_id) return rule.variable_set_id;
     if (rule?.enabled !== false && rule?.intrusion_policy_id) {
       return (
-        context.intrusion_policies.find((item) => item.id === rule.intrusion_policy_id)
+        (context.intrusion_policies ?? []).find((item) => item.id === rule.intrusion_policy_id)
           ?.default_variable_set_id ?? null
       );
     }
@@ -1782,15 +1789,15 @@ function EditRuleDialog({
     .filter((object) => object.object_type === 'APPLICATION')
     .map(selectOption);
   const selectedFilterIds = new Set(applicationFilters.map((item) => item.value));
-  const intrusionPolicies = context.intrusion_policies.map((item) => ({
+  const intrusionPolicies = (context.intrusion_policies ?? []).map((item) => ({
     value: item.id,
     label: item.name,
   }));
-  const variableSets = context.variable_sets.map((item) => ({
+  const variableSets = (context.variable_sets ?? []).map((item) => ({
     value: item.id,
     label: item.is_default ? `${item.name} (default)` : item.name,
   }));
-  const filePolicies = context.file_policies.map((item) => ({
+  const filePolicies = (context.file_policies ?? []).map((item) => ({
     value: item.id,
     label: item.name,
   }));
@@ -1912,7 +1919,7 @@ function EditRuleDialog({
                   const next = value ?? 'true';
                   setEnabled(next);
                   if (next === 'true' && intrusionPolicyId && !variableSetId) {
-                    const selected = context.intrusion_policies.find(
+                    const selected = (context.intrusion_policies ?? []).find(
                       (item) => item.id === intrusionPolicyId,
                     );
                     setVariableSetId(selected?.default_variable_set_id ?? null);
@@ -1952,7 +1959,9 @@ function EditRuleDialog({
                 value={intrusionPolicyId}
                 onChange={(value) => {
                   setIntrusionPolicyId(value);
-                  const selected = context.intrusion_policies.find((item) => item.id === value);
+                  const selected = (context.intrusion_policies ?? []).find(
+                    (item) => item.id === value,
+                  );
                   if (value) setVariableSetId(selected?.default_variable_set_id ?? null);
                   else setVariableSetId(null);
                 }}
@@ -1969,8 +1978,9 @@ function EditRuleDialog({
                   if (value) setVariableSetId(value);
                   else if (enabled === 'true' && intrusionPolicyId) {
                     setVariableSetId(
-                      context.intrusion_policies.find((item) => item.id === intrusionPolicyId)
-                        ?.default_variable_set_id ?? null,
+                      (context.intrusion_policies ?? []).find(
+                        (item) => item.id === intrusionPolicyId,
+                      )?.default_variable_set_id ?? null,
                     );
                   } else setVariableSetId(null);
                 }}
@@ -2331,6 +2341,8 @@ function ObjectsWorkspace({
   const [page, setPage] = useState(1);
   const pageSize = useAdaptivePageSize();
   const [creating, setCreating] = useState(false);
+  const [editing, setEditing] = useState<DelegatedContext['objects'][number]>();
+  const [deleting, setDeleting] = useState<DelegatedContext['objects'][number]>();
   const recentCutoff = useRecentActivityCutoff();
   const trackedObjectOperations = activity
     .filter(
@@ -2392,6 +2404,24 @@ function ObjectsWorkspace({
         groupName={groupName}
         groupSlug={groupSlug}
         context={context}
+      />
+      <ModifyObjectDialog
+        key={`modify-${editing?.id ?? 'none'}`}
+        opened={Boolean(editing)}
+        onClose={() => setEditing(undefined)}
+        activeGroupId={activeGroupId}
+        groupName={groupName}
+        context={context}
+        object={editing}
+      />
+      <DeleteObjectDialog
+        key={`delete-${deleting?.id ?? 'none'}`}
+        opened={Boolean(deleting)}
+        onClose={() => setDeleting(undefined)}
+        activeGroupId={activeGroupId}
+        groupName={groupName}
+        context={context}
+        object={deleting}
       />
       <Group mb="md">
         <TextInput
@@ -2509,12 +2539,30 @@ function ObjectsWorkspace({
                   <Table.Td>
                     <Button
                       size="xs"
-                      variant="subtle"
                       disabled={!owned || !context.capabilities.includes('modify_object')}
                       onClick={onOpenChanges}
                     >
-                      Edit
+                      View changes
                     </Button>
+                    {owned && context.capabilities.includes('modify_object') && (
+                      <Button
+                        size="xs"
+                        onClick={() => setEditing(object)}
+                        aria-label={`Modify ${object.name}`}
+                      >
+                        Modify
+                      </Button>
+                    )}
+                    {owned && context.capabilities.includes('delete_object') && (
+                      <Button
+                        size="xs"
+                        color="red"
+                        onClick={() => setDeleting(object)}
+                        aria-label={`Delete ${object.name}`}
+                      >
+                        Delete
+                      </Button>
+                    )}
                   </Table.Td>
                 </Table.Tr>
               );
@@ -2551,6 +2599,7 @@ function CreateObjectDialog({
     .filter((item) => item.provider_supported)
     .map((item) => ({ value: item.object_type, label: humanize(item.object_type) }));
   const [objectType, setObjectType] = useState(options[0]?.value ?? '');
+  const effectiveObjectType = objectType || options[0]?.value || '';
   const [portProtocol, setPortProtocol] = useState('tcp');
   const [name, setName] = useState('');
   const [value, setValue] = useState('');
@@ -2579,21 +2628,21 @@ function CreateObjectDialog({
   const addObject = () => {
     const cleanName = name.trim();
     const enteredValue = value.trim();
-    const isGroup = objectType.endsWith('_GROUP');
+    const isGroup = effectiveObjectType.endsWith('_GROUP');
     if (
-      !objectType ||
+      !effectiveObjectType ||
       !cleanName ||
       (!isGroup && !enteredValue) ||
       (isGroup && !memberObjectIds.length)
     )
       return;
     const cleanValue =
-      objectType === 'PORT_SERVICE' ? `${portProtocol}/${enteredValue}` : enteredValue;
+      effectiveObjectType === 'PORT_SERVICE' ? `${portProtocol}/${enteredValue}` : enteredValue;
     if (objects.some((item) => item.name.toLocaleLowerCase() === cleanName.toLocaleLowerCase())) {
       setError('Each object in this ChangeSet must have a unique name.');
       return;
     }
-    const valueError = pendingObjectValueError(objectType, cleanValue);
+    const valueError = pendingObjectValueError(effectiveObjectType, cleanValue);
     if (valueError) {
       setError(valueError);
       return;
@@ -2603,7 +2652,7 @@ function CreateObjectDialog({
       ...current,
       {
         id: `${Date.now()}-${current.length}`,
-        object_type: objectType,
+        object_type: effectiveObjectType,
         name: cleanName,
         value: cleanValue,
         member_object_ids: memberObjectIds,
@@ -2699,9 +2748,10 @@ function CreateObjectDialog({
               disabled={busy}
             />
             <Select
+              key={options.map((option) => option.value).join('|')}
               label="Object type"
               data={options}
-              value={objectType || null}
+              value={effectiveObjectType || null}
               onChange={(next) => {
                 setObjectType(next ?? '');
                 setValue('');
@@ -2710,11 +2760,11 @@ function CreateObjectDialog({
               }}
               disabled={busy}
             />
-            {objectType.endsWith('_GROUP') && (
+            {effectiveObjectType.endsWith('_GROUP') && (
               <MultiSelect
                 label="Group members"
-                description="Only objects this group can use are listed. Network groups may mix IPv4 and IPv6; port groups accept one protocol only."
-                data={groupMemberOptions(context.objects, objectType, memberObjectIds)}
+                description="Only objects this group can use are listed. Network groups may mix IPv4 and IPv6; port groups must use one protocol."
+                data={groupMemberOptions(context.objects, effectiveObjectType)}
                 value={memberObjectIds}
                 onChange={setMemberObjectIds}
                 searchable
@@ -2733,7 +2783,7 @@ function CreateObjectDialog({
               onChange={(event) => setName(event.currentTarget.value)}
               disabled={busy}
             />
-            {objectType === 'PORT_SERVICE' && (
+            {effectiveObjectType === 'PORT_SERVICE' && (
               <Radio.Group
                 name="port-protocol"
                 label="Protocol"
@@ -2747,10 +2797,10 @@ function CreateObjectDialog({
                 </Group>
               </Radio.Group>
             )}
-            {!objectType.endsWith('_GROUP') && (
+            {!effectiveObjectType.endsWith('_GROUP') && (
               <TextInput
-                label={objectType === 'PORT_SERVICE' ? 'Port' : 'Value'}
-                description={objectValueHelp(objectType)}
+                label={effectiveObjectType === 'PORT_SERVICE' ? 'Port' : 'Value'}
+                description={objectValueHelp(effectiveObjectType)}
                 value={value}
                 onChange={(event) => setValue(event.currentTarget.value)}
                 disabled={busy}
@@ -2759,10 +2809,10 @@ function CreateObjectDialog({
             <Button
               variant="light"
               disabled={
-                !objectType ||
+                !effectiveObjectType ||
                 !name.trim() ||
                 busy ||
-                (objectType.endsWith('_GROUP') ? !memberObjectIds.length : !value.trim())
+                (effectiveObjectType.endsWith('_GROUP') ? !memberObjectIds.length : !value.trim())
               }
               onClick={addObject}
             >
@@ -2889,6 +2939,291 @@ function CreateObjectDialog({
   );
 }
 
+function ModifyObjectDialog({
+  opened,
+  onClose,
+  activeGroupId,
+  groupName,
+  context,
+  object,
+}: {
+  opened: boolean;
+  onClose: () => void;
+  activeGroupId: string;
+  groupName: string;
+  context: DelegatedContext;
+  object?: DelegatedContext['objects'][number];
+}) {
+  const [name, setName] = useState(object?.name ?? '');
+  const [value, setValue] = useState(object?.normalized_value ?? '');
+  const [changeSetName, setChangeSetName] = useState(() =>
+    object
+      ? `Update ${object.name} · ${new Date().toISOString().slice(0, 16).replace('T', ' ')} UTC`
+      : '',
+  );
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [prepared, setPrepared] = useState<ChangeSet>();
+  const [queued, setQueued] = useState<ChangeSet>();
+
+  const resetAndClose = () => {
+    if (busy) return;
+    setError('');
+    setPrepared(undefined);
+    setQueued(undefined);
+    onClose();
+  };
+  const prepare = async () => {
+    if (!object || !name.trim() || !value.trim()) return;
+    setBusy(true);
+    setError('');
+    try {
+      const draft = await createChangeSet(
+        activeGroupId,
+        context.policy.id,
+        changeSetName.trim(),
+        `Modify ${object.name} from the Objects workspace for ${groupName}.`,
+      );
+      const withObject = await addDraftObject(
+        draft.id,
+        activeGroupId,
+        {
+          object_id: object.id,
+          object_type: object.object_type,
+          name: name.trim(),
+          value: value.trim(),
+        },
+        'MODIFY_OBJECT',
+      );
+      const validated = await changeSetAction(withObject.id, activeGroupId, 'preflight');
+      setPrepared(validated);
+      if (validated.state !== 'READY') setError(objectPreflightError(validated, groupName));
+    } catch (reason) {
+      setError(dialogError(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const execute = async () => {
+    if (!prepared || prepared.state !== 'READY') return;
+    setBusy(true);
+    setError('');
+    try {
+      setQueued(await changeSetAction(prepared.id, activeGroupId, 'execute'));
+    } catch (reason) {
+      setError(dialogError(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Dialog
+      opened={opened}
+      onClose={resetAndClose}
+      title="Modify firewall object"
+      centered
+      size="lg"
+      closeOnClickOutside={!busy}
+      closeOnEscape={!busy}
+    >
+      <Stack gap="md">
+        {!prepared && !queued && (
+          <>
+            <Text size="sm" c="dimmed">
+              Modify an object owned by {groupName}. The update is reviewed and executed through a
+              ChangeSet.
+            </Text>
+            <TextInput
+              label="ChangeSet name"
+              value={changeSetName}
+              onChange={(event) => setChangeSetName(event.currentTarget.value)}
+              disabled={busy}
+            />
+            <TextInput
+              label="Object name"
+              value={name}
+              onChange={(event) => setName(event.currentTarget.value)}
+              disabled={busy}
+            />
+            <TextInput
+              label="Value"
+              description={object ? objectValueHelp(object.object_type) : undefined}
+              value={value}
+              onChange={(event) => setValue(event.currentTarget.value)}
+              disabled={busy}
+            />
+          </>
+        )}
+        {error && (
+          <Alert color="red" title="Object modification could not continue" role="alert">
+            {error}
+          </Alert>
+        )}
+        {prepared && !queued && (
+          <AppCard className="fm-subtle-panel">
+            <Text fw={700}>
+              {prepared.state === 'READY' ? 'Ready to modify' : 'Preflight result'}
+            </Text>
+            <Text size="sm" mt={5}>
+              {prepared.title} · {prepared.operations.length} object operation
+            </Text>
+            <AppStatusBadge value={prepared.state} />
+          </AppCard>
+        )}
+        {queued && (
+          <Alert color="blue" title="Object modification queued">
+            ChangeSet {queued.title} is queued against {context.provider_name}.
+          </Alert>
+        )}
+        <Group justify="flex-end">
+          <Button variant="subtle" onClick={resetAndClose} disabled={busy}>
+            {queued || prepared ? 'Close' : 'Cancel'}
+          </Button>
+          {!prepared && !queued && (
+            <Button
+              loading={busy}
+              disabled={!changeSetName.trim() || !name.trim() || !value.trim()}
+              onClick={() => void prepare()}
+            >
+              Review modification
+            </Button>
+          )}
+          {prepared && !queued && (
+            <Button
+              color="orange"
+              loading={busy}
+              disabled={prepared.state !== 'READY'}
+              onClick={() => void execute()}
+            >
+              Modify object on provider
+            </Button>
+          )}
+        </Group>
+      </Stack>
+    </Dialog>
+  );
+}
+
+function DeleteObjectDialog({
+  opened,
+  onClose,
+  activeGroupId,
+  groupName,
+  context,
+  object,
+}: {
+  opened: boolean;
+  onClose: () => void;
+  activeGroupId: string;
+  groupName: string;
+  context: DelegatedContext;
+  object?: DelegatedContext['objects'][number];
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [prepared, setPrepared] = useState<ChangeSet>();
+  const [queued, setQueued] = useState<ChangeSet>();
+  const title = object ? `Delete ${object.name}` : 'Delete firewall object';
+
+  const resetAndClose = () => {
+    if (busy) return;
+    setError('');
+    setPrepared(undefined);
+    setQueued(undefined);
+    onClose();
+  };
+  const prepare = async () => {
+    if (!object) return;
+    setBusy(true);
+    setError('');
+    try {
+      const draft = await createChangeSet(
+        activeGroupId,
+        context.policy.id,
+        title,
+        `Delete ${object.name} from the Objects workspace for ${groupName}.`,
+      );
+      const withObject = await addDraftObject(
+        draft.id,
+        activeGroupId,
+        { object_id: object.id, object_type: object.object_type },
+        'DELETE_OBJECT',
+      );
+      const validated = await changeSetAction(withObject.id, activeGroupId, 'preflight');
+      setPrepared(validated);
+      if (validated.state !== 'READY') setError(objectPreflightError(validated, groupName));
+    } catch (reason) {
+      setError(dialogError(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const execute = async () => {
+    if (!prepared || prepared.state !== 'READY') return;
+    setBusy(true);
+    setError('');
+    try {
+      setQueued(await changeSetAction(prepared.id, activeGroupId, 'execute'));
+    } catch (reason) {
+      setError(dialogError(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Dialog opened={opened} onClose={resetAndClose} title="Delete firewall object" centered>
+      <Stack gap="md">
+        {!prepared && !queued && (
+          <Alert color="red" title="Confirm deletion">
+            This queues deletion of <strong>{object?.name}</strong> from {context.provider_name}.
+            References must be removed before the provider can accept it.
+          </Alert>
+        )}
+        {error && (
+          <Alert color="red" title="Object deletion could not continue" role="alert">
+            {error}
+          </Alert>
+        )}
+        {prepared && !queued && (
+          <AppCard className="fm-subtle-panel">
+            <Text fw={700}>
+              {prepared.state === 'READY' ? 'Ready to delete' : 'Preflight result'}
+            </Text>
+            <AppStatusBadge value={prepared.state} />
+          </AppCard>
+        )}
+        {queued && (
+          <Alert color="blue" title="Object deletion queued">
+            ChangeSet {queued.title} is queued against {context.provider_name}.
+          </Alert>
+        )}
+        <Group justify="flex-end">
+          <Button variant="subtle" onClick={resetAndClose} disabled={busy}>
+            {queued || prepared ? 'Close' : 'Cancel'}
+          </Button>
+          {!prepared && !queued && (
+            <Button color="red" loading={busy} onClick={() => void prepare()}>
+              Queue deletion
+            </Button>
+          )}
+          {prepared && !queued && (
+            <Button
+              color="red"
+              loading={busy}
+              disabled={prepared.state !== 'READY'}
+              onClick={() => void execute()}
+            >
+              Delete object on provider
+            </Button>
+          )}
+        </Group>
+      </Stack>
+    </Dialog>
+  );
+}
+
 interface PendingObject {
   id: string;
   object_type: string;
@@ -2897,36 +3232,17 @@ interface PendingObject {
   member_object_ids?: string[];
 }
 
-function groupMemberOptions(
-  objects: DelegatedContext['objects'],
-  groupType: string,
-  selectedIds: string[],
-) {
+function groupMemberOptions(objects: DelegatedContext['objects'], groupType: string) {
   const memberType =
     groupType === 'NETWORK_GROUP'
       ? 'NETWORK'
       : groupType === 'PORT_SERVICE_GROUP'
         ? 'PORT_SERVICE'
         : 'URL';
-  const selectedProtocols = new Set(
-    (objects ?? [])
-      .filter((item) => selectedIds.includes(item.id) && item.object_type === 'PORT_SERVICE')
-      .map(
-        (item) =>
-          String(item.normalized_value ?? '')
-            .split('/', 1)[0]
-            ?.toLowerCase() ?? '',
-      ),
-  );
   return (objects ?? [])
     .filter((item) => {
       if (item.object_type !== memberType) return false;
-      if (memberType !== 'PORT_SERVICE' || selectedProtocols.size === 0) return true;
-      return selectedProtocols.has(
-        String(item.normalized_value ?? '')
-          .split('/', 1)[0]
-          ?.toLowerCase() ?? '',
-      );
+      return true;
     })
     .map((item) => ({ value: item.id, label: item.name }));
 }

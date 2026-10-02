@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import ipaddress
 import json
+import re
 import socket
 import ssl
 from collections.abc import Mapping
@@ -391,15 +392,38 @@ class CiscoReadOnlyProvider:
                     provider_device_ids.append(str(item["id"]))
         provider_device_ids = list(dict.fromkeys(provider_device_ids))
         if not provider_device_ids:
-            raise ProviderContractError(
-                details={
-                    "code": "NO_DEPLOYABLE_DEVICES",
-                    "provider_device_evidence": device_evidence[:20],
-                    "provider_messages": [
-                        {"message": "FMC reported no devices currently eligible for deployment."}
-                    ],
-                }
+            # Some FMC versions return an empty deployabledevices collection even while the
+            # requested device has provider-side changes.  The deployment request endpoint is
+            # authoritative in that case, so fall back only to explicitly requested devices
+            # confirmed by the same domain's inventory.
+            inventory = await self._get_with_params(
+                self._config_path(domain_id, "devices/devicerecords"),
+                {"offset": 0, "limit": 1000, "expanded": True},
             )
+            inventory_items = inventory.get("items", []) if isinstance(inventory, dict) else []
+            known_device_ids = {
+                str(item.get("id"))
+                for item in inventory_items
+                if isinstance(item, dict) and item.get("id")
+            }
+            provider_device_ids = [
+                device_id for device_id in dict.fromkeys(device_ids) if device_id in known_device_ids
+            ]
+            if not provider_device_ids:
+                raise ProviderContractError(
+                    details={
+                        "code": "NO_DEPLOYABLE_DEVICES",
+                        "provider_device_evidence": device_evidence[:20],
+                        "provider_messages": [
+                            {
+                                "message": (
+                                    "FMC reported no deployable devices and none of the requested "
+                                    "devices were present in the domain inventory."
+                                )
+                            }
+                        ],
+                    }
+                )
         # FMC starts a full deployment through deploymentrequests.  The
         # deployabledevices collection is read-only; posting to its /deploy
         # subresource with a policyList is rejected by real FMC instances.
@@ -439,6 +463,7 @@ class CiscoReadOnlyProvider:
         if not isinstance(response, dict):
             raise ProviderContractError
         status = str(response.get("status") or response.get("state") or "UNKNOWN").upper()
+        message = str(response.get("message") or "")
         normalized = {
             "COMPLETED": "DEPLOYED",
             "SUCCESS": "DEPLOYED",
@@ -447,6 +472,30 @@ class CiscoReadOnlyProvider:
             "FAILED": "FAILED",
             "ERROR": "FAILED",
         }.get(status, "DEPLOYING")
+        # FMC can leave the task summary at Deploying/PARTIALLY_SUCCEEDED after a
+        # single-device deployment has actually completed. Reconcile that summary
+        # against the device record before exposing a stale DEPLOYING state.
+        if normalized == "DEPLOYING" and "SUCCEEDED" in message.upper():
+            device_ids = re.findall(
+                r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+                message,
+            )
+            if device_ids:
+                inventory = await self._get_with_params(
+                    self._config_path(domain_id, "devices/devicerecords"),
+                    {"offset": 0, "limit": 1000, "expanded": True},
+                )
+                records = inventory.get("items", []) if isinstance(inventory, dict) else []
+                matching = [
+                    item
+                    for item in records
+                    if isinstance(item, dict) and str(item.get("id") or "") in device_ids
+                ]
+                if matching and all(
+                    str(item.get("deploymentStatus") or "").upper() == "DEPLOYED"
+                    for item in matching
+                ):
+                    normalized = "DEPLOYED"
         return {
             "state": normalized,
             "provider_status": status,

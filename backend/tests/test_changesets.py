@@ -822,6 +822,33 @@ async def test_queue_execution_persists_fixed_security_context_before_dispatch()
     assert executed["state"] == "SUCCEEDED"
 
 
+def test_approval_required_changeset_can_queue_only_after_approval() -> None:
+    repository, service, change_set = service_and_change(ProviderKind.FMC)
+    ready = service.add_operation(
+        principal(),
+        FINANCE,
+        UUID(str(change_set["id"])),
+        ChangeOperationKind.CREATE_RULE,
+        valid_rule(),
+    )
+    row = repository.change_sets[UUID(str(ready["id"]))]
+    row["approval_required"] = True
+    row["state"] = "APPROVED"
+    row["validated_revision"] = row["revision"]
+
+    dispatched: list[tuple[UUID, UUID, UUID, UUID]] = []
+
+    def dispatch(
+        change_set_id: UUID, principal_id: UUID, group_id: UUID, organization_id: UUID
+    ) -> None:
+        dispatched.append((change_set_id, principal_id, group_id, organization_id))
+
+    queued = service.queue_execution(principal(), FINANCE, UUID(str(ready["id"])), dispatch)
+
+    assert queued["state"] == "QUEUED"
+    assert dispatched == [(UUID(str(ready["id"])), USER, FINANCE, ORG)]
+
+
 def test_failed_change_set_without_provider_attempt_can_be_revalidated_and_requeued() -> None:
     repository, service, change_set = service_and_change(ProviderKind.FMC)
     ready = service.add_operation(

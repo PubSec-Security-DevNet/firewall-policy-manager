@@ -136,9 +136,8 @@ export function DeploymentsPage({
         />
       )}
       {items && items.length > 0 && (
-        <AppCard>
+          <AppCard>
           <AppDataTable label="Deployments">
-            <AppTable striped highlightOnHover>
             <AppTable.Thead>
               <AppTable.Tr>
                 <AppTable.Th>Batch</AppTable.Th>
@@ -197,7 +196,6 @@ export function DeploymentsPage({
                 </AppTable.Tr>
               ))}
             </AppTable.Tbody>
-            </AppTable>
           </AppDataTable>
         </AppCard>
       )}
@@ -451,8 +449,13 @@ function formatDate(value: string | null) {
 }
 
 function formatProviderMessage(value: unknown): string {
-  if (typeof value === 'object' && value !== null && 'message' in value) {
-    return String(value.message);
-  }
-  return String(value);
+  const message =
+    typeof value === 'object' && value !== null && 'message' in value
+      ? String(value.message)
+      : String(value);
+  // Provider identifiers are already shown in the structured device/task fields. Keep the
+  // primary failure copy readable instead of exposing an opaque UUID inline.
+  return message
+    .replace(/\s*\(([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\)/gi, '')
+    .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, 'provider device');
 }
