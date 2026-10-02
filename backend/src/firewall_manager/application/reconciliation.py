@@ -93,10 +93,18 @@ class ReconciliationService:
                 "position": int(str(desired.get("position", 0))),
             }
             for key in (
-                "category_id", "intrusion_policy_id", "variable_set_id", "file_policy_id",
-                "source_zone_ids", "destination_zone_ids", "source_object_ids",
-                "destination_object_ids", "source_port_object_ids", "destination_port_object_ids",
-                "application_object_ids", "url_object_ids",
+                "category_id",
+                "intrusion_policy_id",
+                "variable_set_id",
+                "file_policy_id",
+                "source_zone_ids",
+                "destination_zone_ids",
+                "source_object_ids",
+                "destination_object_ids",
+                "source_port_object_ids",
+                "destination_port_object_ids",
+                "application_object_ids",
+                "url_object_ids",
             ):
                 if key in desired:
                     payload[key] = desired[key]

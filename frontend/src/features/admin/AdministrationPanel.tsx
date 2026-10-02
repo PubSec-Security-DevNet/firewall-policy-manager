@@ -14,6 +14,8 @@ import {
 import {
   ApiError,
   createAdministrativeResource,
+  developmentIdentitiesChangedEvent,
+  startProxySession,
   loadAdministration,
   revokeAuthorizationResource,
   updateAdministrativeEnabled,
@@ -89,6 +91,9 @@ export function AdministrationPanel({ view }: { view: AdministrationView }) {
       if (!window.confirm(`${enabled ? 'Disable' : 'Enable'} this ${subject}?`)) return;
       void updateAdministrativeEnabled(resource, String(row.id), !enabled, Number(row.revision))
         .then(refresh)
+        .then(() => {
+          if (resource === 'users') window.dispatchEvent(new Event(developmentIdentitiesChangedEvent));
+        })
         .catch((error: unknown) => setState(toError(error)));
     },
     [refresh],
@@ -300,6 +305,18 @@ function UsersPage({
   }));
   const filtered = filterRows(userRows, query, ['display_name', 'email', 'role', 'group_names']);
   const usersWithGroups = new Set(snapshot.memberships.map((row) => String(row.user_id))).size;
+  const proxyAsUser = async (row: Row) => {
+    const reason = window.prompt(
+      `Enter a reason for proxying as ${String(row.display_name)}. This will be recorded in the audit log.`,
+    );
+    if (!reason?.trim()) return;
+    try {
+      await startProxySession(String(row.id), reason.trim());
+      window.location.reload();
+    } catch (error) {
+      window.alert(errorMessage(error));
+    }
+  };
   return (
     <Stack gap="lg">
       <SimpleGrid cols={{ base: 1, sm: 3 }}>
@@ -356,6 +373,14 @@ function UsersPage({
             tone="users"
             actions={(row) => (
               <Group gap="xs" wrap="nowrap">
+                <ActionButton
+                  intent="secondary"
+                  leftSection={<IconUserCheck size={14} />}
+                  onClick={() => { void proxyAsUser(row); }}
+                  disabled={row.role === 'admin' || !row.enabled}
+                >
+                  Proxy as user
+                </ActionButton>
                 <ActionButton
                   intent="secondary"
                   leftSection={<IconBuildingCommunity size={14} />}
@@ -737,6 +762,8 @@ function CreateIdentityForm({
   const isUser = resource === 'users';
   const [primary, setPrimary] = useState('');
   const [secondary, setSecondary] = useState('');
+  const [identityIssuer, setIdentityIssuer] = useState('urn:firewall-manager:development');
+  const [identitySubject, setIdentitySubject] = useState('');
   const [role, setRole] = useState<string | null>('viewer');
   const [approvalRequired, setApprovalRequired] = useState(false);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
@@ -748,8 +775,8 @@ function CreateIdentityForm({
       ? {
           display_name: primary.trim(),
           email: secondary.trim(),
-          identity_issuer: 'urn:firewall-manager:development',
-          identity_subject: secondary.trim(),
+          identity_issuer: identityIssuer.trim(),
+          identity_subject: (identitySubject.trim() || secondary.trim()),
           role: role ?? 'viewer',
         }
       : {
@@ -760,6 +787,7 @@ function CreateIdentityForm({
     try {
       await createAdministrativeResource(resource, payload);
       await onSaved();
+      if (isUser) window.dispatchEvent(new Event(developmentIdentitiesChangedEvent));
       setPrimary('');
       setSecondary('');
       onCompleted();
@@ -795,13 +823,33 @@ function CreateIdentityForm({
           label={isUser ? 'Email address' : 'Stable provider prefix'}
           description={
             isUser
-              ? 'Used as the development identity subject.'
+              ? 'User-facing attribute; it is not used as the OIDC security identity.'
               : 'Uppercase prefix used for provider-owned names; cannot be changed casually.'
           }
           placeholder={isUser ? 'jordan@example.com' : 'NETENG'}
           value={secondary}
           onChange={(event) => setSecondary(event.currentTarget.value)}
         />
+        {isUser && (
+          <>
+            <TextInput
+              required
+              label="External identity issuer"
+              placeholder="https://login.microsoftonline.com/<tenant>/v2.0"
+              value={identityIssuer}
+              onChange={(event) => setIdentityIssuer(event.currentTarget.value)}
+            />
+            <TextInput
+              label="External subject (sub)"
+              placeholder="Provider subject claim"
+              value={identitySubject}
+              onChange={(event) => setIdentitySubject(event.currentTarget.value)}
+            />
+            <Text size="xs" c="dimmed">
+              The issuer and subject are the stable OIDC identity mapping. Email is only a display attribute.
+            </Text>
+          </>
+        )}
         {isUser && (
           <Select
             label="Application role"

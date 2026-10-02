@@ -1,0 +1,40 @@
+groups:
+  - name: firewall-manager
+    rules:
+      - alert: FirewallManagerApiNotReady
+        expr: up{job="firewall-manager-api"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Firewall Manager API is not ready
+          description: The API has failed readiness checks for more than two minutes.
+      - alert: FirewallManagerApiErrors
+        expr: sum(rate(firewall_manager_http_requests_total{status=~"5.."}[5m])) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Firewall Manager API errors elevated
+      - alert: FirewallManagerRateLimited
+        expr: sum(rate(firewall_manager_http_requests_total{status="429"}[5m])) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Firewall Manager API rate limiting is active
+      - alert: FirewallManagerWorkerHeartbeatStale
+        expr: time() - firewall_manager_worker_last_heartbeat_timestamp_seconds > 120
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Firewall Manager worker heartbeat is stale
+      - alert: FirewallManagerReconciliationRequired
+        expr: firewall_manager_deployments_reconciliation_required > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Firewall Manager deployment requires reconciliation
+          description: Do not retry until provider state has been inspected.

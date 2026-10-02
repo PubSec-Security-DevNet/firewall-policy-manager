@@ -285,6 +285,14 @@ def test_unknown_identity_has_safe_error_envelope() -> None:
     }
 
 
+def test_cookie_authenticated_mutation_requires_csrf_token() -> None:
+    client = TestClient(app)
+    client.cookies.set("fm_session", "opaque-session")
+    missing = client.post("/api/v1/auth/logout")
+    assert missing.status_code == 403
+    assert missing.json()["error"]["code"] == "CSRF_VALIDATION_FAILED"
+
+
 def test_inventory_pagination_is_bounded_and_organization_scoped() -> None:
     repository = FakeRepository()
     repository.requested_organization_ids = []

@@ -16,6 +16,7 @@ import {
   AppCard,
   AppButton,
   AppDataTable,
+  AppDialog,
   AppEmptyState,
   AppErrorState,
   AppGroup as Group,
@@ -648,6 +649,7 @@ function AuditContent({ snapshot }: { snapshot: AdministrationSnapshot }) {
   );
   const [query, setQuery] = useState('');
   const [outcome, setOutcome] = useState<string | null>('ALL');
+  const [selectedEvent, setSelectedEvent] = useState<AuditEvent | null>(null);
   const rows = useMemo(
     () =>
       events.filter((event) => {
@@ -733,38 +735,51 @@ function AuditContent({ snapshot }: { snapshot: AdministrationSnapshot }) {
                   <AppStatusBadge value={event.decision} />
                 </Table.Td>
                 <Table.Td>
-                  <details>
-                    <summary>View details</summary>
-                    <Text size="xs" mt="xs">
-                      {humanize(event.reason_code)} · {humanize(event.interface)}
-                    </Text>
-                    {event.correlation_id && (
-                      <Text size="10px" c="dimmed" className="fm-code" mt={4}>
-                        Correlation: {event.correlation_id}
-                      </Text>
-                    )}
-                    {safeDetailSummary(event.details) && (
-                      <Text size="10px" c="dimmed" mt={4}>
-                        {safeDetailSummary(event.details)}
-                      </Text>
-                    )}
-                  </details>
+                  <AppButton size="compact-xs" variant="subtle" onClick={() => setSelectedEvent(event)}>
+                    View details
+                  </AppButton>
                 </Table.Td>
               </Table.Tr>
             ))}
           </Table.Tbody>
         </AppDataTable>
       )}
+      <AppDialog
+        opened={selectedEvent !== null}
+        onClose={() => setSelectedEvent(null)}
+        title={selectedEvent ? humanize(selectedEvent.action) : 'Audit event details'}
+        centered
+        size="lg"
+      >
+        {selectedEvent && (
+          <div className="fm-audit-details">
+            <Text size="sm"><strong>Actor:</strong> {selectedEvent.actor}</Text>
+            <Text size="sm"><strong>Action:</strong> {humanize(selectedEvent.action)}</Text>
+            <Text size="sm"><strong>Resource:</strong> {humanize(selectedEvent.resource_type)}</Text>
+            <Text size="sm"><strong>Outcome:</strong> {humanize(selectedEvent.decision)}</Text>
+            <Text size="sm"><strong>Reason code:</strong> {humanize(selectedEvent.reason_code)}</Text>
+            {typeof selectedEvent.details.reason === 'string' && (
+              <Text size="sm"><strong>Proxy reason:</strong> {selectedEvent.details.reason}</Text>
+            )}
+            {typeof selectedEvent.details.effective_user_email === 'string' && (
+              <Text size="sm"><strong>Proxied user:</strong> {selectedEvent.details.effective_user_email}</Text>
+            )}
+            <Text size="sm"><strong>Interface:</strong> {humanize(selectedEvent.interface)}</Text>
+            <Text size="sm"><strong>Date:</strong> {formatDate(selectedEvent.occurred_at)}</Text>
+            {selectedEvent.correlation_id && (
+              <Text size="sm" className="fm-code"><strong>Correlation:</strong> {selectedEvent.correlation_id}</Text>
+            )}
+            <div>
+              <Text size="sm" fw={700} mb={4}>Details</Text>
+              <pre className="fm-audit-details-json">
+                {JSON.stringify(selectedEvent.details, null, 2)}
+              </pre>
+            </div>
+          </div>
+        )}
+      </AppDialog>
     </AppCard>
   );
-}
-
-function safeDetailSummary(details: Record<string, unknown>) {
-  const allowed = ['authorization_revision', 'status', 'error_code', 'operation', 'provider'];
-  return allowed
-    .filter((key) => details[key] !== undefined)
-    .map((key) => `${humanize(key)}: ${String(details[key])}`)
-    .join(' · ');
 }
 
 function toError(error: unknown, fallback: string): ErrorState {

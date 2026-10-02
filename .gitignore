@@ -158,6 +158,8 @@ ca/local/
 # ============================================================
 generated/
 artifacts/
+backups/
+artifacts/
 sbom/
 reports/
 

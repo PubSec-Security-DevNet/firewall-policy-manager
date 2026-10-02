@@ -1696,7 +1696,7 @@ class SqlChangeSetRepository:
             self._session.add(
                 AuditEvent(
                     organization_id=principal.organization_id,
-                    actor_user_id=principal.user_id,
+                    actor_user_id=principal.audit_user_id,
                     action="manage_providers",
                     resource_type="provider_connection",
                     resource_id=connection.id,
@@ -1880,7 +1880,7 @@ class SqlChangeSetRepository:
         self._session.add(
             AuditEvent(
                 organization_id=principal.organization_id,
-                actor_user_id=principal.user_id,
+                actor_user_id=principal.audit_user_id,
                 active_group_id=group_id,
                 policy_id=policy_id,
                 action=action,

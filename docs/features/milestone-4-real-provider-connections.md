@@ -57,8 +57,9 @@ expose only credential type/presence, non-secret FMC username, and update time. 
 write-only and audit records contain only action metadata. Structured-log redaction covers common
 password, token, API-key, and authorization fields.
 
-The current encrypted-database adapter is replaceable by an external KMS/Vault implementation.
-Production requires `APP_SECRET_KEY` from a secret-management mechanism. Database contents and the
+The encrypted-database adapter supports deployment-injected `APP_SECRET_KEY` and an optional
+HashiCorp Vault KV v2 provider. Production requires the key from a secret-management mechanism.
+Database contents and the
 master key must be protected independently. In the current adapter the secret manager supplies the
 root key to every application process through deployment-time secret injection; it is not a
 vendor-specific runtime KMS client. Production startup rejects a missing or invalid key.

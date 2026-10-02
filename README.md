@@ -54,11 +54,19 @@ make sync               # run read-only synchronization for configured local man
 make test               # backend and frontend quality checks
 make architecture       # import-boundary contracts
 make security-check     # Python and npm dependency audits
+make db-backup FILE=... # create a PostgreSQL custom-format backup
+make db-restore-test FILE=... # validate a backup without changing live data
+make db-restore FILE=... CONFIRM=restore # explicitly confirmed in-place restore
+make operational-smoke                # restart worker/scheduler and verify health
+make sbom                              # generate a CycloneDX SBOM with Syft
 make smoke              # full local integration smoke test
 make docker-clean       # prune only stopped/dangling resources from this Compose project
 make down               # stop containers, retain data
 make reset CONFIRM=local  # remove this project's stack, volumes, and locally built images
 ```
+
+See [docs/SBOM.md](docs/SBOM.md) for the complete local Syft and
+Dependency-Track workflow.
 
 Build and smoke commands automatically remove stopped containers, unused networks, and dangling
 or obsolete tagged images labeled for the `firewall-manager-local` Compose project. Routine
@@ -88,7 +96,8 @@ Credentials are AES-256-GCM ciphertext in a dedicated secret table. Associated d
 ciphertext to its organization, connection purpose, secret UUID, and key version; connection rows
 hold only the reference and safe metadata. Passwords, tokens, CA material, access/refresh tokens,
 and authorization headers are excluded from API responses/audit and covered by logging-redaction
-tests. The abstraction is deliberately replaceable with a KMS/Vault-backed store.
+tests. The abstraction supports deployment-injected keys and an optional HashiCorp Vault KV v2
+provider; the database still stores only ciphertext.
 
 The UI includes capability-derived least-privilege setup guidance and links to Cisco's FMC 7.6/7.7
 REST guides and SCC Firewall Manager API 1.20.0 documentation. Labels that Cisco does not verify
@@ -108,8 +117,9 @@ application services. Application services depend on repository and normalized p
 concrete SQLAlchemy and FMC/SCC HTTP adapters remain outside the domain. Background jobs use the
 same package and an external Redis broker. PostgreSQL and Redis hold all durable/shared state.
 
-The API contract is available at <http://localhost:8000/docs> and health endpoints are under
-`/api/v1/health`. Safe local configuration is documented inline in [.env.example](.env.example).
+The API contract is available at <http://localhost:8000/docs> in development/test; interactive
+docs and the runtime OpenAPI document are disabled in staging/production. Health endpoints are
+under `/api/v1/health`. Safe local configuration is documented inline in [.env.example](.env.example).
 Delegated reads are `/api/v1/delegated/policies` and `/delegated/context`; both require an explicit
 active Group and the context endpoint also requires an Access Policy. Administration endpoints are
 under `/api/v1/admin`; provider connections are under `/api/v1/admin/provider-connections` and are
@@ -131,10 +141,21 @@ The delegated-management product contract, including mandatory active-Group cont
 [docs/product/DELEGATED_POLICY_MANAGEMENT.md](docs/product/DELEGATED_POLICY_MANAGEMENT.md). The
 current read APIs are organization-scoped development inventory, not completed delegated views.
 
+## Authentication
+
+Production authentication uses configurable Microsoft Entra ID, Cisco Duo Single Sign-On, or
+generic OIDC profiles through one server-side Authorization Code implementation. Administrators
+configure and rotate providers under Access & delegation → Identity providers; client secrets are
+encrypted in the existing SecretStore and never returned to the browser. See
+[`docs/AUTHENTICATION.md`](docs/AUTHENTICATION.md) for provider registration, redirect URI, claims,
+session, and secret-management requirements. Development identity switching remains available only
+when explicitly enabled in development/test.
+
 ## Current limitations
 
-- Authentication is development-only; stable issuer+subject mappings are stored, but production
-  OIDC is not implemented.
+- Production OIDC requires deployment-owned provider configuration and pre-provisioned
+  issuer+subject User mappings; automatic JIT user provisioning and IdP-group authorization are
+  intentionally not enabled.
 - The bootstrap `admin` role is development-oriented; delegated access itself is evaluated from
   current membership, policy delegation, resource grants, and the exact active Group.
 - Real FMC/SCC read adapters and connection management are implemented, but compatibility is not
@@ -145,6 +166,11 @@ current read APIs are organization-scoped development inventory, not completed d
 - Enabled real connections use one bounded scheduler batch and the existing worker queue. Advanced
   distributed claiming/locking and large-scale backpressure remain future work.
 - MCP and the private FMC connector are not implemented.
+- Non-browser integrations use short-lived, scoped bearer tokens created by Platform Admins;
+  tokens are hash-only at rest, inherit the target User's role and grants, and are revocable.
+- Production configuration requires HTTPS public URLs, secure cookies, security headers, and the
+  scheduled expired-session/token cleanup job. CI runs dependency audits, SAST, secret scanning,
+  and HIGH/CRITICAL container image scans.
 
 See [docs/PROJECT_STATE.md](docs/PROJECT_STATE.md) in development worktrees for the current
 implementation snapshot and governing project guidance.

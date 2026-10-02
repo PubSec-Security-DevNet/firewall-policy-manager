@@ -46,12 +46,14 @@ from firewall_manager.persistence.models import (
     AccessPolicy,
     AccessRule,
     AuditEvent,
+    AuthenticationEvent,
     ChangeSet,
     ChangeSetOperation,
     Deployment,
     Device,
     DirectUserPolicyGrant,
     DriftRecord,
+    ExternalIdentity,
     FilePolicy,
     FirewallManager,
     FirewallObject,
@@ -442,6 +444,30 @@ class SqlOverviewRepository:
             )
             current_status = connection.sync_status if connection is not None else None
             is_active_sync = current_status in {"QUEUED", "RUNNING"}
+            capabilities = dict(manager.capabilities)
+            # Keep the historical keys for API compatibility, while exposing the
+            # discovery/mutation split explicitly. Group CRUD is governed by the
+            # corresponding object-mutation capability.
+            capabilities.update(
+                {
+                    "network_group_discovery": capabilities.get("network_groups", "UNKNOWN"),
+                    "network_group_mutation": capabilities.get(
+                        "network_object_mutation", "UNKNOWN"
+                    ),
+                    "port_object_group_discovery": capabilities.get(
+                        "port_objects_groups", "UNKNOWN"
+                    ),
+                    "port_object_group_mutation": capabilities.get(
+                        "port_service_object_mutation", "UNKNOWN"
+                    ),
+                    "url_group_discovery": capabilities.get("url_groups", "UNKNOWN"),
+                    "url_group_mutation": capabilities.get("url_object_mutation", "UNKNOWN"),
+                    "rollback_changeset": "SUPPORTED",
+                    "provider_native_rollback": "UNSUPPORTED",
+                }
+            )
+            for legacy_name in ("network_groups", "port_objects_groups", "url_groups", "rollback"):
+                capabilities.pop(legacy_name, None)
             result.append(
                 {
                     "manager_id": manager.id,
@@ -449,7 +475,7 @@ class SqlOverviewRepository:
                     "provider": manager.provider,
                     "display_name": manager.display_name,
                     "provider_version": manager.provider_version,
-                    "capabilities": manager.capabilities,
+                    "capabilities": capabilities,
                     "evidence_profile": (
                         ProviderEvidenceProfile.MOCK.value
                         if manager.is_mock
@@ -1179,6 +1205,10 @@ class SqlAuthorizationRepository:
         # A denied request causes the delivery transaction to roll back. Persist decision evidence
         # independently so the rollback cannot erase the event it is meant to explain.
         with Session(bind=self._session.get_bind()) as audit_session, audit_session.begin():
+            actor_user_id = decision.principal_id
+            raw_actor_user_id = self._session.info.get("auth_actor_user_id")
+            if isinstance(raw_actor_user_id, str):
+                actor_user_id = UUID(raw_actor_user_id)
             active_group_id = (
                 audit_session.scalar(
                     select(Group.id).where(
@@ -1202,7 +1232,7 @@ class SqlAuthorizationRepository:
             audit_session.add(
                 AuditEvent(
                     organization_id=decision.organization_id,
-                    actor_user_id=decision.principal_id,
+                    actor_user_id=actor_user_id,
                     active_group_id=active_group_id,
                     policy_id=policy_id,
                     action=decision.action.value,
@@ -1212,7 +1242,10 @@ class SqlAuthorizationRepository:
                     reason_code=decision.reason.value,
                     interface=interface,
                     correlation_id=correlation_id,
-                    details={"authorization_revision": decision.authorization_revision},
+                    details={
+                        "authorization_revision": decision.authorization_revision,
+                        "effective_user_id": str(decision.principal_id),
+                    },
                 )
             )
 
@@ -1812,6 +1845,13 @@ class SqlAdministrationRepository:
             .order_by(AuditEvent.occurred_at.desc(), AuditEvent.id.desc())
             .limit(200)
         ).all()
+        authentication_events = self._session.execute(
+            select(AuthenticationEvent, User.display_name)
+            .outerjoin(User, User.id == AuthenticationEvent.user_id)
+            .where(AuthenticationEvent.organization_id == organization_id)
+            .order_by(AuthenticationEvent.occurred_at.desc(), AuthenticationEvent.id.desc())
+            .limit(200)
+        ).all()
         return {
             "users": [self._user_dict(row) for row in users],
             "groups": [self._group_dict(row) for row in groups],
@@ -1881,12 +1921,36 @@ class SqlAdministrationRepository:
                             "error_code",
                             "operation",
                             "provider",
+                            "effective_user_id",
+                            "effective_user_email",
+                            "reason",
                         )
                         if key in event.details
                     },
                     "occurred_at": event.occurred_at,
                 }
                 for event, actor_name, group_name, policy_name in audit_events
+            ]
+            + [
+                {
+                    "id": event.id,
+                    "actor": actor_name or "Unmapped identity",
+                    "acting_group": None,
+                    "policy": None,
+                    "action": event.event,
+                    "resource_type": "authentication",
+                    "decision": event.outcome,
+                    "reason_code": event.details.get("reason", "AUTHENTICATION"),
+                    "interface": "oidc",
+                    "correlation_id": event.correlation_id,
+                    "details": {
+                        key: event.details[key]
+                        for key in ("reason", "issuer")
+                        if key in event.details
+                    },
+                    "occurred_at": event.occurred_at,
+                }
+                for event, actor_name in authentication_events
             ],
         }
 
@@ -1903,6 +1967,19 @@ class SqlAdministrationRepository:
             is_active=True,
             revision=1,
         )
+        self._session.add(row)
+        self._session.flush()
+        self._session.add(
+            ExternalIdentity(
+                organization_id=organization_id,
+                user_id=row.id,
+                provider_id="manual",
+                issuer=row.identity_issuer,
+                subject=row.identity_subject,
+                email_claim=row.email,
+                display_name_claim=row.display_name,
+            )
+        )
         self._save(row)
         self._audit_change(organization_id, actor_user_id, row.id, "user")
         return self._user_dict(row)
@@ -1918,6 +1995,7 @@ class SqlAdministrationRepository:
             approval_required=bool(values.get("approval_required", False)),
             revision=1,
         )
+        self._session.add(row)
         self._save(row)
         self._audit_change(organization_id, actor_user_id, row.id, "group")
         return self._group_dict(row)
@@ -2381,8 +2459,7 @@ class SqlSyncRepository:
                 isinstance(row, AccessRule)
                 and row.owner_group_id is not None
                 and all(
-                    key not in desired_snapshot
-                    or str(desired_snapshot[key]) == str(value)
+                    key not in desired_snapshot or str(desired_snapshot[key]) == str(value)
                     for key, value in observed_managed_fields.items()
                 )
             )

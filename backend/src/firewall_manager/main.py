@@ -1,6 +1,7 @@
 """FastAPI process composition root."""
 
 import logging
+import time
 from uuid import UUID, uuid4
 
 from fastapi import FastAPI, Request
@@ -17,13 +18,18 @@ from firewall_manager.api.dependencies import (
     get_provider_factory,
     get_provider_sync_dispatcher,
 )
-from firewall_manager.api.routes import dev_router, get_provider_readers, router
+from firewall_manager.api.routes import auth_router, dev_router, get_provider_readers, router
 from firewall_manager.api.schemas import ErrorEnvelope
 from firewall_manager.application.errors import ApplicationError
 from firewall_manager.config import get_settings
+from firewall_manager.observability import request as record_request
 from firewall_manager.providers.factory import build_real_provider
 from firewall_manager.providers.fmc import FmcProviderReader
 from firewall_manager.providers.scc import SccProviderReader
+from firewall_manager.security.csrf import CSRF_COOKIE_NAME
+from firewall_manager.security.csrf import token as csrf_token
+from firewall_manager.security.csrf import valid as csrf_valid
+from firewall_manager.security.oidc import COOKIE_NAME
 from firewall_manager.security.redaction import SecretRedactionFilter
 from firewall_manager.worker.tasks import execute_change_set, synchronize_provider_connection
 
@@ -50,22 +56,26 @@ def configure_logging() -> None:
     logging.basicConfig(level=get_settings().app_log_level, handlers=[handler], force=True)
 
 
-def create_app() -> FastAPI:
+def create_app() -> FastAPI:  # noqa: PLR0915 -- composition root owns all process wiring
     """Build the API with explicit infrastructure adapters."""
     settings = get_settings()
     configure_logging()
     error_response = {"model": ErrorEnvelope, "description": "Safe application error envelope"}
+    docs_enabled = settings.app_environment in {"development", "test"}
     application = FastAPI(
         title="Firewall Manager API",
         version="0.1.0",
         responses=dict.fromkeys((401, 403, 404, 409, 422, 500, 502, 503), error_response),
+        docs_url="/docs" if docs_enabled else None,
+        redoc_url="/redoc" if docs_enabled else None,
+        openapi_url="/openapi.json" if docs_enabled else None,
     )
     application.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
         allow_credentials=True,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["Content-Type", "X-Correlation-ID", "X-Dev-User"],
+        allow_headers=["Content-Type", "X-Correlation-ID", "X-Dev-User", "X-CSRF-Token"],
     )
     providers = tuple(
         reader
@@ -81,6 +91,8 @@ def create_app() -> FastAPI:
     application.dependency_overrides[get_change_set_execution_dispatcher] = lambda: (
         dispatch_change_set_execution
     )
+    rate_window_started: dict[str, float] = {}
+    rate_counts: dict[str, int] = {}
 
     @application.middleware("http")
     async def correlation_id(request: Request, call_next: RequestResponseEndpoint) -> Response:
@@ -90,10 +102,89 @@ def create_app() -> FastAPI:
         response.headers["X-Correlation-ID"] = correlation
         return response
 
+    @application.middleware("http")
+    async def security_boundary(request: Request, call_next: RequestResponseEndpoint) -> Response:
+        """Apply a bounded per-process API limit and browser security headers."""
+        now = time.monotonic()
+        client = request.client.host if request.client else "unknown"
+        if request.url.path.startswith("/api/") and not request.url.path.endswith("/health/live"):
+            started = rate_window_started.get(client, now)
+            if now - started >= settings.api_rate_limit_window_seconds:
+                rate_window_started[client] = now
+                rate_counts[client] = 0
+            rate_counts[client] = rate_counts.get(client, 0) + 1
+            if rate_counts[client] > settings.api_rate_limit_requests:
+                response = JSONResponse(
+                    status_code=429,
+                    content={
+                        "error": {
+                            "code": "RATE_LIMITED",
+                            "message": "Too many requests.",
+                            "details": {},
+                            "correlation_id": getattr(
+                                request.state, "correlation_id", str(uuid4())
+                            ),
+                        }
+                    },
+                    headers={"Retry-After": str(settings.api_rate_limit_window_seconds)},
+                )
+                record_request(request.method, request.url.path, response.status_code)
+                return response
+        response = await call_next(request)
+        record_request(request.method, request.url.path, response.status_code)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        if settings.app_environment in {"staging", "production"}:
+            response.headers["Content-Security-Policy"] = (
+                "default-src 'self'; frame-ancestors 'none'"
+            )
+            response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        return response
+
+    @application.middleware("http")
+    async def csrf_protection(request: Request, call_next: RequestResponseEndpoint) -> Response:
+        state_change = request.method in {"POST", "PUT", "PATCH", "DELETE"}
+        callback = request.url.path.startswith("/api/v1/auth/") and request.url.path.endswith(
+            "/callback"
+        )
+        if (
+            state_change
+            and request.cookies.get(COOKIE_NAME)
+            and not callback
+            and not csrf_valid(request)
+        ):
+            correlation = getattr(request.state, "correlation_id", str(uuid4()))
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "error": {
+                        "code": "CSRF_VALIDATION_FAILED",
+                        "message": "The security token is missing or invalid.",
+                        "details": {},
+                        "correlation_id": correlation,
+                    }
+                },
+                headers={"X-Correlation-ID": correlation},
+            )
+        response = await call_next(request)
+        if not request.cookies.get(CSRF_COOKIE_NAME):
+            response.set_cookie(
+                CSRF_COOKIE_NAME,
+                csrf_token(),
+                httponly=False,
+                secure=settings.app_environment in {"staging", "production"},
+                samesite="lax",
+                max_age=settings.auth_session_absolute_hours * 3600,
+                path="/",
+            )
+        return response
+
     @application.exception_handler(ApplicationError)
     async def application_error(request: Request, exc: ApplicationError) -> JSONResponse:
         correlation = getattr(request.state, "correlation_id", str(uuid4()))
-        return JSONResponse(
+        response = JSONResponse(
             status_code=exc.status_code,
             content={
                 "error": {
@@ -105,6 +196,9 @@ def create_app() -> FastAPI:
             },
             headers={"X-Correlation-ID": correlation},
         )
+        if exc.code == "NOT_AUTHENTICATED":
+            response.delete_cookie(COOKIE_NAME, path="/")
+        return response
 
     @application.exception_handler(RequestValidationError)
     async def validation_error(request: Request, _exc: RequestValidationError) -> JSONResponse:
@@ -160,6 +254,9 @@ def create_app() -> FastAPI:
         )
 
     application.include_router(router)
+    # OIDC login/callback routes remain available in development for an admin-configured
+    # integration test; development auth still remains the principal source for normal API calls.
+    application.include_router(auth_router)
     if settings.dev_auth_enabled:
         application.include_router(dev_router)
     return application

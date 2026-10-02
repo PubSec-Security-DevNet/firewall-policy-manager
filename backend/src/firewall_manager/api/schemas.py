@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Literal, TypeVar
 from uuid import UUID
 
-from pydantic import BaseModel, Field, SecretStr, model_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
 
 
 class ErrorBody(BaseModel):
@@ -23,13 +23,20 @@ class HealthResponse(BaseModel):
 
 
 class SessionResponse(BaseModel):
-    authentication_mode: Literal["development"]
+    authentication_mode: Literal["development", "oidc"]
     user_id: UUID
     email: str
     role: str
     groups: list["ActiveGroupResponse"]
     default_group_id: UUID | None = None
     default_policy_id: UUID | None = None
+    proxied: bool = False
+    proxy_actor_email: str | None = None
+    proxy_actor_role: str | None = None
+
+
+class ProxyStartRequest(BaseModel):
+    reason: str = Field(min_length=3, max_length=500)
 
 
 class DefaultContextRequest(BaseModel):
@@ -275,6 +282,58 @@ class UserCreateRequest(BaseModel):
     role: str = "viewer"
 
 
+class ExternalIdentityCreateRequest(BaseModel):
+    provider_id: str = Field(min_length=1, max_length=80)
+    issuer: str = Field(min_length=1, max_length=500)
+    subject: str = Field(min_length=1, max_length=500)
+    email_claim: str | None = Field(default=None, max_length=320)
+    display_name_claim: str | None = Field(default=None, max_length=200)
+
+
+class ExternalIdentityResponse(BaseModel):
+    model_config = {"from_attributes": True}
+
+    id: UUID
+    user_id: UUID
+    provider_id: str
+    issuer: str
+    subject: str
+    email_claim: str | None
+    display_name_claim: str | None
+    created_at: datetime
+
+
+class ApiTokenCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    scopes: list[Literal["read", "write", "admin"]] = Field(min_length=1)
+    expires_at: datetime | None = None
+
+    @field_validator("expires_at")
+    @classmethod
+    def require_timezone(cls, value: datetime | None) -> datetime | None:
+        if value is not None and value.tzinfo is None:
+            raise ValueError("expires_at must include a timezone")
+        return value
+
+
+class ApiTokenResponse(BaseModel):
+    model_config = {"from_attributes": True}
+
+    id: UUID
+    user_id: UUID
+    name: str
+    token_prefix: str
+    scopes: list[str]
+    expires_at: datetime | None
+    revoked_at: datetime | None
+    last_used_at: datetime | None
+    created_at: datetime
+
+
+class ApiTokenCreatedResponse(ApiTokenResponse):
+    token: str
+
+
 class GroupCreateRequest(BaseModel):
     name: str
     provider_slug: str
@@ -294,6 +353,66 @@ class GroupApprovalUpdateRequest(BaseModel):
 class UserRoleUpdateRequest(BaseModel):
     role: Literal["viewer", "editor", "approver", "group_admin", "firewall_admin", "admin"]
     expected_revision: int
+
+
+class OidcProviderCreateRequest(BaseModel):
+    id: str = Field(min_length=1, max_length=80, pattern=r"^[a-z0-9-]+$")
+    kind: Literal["entra", "duo", "generic"]
+    display_name: str = Field(min_length=1, max_length=120)
+    issuer_url: str
+    client_id: str = Field(min_length=1, max_length=300)
+    client_secret: SecretStr
+    scopes: list[str] = Field(default_factory=lambda: ["openid", "profile", "email"])
+    username_claim: str = "preferred_username"
+    display_name_claim: str = "name"
+    email_claim: str = "email"
+    mapping_claim: str = "email"
+    enabled: bool = True
+    logout: bool = True
+
+
+class OidcProviderUpdateRequest(BaseModel):
+    expected_revision: int = Field(ge=1)
+    display_name: str | None = None
+    issuer_url: str | None = None
+    client_id: str | None = None
+    scopes: list[str] | None = None
+    username_claim: str | None = None
+    display_name_claim: str | None = None
+    email_claim: str | None = None
+    mapping_claim: str | None = None
+    enabled: bool | None = None
+    logout: bool | None = None
+
+
+class OidcProviderSecretRequest(BaseModel):
+    expected_revision: int = Field(ge=1)
+    client_secret: SecretStr
+
+
+class OidcProviderResponse(BaseModel):
+    id: UUID
+    provider_id: str
+    kind: Literal["entra", "duo", "generic"]
+    display_name: str
+    issuer_url: str
+    client_id: str
+    scopes: list[str]
+    enabled: bool
+    logout: bool
+    username_claim: str
+    display_name_claim: str
+    email_claim: str
+    mapping_claim: str
+    secret_configured: bool
+    revision: int
+    updated_at: datetime
+
+
+class OidcLoginProviderResponse(BaseModel):
+    provider_id: str
+    kind: Literal["entra", "duo", "generic"]
+    display_name: str
 
 
 class AuthorizationResourceUpsertRequest(BaseModel):
@@ -382,6 +501,11 @@ class ProviderConnectionResponse(BaseModel):
     applications_last_successful_sync: datetime | None
     applications_next_sync_at: datetime | None
     deployment_schedule_enabled: bool = True
+    deployment_paused: bool = False
+    deployment_pause_reason: str | None = None
+    deployment_paused_at: datetime | None = None
+    deployment_pause_until: datetime | None = None
+    deployment_paused_by_user_id: UUID | None = None
     deployment_status: str | None = None
     deployment_next_at: datetime | None = None
     deployment_last_started_at: datetime | None = None
@@ -615,6 +739,8 @@ class ChangeSetOperationResponse(BaseModel):
     rollback_snapshot: dict[str, object]
     execution_result: dict[str, object]
     failure_info: dict[str, object]
+    lease_until: datetime | None = None
+    heartbeat_at: datetime | None = None
     revision: int
     created_at: datetime
     updated_at: datetime
@@ -686,6 +812,18 @@ class DeploymentPlanRequest(BaseModel):
 
 class DeploymentActionRequest(BaseModel):
     deployment_id: UUID
+
+
+class DeploymentPauseRequest(BaseModel):
+    reason: str = Field(min_length=1, max_length=500)
+    until: datetime | None = None
+
+    @field_validator("until")
+    @classmethod
+    def require_timezone(cls, value: datetime | None) -> datetime | None:
+        if value is not None and value.tzinfo is None:
+            raise ValueError("until must include a timezone")
+        return value
 
 
 class DeploymentRollbackRequest(BaseModel):

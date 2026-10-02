@@ -4,6 +4,7 @@ import {
   getDevelopmentUser,
   loadDevelopmentIdentities,
   switchDevelopmentUser,
+  developmentIdentitiesChangedEvent,
   type DevelopmentIdentity,
 } from '../../api/client';
 import { AppSelect as Select } from '../../ui';
@@ -13,15 +14,21 @@ export function DevelopmentUserSelector({ compact = false }: { compact?: boolean
 
   useEffect(() => {
     let active = true;
-    void loadDevelopmentIdentities()
+    const refresh = () => loadDevelopmentIdentities()
       .then((values) => {
         if (active) setIdentities(values);
       })
       .catch(() => {
         // The endpoint is intentionally absent outside explicit development auth mode.
       });
+    void refresh();
+    const onIdentitiesChanged = () => {
+      void refresh();
+    };
+    window.addEventListener(developmentIdentitiesChangedEvent, onIdentitiesChanged);
     return () => {
       active = false;
+      window.removeEventListener(developmentIdentitiesChangedEvent, onIdentitiesChanged);
     };
   }, []);
 

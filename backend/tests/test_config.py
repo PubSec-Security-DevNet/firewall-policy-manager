@@ -29,8 +29,11 @@ def _production_values() -> dict[str, object]:
         "redis_url": "redis://example",
         "fmc_base_url": "https://fmc.example.test",
         "scc_base_url": "https://scc.example.test",
+        "app_public_url": "https://firewall.example.test",
+        "cors_origins": ["https://console.example.test"],
         "dev_auth_enabled": False,
         "APP_SECRET_KEY": base64.b64encode(os.urandom(32)).decode(),
+        "oidc_providers": '[{"id":"entra-main","kind":"entra","display_name":"Entra","issuer_url":"https://login.microsoftonline.com/example/v2.0","client_id":"client","client_secret":"secret"}]',
     }
 
 
@@ -59,6 +62,8 @@ def test_development_identity_endpoint_is_not_registered_when_disabled(
         for route in application.routes
         if isinstance(path := getattr(route, "path", None), str)
     }
+    assert "/docs" not in {getattr(route, "path", None) for route in application.routes}
+    assert "/openapi.json" not in {getattr(route, "path", None) for route in application.routes}
 
 
 def test_provider_capability_document_separates_mock_and_real_evidence() -> None:
@@ -74,7 +79,7 @@ def test_provider_capability_document_separates_mock_and_real_evidence() -> None
         assert mock["application_object_create"] is CapabilityStatus.PARTIAL
         assert real["access_rule_read"] is CapabilityStatus.NOT_STARTED
         assert real["access_rule_create"] is CapabilityStatus.SUPPORTED
-        assert real["pending_change_inspection"] is CapabilityStatus.PARTIAL
+        assert real["pending_change_inspection"] is CapabilityStatus.SUPPORTED
         assert real["application_object_create"] is CapabilityStatus.NOT_STARTED
         assert CapabilityStatus.SUPPORTED in real.values()
 

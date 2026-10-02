@@ -83,7 +83,7 @@ async def reconcile_transaction(external_operation_id: str) -> dict[str, object]
 
 
 @app.get("/api/v1/resources/{resource}")
-async def resources(
+async def resources(  # noqa: PLR0913, PLR0917 -- provider fixture query dimensions
     resource: Literal[
         "domains",
         "devices",

@@ -2,10 +2,11 @@
 
 from typing import Annotated
 
-from fastapi import Depends, Header
+from fastapi import Cookie, Depends, Header, Request, Security
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
-from firewall_manager.application.errors import NotAuthenticatedError
+from firewall_manager.application.errors import NotAuthenticatedError, ResourceOutOfScopeError
 from firewall_manager.application.health import HealthService
 from firewall_manager.application.ports import (
     AdministrationRepository,
@@ -32,8 +33,15 @@ from firewall_manager.persistence.repositories import (
     SqlOverviewRepository,
 )
 from firewall_manager.persistence.secrets import EncryptedDatabaseSecretStore
+from firewall_manager.security.api_tokens import authenticate
+from firewall_manager.security.oidc import OidcService
+from firewall_manager.security.secret_provider import master_key
 
 SessionDependency = Annotated[Session, Depends(get_session)]
+BearerDependency = Annotated[
+    HTTPAuthorizationCredentials | None,
+    Security(HTTPBearer(auto_error=False)),
+]
 
 
 def get_overview_repository(session: SessionDependency) -> OverviewRepository:
@@ -78,11 +86,7 @@ def get_secret_store(
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> SecretStore:
     """Provide authenticated encryption backed by an external process secret."""
-    encoded_key = (
-        settings.secret_store_master_key.get_secret_value()
-        if settings.secret_store_master_key is not None
-        else None
-    )
+    encoded_key = master_key(settings)
     return EncryptedDatabaseSecretStore(session, encoded_key, settings.secret_store_key_version)
 
 
@@ -142,19 +146,67 @@ def get_health_service(
 HealthServiceDependency = Annotated[HealthService, Depends(get_health_service)]
 
 
-def get_principal(
+def get_principal(  # noqa: PLR0913, PLR0917 -- FastAPI dependency inputs
+    request: Request,
     repository: RepositoryDependency,
+    session: SessionDependency,
     settings: Annotated[Settings, Depends(get_settings)],
     dev_user: Annotated[str | None, Header(alias="X-Dev-User")] = None,
+    session_cookie: Annotated[str | None, Cookie(alias="fm_session")] = None,
+    bearer: BearerDependency = None,
 ) -> Principal:
-    """Resolve a local identity only when the isolated development adapter is enabled."""
-    if not settings.dev_auth_enabled:
+    """Resolve a database identity through production OIDC or isolated development auth."""
+    if bearer is not None:
+        raw = bearer.credentials.strip()
+        authenticated_token = authenticate(session, raw) if raw else None
+        if authenticated_token is None:
+            raise NotAuthenticatedError
+        token, user = authenticated_token
+        required_scope = (
+            "admin"
+            if request.url.path.startswith("/api/v1/admin/")
+            else ("write" if request.method in {"POST", "PUT", "PATCH", "DELETE"} else "read")
+        )
+        token_scopes = set(token.scopes)
+        if required_scope not in token_scopes and "admin" not in token_scopes:
+            raise ResourceOutOfScopeError
+        session.info["api_token_id"] = str(token.id)
+        session.info["api_token_scopes"] = token.scopes
+        session.info["auth_actor_user_id"] = str(user.id)
+        session.info["auth_effective_user_id"] = str(user.id)
+        return Principal(
+            user_id=user.id,
+            organization_id=user.organization_id,
+            email=user.email,
+            role=user.role,
+            issuer=user.identity_issuer,
+            subject=user.identity_subject,
+        )
+    if settings.dev_auth_enabled:
+        email = dev_user or settings.dev_auth_default_user
+        principal = repository.principal_by_email(email)
+        if principal is None:
+            raise NotAuthenticatedError
+        session.info["auth_actor_user_id"] = str(principal.user_id)
+        session.info["auth_effective_user_id"] = str(principal.user_id)
+        return principal
+    authenticated = OidcService(session, settings).principal(session_cookie)
+    if authenticated is None:
         raise NotAuthenticatedError
-    email = dev_user or settings.dev_auth_default_user
-    principal = repository.principal_by_email(email)
-    if principal is None:
-        raise NotAuthenticatedError
-    return principal
+    user, _auth_session = authenticated
+    auth_session = authenticated[1]
+    actor_user_id = auth_session.actor_user_id
+    session.info["auth_actor_user_id"] = str(actor_user_id or user.id)
+    session.info["auth_effective_user_id"] = str(user.id)
+    return Principal(
+        user_id=user.id,
+        organization_id=user.organization_id,
+        email=user.email,
+        role=user.role,
+        issuer=user.identity_issuer,
+        subject=user.identity_subject,
+        actor_user_id=actor_user_id,
+    )
 
 
 PrincipalDependency = Annotated[Principal, Depends(get_principal)]

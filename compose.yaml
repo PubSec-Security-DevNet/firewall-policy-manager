@@ -12,8 +12,20 @@ x-backend-environment: &backend-environment
   DEV_AUTH_DEFAULT_USER: ${DEV_AUTH_DEFAULT_USER:-viewer@example.test}
   APP_SECRET_KEY: ${APP_SECRET_KEY:-}
   SECRET_STORE_KEY_VERSION: ${SECRET_STORE_KEY_VERSION:-1}
+  SECRET_STORE_PROVIDER: ${SECRET_STORE_PROVIDER:-environment}
+  VAULT_URL: ${VAULT_URL:-}
+  VAULT_TOKEN: ${VAULT_TOKEN:-}
+  VAULT_SECRET_PATH: ${VAULT_SECRET_PATH:-secret/data/firewall-manager}
   SCHEDULER_INTERVAL_SECONDS: ${SCHEDULER_INTERVAL_SECONDS:-15}
   APP_PUBLIC_URL: ${APP_PUBLIC_URL:-http://localhost:5173}
+  OIDC_PROVIDERS: ${OIDC_PROVIDERS:-[]}
+  AUTH_SESSION_IDLE_MINUTES: ${AUTH_SESSION_IDLE_MINUTES:-60}
+  AUTH_SESSION_ABSOLUTE_HOURS: ${AUTH_SESSION_ABSOLUTE_HOURS:-12}
+  BOOTSTRAP_ORGANIZATION_NAME: ${BOOTSTRAP_ORGANIZATION_NAME:-}
+  BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-}
+  BOOTSTRAP_ADMIN_DISPLAY_NAME: ${BOOTSTRAP_ADMIN_DISPLAY_NAME:-}
+  BOOTSTRAP_ADMIN_ISSUER: ${BOOTSTRAP_ADMIN_ISSUER:-}
+  BOOTSTRAP_ADMIN_SUBJECT: ${BOOTSTRAP_ADMIN_SUBJECT:-}
   SMTP_HOST: ${SMTP_HOST:-}
   SMTP_PORT: ${SMTP_PORT:-587}
   SMTP_USERNAME: ${SMTP_USERNAME:-}
@@ -22,6 +34,8 @@ x-backend-environment: &backend-environment
   SMTP_USE_STARTTLS: ${SMTP_USE_STARTTLS:-true}
   SMTP_USE_SSL: ${SMTP_USE_SSL:-false}
   SMTP_TIMEOUT_SECONDS: ${SMTP_TIMEOUT_SECONDS:-15}
+  API_RATE_LIMIT_REQUESTS: ${API_RATE_LIMIT_REQUESTS:-120}
+  API_RATE_LIMIT_WINDOW_SECONDS: ${API_RATE_LIMIT_WINDOW_SECONDS:-60}
 
 x-backend-service: &backend-service
   build:
@@ -30,6 +44,12 @@ x-backend-service: &backend-service
   restart: unless-stopped
   networks: [control-plane]
   init: true
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=64m
   volumes:
     - ./config:/app/config:ro
 
@@ -198,6 +218,12 @@ services:
       retries: 20
     networks: [control-plane]
     init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
     restart: unless-stopped
 
 networks:

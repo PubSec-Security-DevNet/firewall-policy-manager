@@ -126,7 +126,7 @@ class InventoryService:
     def accept_provider_state(self, principal: Principal, drift_id: UUID) -> dict[str, object]:
         require_action(principal, Action.MANAGE_PROVIDERS)
         result = self._repository.accept_provider_state(
-            principal.organization_id, drift_id, principal.user_id
+            principal.organization_id, drift_id, principal.audit_user_id
         )
         if result is None:
             raise ResourceOutOfScopeError

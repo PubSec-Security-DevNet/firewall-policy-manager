@@ -15,7 +15,7 @@
     "device_discovery": {"mock": {"fmc": "READ_ONLY", "scc": "READ_ONLY"}, "real": {"fmc": "NOT_STARTED", "scc": "NOT_STARTED"}},
     "access_policy_discovery": {"mock": {"fmc": "READ_ONLY", "scc": "READ_ONLY"}, "real": {"fmc": "NOT_STARTED", "scc": "NOT_STARTED"}},
     "rule_category_read": {"mock": {"fmc": "READ_ONLY", "scc": "READ_ONLY"}, "real": {"fmc": "NOT_STARTED", "scc": "NOT_STARTED"}},
-    "rule_category_mutation": {"mock": {"fmc": "SUPPORTED", "scc": "SUPPORTED"}, "real": {"fmc": "PARTIAL", "scc": "PARTIAL"}},
+    "rule_category_mutation": {"mock": {"fmc": "SUPPORTED", "scc": "SUPPORTED"}, "real": {"fmc": "SUPPORTED", "scc": "SUPPORTED"}},
     "access_rule_read": {"mock": {"fmc": "READ_ONLY", "scc": "READ_ONLY"}, "real": {"fmc": "NOT_STARTED", "scc": "NOT_STARTED"}},
     "access_rule_create": {"mock": {"fmc": "SUPPORTED", "scc": "SUPPORTED"}, "real": {"fmc": "SUPPORTED", "scc": "SUPPORTED"}},
     "access_rule_update": {"mock": {"fmc": "SUPPORTED", "scc": "SUPPORTED"}, "real": {"fmc": "SUPPORTED", "scc": "SUPPORTED"}},
@@ -35,10 +35,10 @@
     "url_groups": {"mock": {"fmc": "READ_ONLY", "scc": "READ_ONLY"}, "real": {"fmc": "READ_ONLY", "scc": "READ_ONLY"}},
     "security_zone_read": {"mock": {"fmc": "READ_ONLY", "scc": "READ_ONLY"}, "real": {"fmc": "NOT_STARTED", "scc": "NOT_STARTED"}},
     "security_zone_mutation": {"mock": {"fmc": "UNSUPPORTED", "scc": "UNSUPPORTED"}, "real": {"fmc": "UNSUPPORTED", "scc": "UNSUPPORTED"}},
-    "pending_change_inspection": {"mock": {"fmc": "NOT_STARTED", "scc": "NOT_STARTED"}, "real": {"fmc": "PARTIAL", "scc": "PARTIAL"}},
+    "pending_change_inspection": {"mock": {"fmc": "NOT_STARTED", "scc": "NOT_STARTED"}, "real": {"fmc": "SUPPORTED", "scc": "SUPPORTED"}},
     "deployment_start": {"mock": {"fmc": "NOT_STARTED", "scc": "NOT_STARTED"}, "real": {"fmc": "SUPPORTED", "scc": "SUPPORTED"}},
     "deployment_status": {"mock": {"fmc": "NOT_STARTED", "scc": "NOT_STARTED"}, "real": {"fmc": "SUPPORTED", "scc": "SUPPORTED"}},
-    "rollback": {"mock": {"fmc": "NOT_STARTED", "scc": "NOT_STARTED"}, "real": {"fmc": "NOT_STARTED", "scc": "NOT_STARTED"}},
+    "rollback": {"mock": {"fmc": "UNSUPPORTED", "scc": "UNSUPPORTED"}, "real": {"fmc": "UNSUPPORTED", "scc": "UNSUPPORTED"}},
     "policy_locking": {"mock": {"fmc": "NOT_STARTED", "scc": "NOT_STARTED"}, "real": {"fmc": "NOT_STARTED", "scc": "NOT_STARTED"}},
     "changelog_history": {"mock": {"fmc": "NOT_STARTED", "scc": "NOT_STARTED"}, "real": {"fmc": "NOT_STARTED", "scc": "NOT_STARTED"}}
   }

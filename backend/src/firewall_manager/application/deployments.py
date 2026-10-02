@@ -83,7 +83,7 @@ class DeploymentService:
         self._session.add(
             AuditEvent(
                 organization_id=principal.organization_id,
-                actor_user_id=principal.user_id,
+                actor_user_id=principal.audit_user_id,
                 active_group_id=change_set.acting_group_id,
                 policy_id=change_set.access_policy_id,
                 action="deployment_plan_created",
@@ -104,10 +104,12 @@ class DeploymentService:
         if principal.role != "admin":
             raise ResourceOutOfScopeError
         connection = self._session.scalar(
-            select(ProviderConnection).where(
+            select(ProviderConnection)
+            .where(
                 ProviderConnection.id == connection_id,
                 ProviderConnection.organization_id == principal.organization_id,
             )
+            .with_for_update()
         )
         manager = self._session.scalar(
             select(FirewallManager).where(
@@ -122,6 +124,8 @@ class DeploymentService:
             or not connection.write_enabled
         ):
             raise ResourceOutOfScopeError
+        if connection.deployment_paused:
+            raise InvalidChangeSetStateError(details={"code": "DEPLOYMENT_MAINTENANCE_PAUSED"})
         if not force and not connection.deployment_schedule_enabled:
             raise InvalidChangeSetStateError(details={"code": "DEPLOYMENT_SCHEDULE_DISABLED"})
         pending = self._pending_transactions(principal.organization_id, manager.id, connection_id)
@@ -173,13 +177,87 @@ class DeploymentService:
         self._session.flush()
         return self._view(row)
 
-    def schedule_connector(self, principal: Principal, connection_id: UUID) -> dict[str, object]:
-        """Expose newly staged changes immediately without starting deployment early."""
+    def pause_connector(
+        self, principal: Principal, connection_id: UUID, reason: str, until: datetime | None
+    ) -> dict[str, object]:
+        """Durably pause automatic and manual deployment starts for one connector."""
+        if principal.role != "admin":
+            raise ResourceOutOfScopeError
         connection = self._session.scalar(
-            select(ProviderConnection).where(
+            select(ProviderConnection)
+            .where(
                 ProviderConnection.id == connection_id,
                 ProviderConnection.organization_id == principal.organization_id,
             )
+            .with_for_update()
+        )
+        if connection is None:
+            raise ResourceOutOfScopeError
+        connection.deployment_paused = True
+        connection.deployment_pause_reason = reason
+        connection.deployment_paused_at = datetime.now(UTC)
+        connection.deployment_pause_until = until
+        connection.deployment_paused_by_user_id = principal.user_id
+        connection.deployment_status = "PAUSED"
+        self._session.add(
+            AuditEvent(
+                organization_id=principal.organization_id,
+                actor_user_id=principal.audit_user_id,
+                action="deployment_paused",
+                resource_type="provider_connection",
+                resource_id=connection_id,
+                decision="ALLOW",
+                reason_code="MAINTENANCE_WINDOW",
+                details={"reason": reason, "until": until.isoformat() if until else None},
+            )
+        )
+        self._session.flush()
+        return {"connection_id": connection_id, "paused": True, "until": until}
+
+    def resume_connector(self, principal: Principal, connection_id: UUID) -> dict[str, object]:
+        """Resume deployment starts after an explicit maintenance pause."""
+        if principal.role != "admin":
+            raise ResourceOutOfScopeError
+        connection = self._session.scalar(
+            select(ProviderConnection)
+            .where(
+                ProviderConnection.id == connection_id,
+                ProviderConnection.organization_id == principal.organization_id,
+            )
+            .with_for_update()
+        )
+        if connection is None:
+            raise ResourceOutOfScopeError
+        connection.deployment_paused = False
+        connection.deployment_pause_reason = None
+        connection.deployment_paused_at = None
+        connection.deployment_pause_until = None
+        connection.deployment_paused_by_user_id = None
+        connection.deployment_status = None
+        self._session.add(
+            AuditEvent(
+                organization_id=principal.organization_id,
+                actor_user_id=principal.audit_user_id,
+                action="deployment_resumed",
+                resource_type="provider_connection",
+                resource_id=connection_id,
+                decision="ALLOW",
+                reason_code="MAINTENANCE_WINDOW_ENDED",
+                details={},
+            )
+        )
+        self._session.flush()
+        return {"connection_id": connection_id, "paused": False}
+
+    def schedule_connector(self, principal: Principal, connection_id: UUID) -> dict[str, object]:
+        """Expose newly staged changes immediately without starting deployment early."""
+        connection = self._session.scalar(
+            select(ProviderConnection)
+            .where(
+                ProviderConnection.id == connection_id,
+                ProviderConnection.organization_id == principal.organization_id,
+            )
+            .with_for_update()
         )
         manager = self._session.scalar(
             select(FirewallManager).where(
@@ -356,7 +434,7 @@ class DeploymentService:
         self._session.add(
             AuditEvent(
                 organization_id=principal.organization_id,
-                actor_user_id=principal.user_id,
+                actor_user_id=principal.audit_user_id,
                 action="deployment_rollback_requested",
                 resource_type="deployment",
                 resource_id=row.id,
@@ -388,7 +466,7 @@ class DeploymentService:
         self._session.add(
             AuditEvent(
                 organization_id=principal.organization_id,
-                actor_user_id=principal.user_id,
+                actor_user_id=principal.audit_user_id,
                 action="deployment_approved",
                 resource_type="deployment",
                 resource_id=row.id,
@@ -432,6 +510,8 @@ class DeploymentService:
             "pending_change_evidence": row.pending_change_evidence,
             "device_results": row.device_results,
             "failure_info": row.failure_info,
+            "lease_until": row.lease_until,
+            "heartbeat_at": row.heartbeat_at,
             "revision": row.revision,
             "created_at": row.created_at,
             "updated_at": row.updated_at,

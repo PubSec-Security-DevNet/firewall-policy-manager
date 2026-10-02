@@ -205,7 +205,7 @@ class ProviderConnectionService:
         capabilities = self._baseline_capabilities(provider)
         result = self._repository.create_connection(
             principal.organization_id,
-            principal.user_id,
+            principal.audit_user_id,
             connection_id,
             credential_reference,
             normalized,
@@ -230,7 +230,7 @@ class ProviderConnectionService:
                 raise ProviderConfigurationError
         result = self._repository.update_connection(
             principal.organization_id,
-            principal.user_id,
+            principal.audit_user_id,
             connection_id,
             expected_revision,
             update,
@@ -264,7 +264,7 @@ class ProviderConnectionService:
             credential = {"token": token}
         result = self._repository.record_credential_rotation(
             principal.organization_id,
-            principal.user_id,
+            principal.audit_user_id,
             connection_id,
             expected_revision,
             username,
@@ -386,7 +386,7 @@ class ProviderConnectionService:
                 await provider.aclose()
         saved = self._repository.record_connection_test(
             principal.organization_id,
-            principal.user_id,
+            principal.audit_user_id,
             connection_id,
             result,
             capabilities,
@@ -431,7 +431,7 @@ class ProviderConnectionService:
         parsed = ProviderConnectionLifecycle(lifecycle)
         result = self._repository.set_lifecycle(
             principal.organization_id,
-            principal.user_id,
+            principal.audit_user_id,
             connection_id,
             expected_revision,
             parsed.value,
@@ -455,7 +455,7 @@ class ProviderConnectionService:
             )
         result = self._repository.set_write_enabled(
             principal.organization_id,
-            principal.user_id,
+            principal.audit_user_id,
             connection_id,
             expected_revision,
             enabled,
@@ -472,7 +472,7 @@ class ProviderConnectionService:
     ) -> None:
         self._require_admin(principal)
         self._repository.request_sync(
-            principal.organization_id, principal.user_id, connection_id, mode
+            principal.organization_id, principal.audit_user_id, connection_id, mode
         )
         dispatch(connection_id, mode)
 

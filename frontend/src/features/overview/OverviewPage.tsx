@@ -10,11 +10,13 @@ import {
 import {
   loadDelegatedPolicies,
   loadPendingApprovals,
+  exitProxySession,
   type Overview,
   type Session,
 } from '../../api/client';
 import { ApprovalsPage } from '../approvals/ApprovalsPage';
 import { DevelopmentUserSelector } from '../auth/DevelopmentUserSelector';
+import { LoginPage } from '../auth/LoginPage';
 import { DelegatedWorkspace } from '../delegated/DelegatedWorkspace';
 import { AuditPage, SyncDriftPage } from '../operations/OperationsPages';
 import { ProviderConnectionsPanel } from '../provider-connections/ProviderConnectionsPanel';
@@ -22,6 +24,8 @@ import { AdminChangeSetsPanel } from '../changesets/AdminChangeSetsPanel';
 import { DeploymentsPage } from '../deployments/DeploymentsPage';
 import {
   AppCard,
+  AppAlert,
+  AppButton,
   AppEmptyState,
   AppErrorState,
   AppGroup,
@@ -34,6 +38,7 @@ import {
   AppSimpleGrid,
   AppStatusBadge,
   AppText,
+  AppThemeIcon,
   MetricCard,
   type AppRoute,
 } from '../../ui';
@@ -44,8 +49,30 @@ const AdministrationPanel = lazy(() =>
     default: module.AdministrationPanel,
   })),
 );
+const IdentityProvidersPanel = lazy(() =>
+  import('../admin/IdentityProvidersPanel').then((module) => ({
+    default: module.IdentityProvidersPanel,
+  })),
+);
 
 export function OverviewPage() {
+  const query = new URLSearchParams(window.location.search);
+  const oidcTest = query.get('oidc_test');
+  const authError = query.get('auth_error');
+  if (oidcTest === 'success') {
+    return (
+      <StandaloneState>
+        <AppAlert color="green">
+          OIDC test successful. The provider authenticated successfully and passed validation.
+          No application user session was created.
+        </AppAlert>
+      </StandaloneState>
+    );
+  }
+  return <AuthenticatedOverviewPage authError={authError} />;
+}
+
+function AuthenticatedOverviewPage({ authError }: { authError: string | null }) {
   const state = useOverview();
   if (state.status === 'loading')
     return (
@@ -59,6 +86,9 @@ export function OverviewPage() {
         <AppErrorState message={state.message} reference={state.correlationId} />
       </StandaloneState>
     );
+  if (state.status === 'unauthenticated') {
+    return <LoginPage initialError={authError ? 'Authentication could not be completed. Try again or contact an administrator.' : undefined} />;
+  }
   return <ReadyApplication overview={state.overview} session={state.session} />;
 }
 
@@ -67,6 +97,8 @@ function StandaloneState({ children }: { children: React.ReactNode }) {
 }
 
 function ReadyApplication({ overview, session }: { overview: Overview; session: Session }) {
+  const [proxyExitError, setProxyExitError] = useState<string | null>(null);
+  const [proxyExiting, setProxyExiting] = useState(false);
   const [route, setRoute] = useState<AppRoute>('home');
   const [changeSetDetailsId, setChangeSetDetailsId] = useState<string>();
   const [approvalCount, setApprovalCount] = useState(0);
@@ -179,6 +211,38 @@ function ReadyApplication({ overview, session }: { overview: Overview; session: 
       onRouteChange={setRoute}
       headerActions={<DevelopmentUserSelector compact />}
     >
+      {session.proxied && (
+        <div className="fm-proxy-banner" role="status">
+          <AppThemeIcon className="fm-proxy-banner-icon" size={30} radius="xl" variant="light" color="orange">
+            <IconAlertTriangle size={16} />
+          </AppThemeIcon>
+          <div className="fm-proxy-banner-copy">
+            <AppText size="xs" fw={750} tt="uppercase" lts=".08em">Proxy session active</AppText>
+            <AppText size="sm">Viewing as <strong>{session.email}</strong><span className="fm-proxy-banner-detail"> · Actions remain attributed to your Platform Admin identity.</span></AppText>
+          </div>
+          <AppButton
+            className="fm-proxy-banner-action"
+            size="sm"
+            loading={proxyExiting}
+            disabled={proxyExiting}
+            onClick={() => {
+              setProxyExitError(null);
+              setProxyExiting(true);
+              void exitProxySession()
+                .then(() => {
+                  window.location.replace('/');
+                })
+                .catch((error: unknown) => {
+                  setProxyExiting(false);
+                  setProxyExitError(error instanceof Error ? error.message : 'Unable to exit proxy session.');
+                });
+            }}
+          >
+            Exit proxy
+          </AppButton>
+          {proxyExitError && <AppText className="fm-proxy-banner-error" size="xs">{proxyExitError}</AppText>}
+        </div>
+      )}
       {route === 'home' && (
         <Dashboard overview={overview} session={session} onNavigate={setRoute} />
       )}
@@ -218,6 +282,17 @@ function ReadyApplication({ overview, session }: { overview: Overview; session: 
         >
           <Suspense fallback={<AppLoadingState label="Loading access administration" />}>
             <AdministrationPanel view={route as 'users' | 'groups' | 'grants'} />
+          </Suspense>
+        </AppPage>
+      )}
+      {route === 'identity-providers' && admin && (
+        <AppPage
+          eyebrow="Access & delegation"
+          title="Identity providers"
+          description="Configure enterprise OIDC providers. Client secrets are encrypted and write-only."
+        >
+          <Suspense fallback={<AppLoadingState label="Loading identity providers" />}>
+            <IdentityProvidersPanel />
           </Suspense>
         </AppPage>
       )}

@@ -1,0 +1,22 @@
+{
+  "title": "Firewall Manager Operations",
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "HTTP requests by status",
+      "targets": [{"expr": "sum by (status) (rate(firewall_manager_http_requests_total[5m]))"}]
+    },
+    {
+      "type": "timeseries",
+      "title": "HTTP rate limiting",
+      "targets": [{"expr": "sum(rate(firewall_manager_http_requests_total{status=\"429\"}[5m]))"}]
+    },
+    {
+      "type": "timeseries",
+      "title": "Background jobs",
+      "targets": [{"expr": "sum by (job, outcome) (rate(firewall_manager_jobs_total[5m]))"}]
+    }
+  ]
+}

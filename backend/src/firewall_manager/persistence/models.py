@@ -90,6 +90,116 @@ class User(TimestampMixin, Base):
     revision: Mapped[int] = mapped_column(Integer, default=1)
 
 
+class ExternalIdentity(TimestampMixin, Base):
+    """Explicit stable OIDC identity mapping; email is metadata, never the key."""
+
+    __tablename__ = "external_identities"
+    __table_args__ = (
+        UniqueConstraint("issuer", "subject"),
+        Index("ix_external_identities_user_id", "user_id"),
+        Index("ix_external_identities_provider_id", "provider_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(ForeignKey("organizations.id"), index=True)
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), index=True)
+    provider_id: Mapped[str] = mapped_column(String(80))
+    issuer: Mapped[str] = mapped_column(String(500))
+    subject: Mapped[str] = mapped_column(String(500))
+    email_claim: Mapped[str | None] = mapped_column(String(320))
+    display_name_claim: Mapped[str | None] = mapped_column(String(200))
+
+
+class AuthenticationEvent(Base):
+    """Safe authentication evidence; it may represent failures without an application User."""
+
+    __tablename__ = "authentication_events"
+    __table_args__ = (
+        Index("ix_authentication_events_occurred", "occurred_at"),
+        Index("ix_authentication_events_provider", "provider_id", "occurred_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID | None] = mapped_column(ForeignKey("organizations.id"))
+    user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"), index=True)
+    provider_id: Mapped[str | None] = mapped_column(String(80))
+    event: Mapped[str] = mapped_column(String(60))
+    outcome: Mapped[str] = mapped_column(String(20))
+    correlation_id: Mapped[str | None] = mapped_column(String(100))
+    details: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict)
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class AuthSession(TimestampMixin, Base):
+    """Server-side browser session; the cookie contains only an opaque signed handle."""
+
+    __tablename__ = "auth_sessions"
+    __table_args__ = (Index("ix_auth_sessions_expires_at", "expires_at"),)
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), index=True)
+    actor_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"), index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    provider_id: Mapped[str] = mapped_column(String(80))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    proxy_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    proxy_reason: Mapped[str | None] = mapped_column(String(500))
+
+
+class ApiToken(TimestampMixin, Base):
+    """Hash-only credential for non-browser API integrations."""
+
+    __tablename__ = "api_tokens"
+    __table_args__ = (
+        UniqueConstraint("token_hash"),
+        Index("ix_api_tokens_user_id", "user_id"),
+        Index("ix_api_tokens_expires_at", "expires_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(ForeignKey("organizations.id"), index=True)
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    token_hash: Mapped[str] = mapped_column(String(64))
+    token_prefix: Mapped[str] = mapped_column(String(16))
+    scopes: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class OidcProvider(TimestampMixin, Base):
+    """Non-secret OIDC configuration; the client secret lives in SecretRecord."""
+
+    __tablename__ = "oidc_providers"
+    __table_args__ = (
+        UniqueConstraint("provider_id"),
+        UniqueConstraint("organization_id", "id"),
+        CheckConstraint("revision >= 1", name="ck_oidc_providers_revision"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(ForeignKey("organizations.id"), index=True)
+    provider_id: Mapped[str] = mapped_column(String(80))
+    kind: Mapped[str] = mapped_column(String(20))
+    display_name: Mapped[str] = mapped_column(String(120))
+    issuer_url: Mapped[str] = mapped_column(String(500))
+    client_id: Mapped[str] = mapped_column(String(300))
+    scopes: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    username_claim: Mapped[str] = mapped_column(String(100), default="preferred_username")
+    display_name_claim: Mapped[str] = mapped_column(String(100), default="name")
+    email_claim: Mapped[str] = mapped_column(String(100), default="email")
+    mapping_claim: Mapped[str] = mapped_column(String(100), default="email")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    logout: Mapped[bool] = mapped_column(Boolean, default=True)
+    secret_reference: Mapped[UUID] = mapped_column(ForeignKey("secret_records.id"))
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+
+
 class EmailNotification(TimestampMixin, Base):
     """Durable outbound email work item; message delivery is independent of approval state."""
 
@@ -206,6 +316,11 @@ class ProviderConnection(TimestampMixin, Base):
     )
     applications_next_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     deployment_schedule_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    deployment_paused: Mapped[bool] = mapped_column(Boolean, default=False)
+    deployment_pause_reason: Mapped[str | None] = mapped_column(String(500))
+    deployment_paused_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deployment_pause_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deployment_paused_by_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
     deployment_status: Mapped[str | None] = mapped_column(String(30))
     deployment_next_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     deployment_last_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

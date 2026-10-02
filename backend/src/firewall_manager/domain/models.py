@@ -336,6 +336,12 @@ class Principal:
     role: str
     issuer: str = ""
     subject: str = ""
+    actor_user_id: UUID | None = None
+
+    @property
+    def audit_user_id(self) -> UUID:
+        """Return the real authenticated user for audit attribution."""
+        return self.actor_user_id or self.user_id
 
 
 @dataclass(frozen=True, slots=True)

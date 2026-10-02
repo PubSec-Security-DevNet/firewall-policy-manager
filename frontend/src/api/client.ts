@@ -77,6 +77,8 @@ export class ApiError extends Error {
 
 const developmentUserKey = 'firewall-manager.dev-user';
 const defaultDevelopmentUser = import.meta.env.VITE_DEV_AUTH_USER ?? 'viewer@example.test';
+const csrfCookieName = 'fm_csrf';
+export const developmentIdentitiesChangedEvent = 'firewall-manager:development-identities-changed';
 
 export interface DevelopmentIdentity {
   email: string;
@@ -158,6 +160,76 @@ export interface ProviderGuidance {
   official_references: Array<{ label: string; url: string }>;
 }
 
+export interface OidcProvider {
+  id: string;
+  provider_id: string;
+  kind: 'entra' | 'duo' | 'generic';
+  display_name: string;
+  issuer_url: string;
+  client_id: string;
+  scopes: string[];
+  enabled: boolean;
+  logout: boolean;
+  username_claim: string;
+  display_name_claim: string;
+  email_claim: string;
+  secret_configured: boolean;
+  revision: number;
+  updated_at: string;
+}
+
+export interface OidcLoginProvider {
+  provider_id: string;
+  kind: 'entra' | 'duo' | 'generic';
+  display_name: string;
+}
+
+export async function loadOidcLoginProviders(): Promise<OidcLoginProvider[]> {
+  return get<OidcLoginProvider[]>('/api/v1/auth/providers');
+}
+
+export async function startProxySession(userId: string, reason: string): Promise<void> {
+  await request<void>(`/api/v1/auth/proxy/${encodeURIComponent(userId)}`, {
+    method: 'POST',
+    body: JSON.stringify({ reason }),
+  });
+}
+
+export async function exitProxySession(): Promise<void> {
+  await request<void>('/api/v1/auth/proxy/exit', { method: 'POST' });
+}
+
+export async function loadOidcProviders(): Promise<OidcProvider[]> {
+  return get<OidcProvider[]>('/api/v1/admin/oidc-providers');
+}
+
+export async function createOidcProvider(values: Record<string, unknown>): Promise<OidcProvider> {
+  return request<OidcProvider>('/api/v1/admin/oidc-providers', {
+    method: 'POST',
+    body: JSON.stringify(values),
+  });
+}
+
+export async function updateOidcProvider(
+  provider: OidcProvider,
+  values: Record<string, unknown>,
+): Promise<OidcProvider> {
+  return request<OidcProvider>(`/api/v1/admin/oidc-providers/${provider.id}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ expected_revision: provider.revision, ...values }),
+  });
+}
+
+export async function rotateOidcProviderSecret(
+  provider: OidcProvider,
+  clientSecret: string,
+): Promise<OidcProvider> {
+  return request<OidcProvider>(`/api/v1/admin/oidc-providers/${provider.id}/secret`, {
+    method: 'PUT',
+    body: JSON.stringify({ expected_revision: provider.revision, client_secret: clientSecret }),
+  });
+}
+
 export function getDevelopmentUser(): string {
   return window.sessionStorage.getItem(developmentUserKey) ?? defaultDevelopmentUser;
 }
@@ -172,12 +244,17 @@ export function switchDevelopmentUser(email: string): void {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const csrf = document.cookie
+    .split('; ')
+    .find((item) => item.startsWith(`${csrfCookieName}=`))
+    ?.slice(csrfCookieName.length + 1);
   const response = await fetch(path, {
     ...init,
     headers: {
       Accept: 'application/json',
       'Content-Type': 'application/json',
       'X-Dev-User': getDevelopmentUser(),
+      ...(csrf ? { 'X-CSRF-Token': decodeURIComponent(csrf) } : {}),
       ...init?.headers,
     },
     credentials: 'same-origin',

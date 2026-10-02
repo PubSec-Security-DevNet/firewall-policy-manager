@@ -855,7 +855,7 @@ class ChangeSetService:
                     "manager_id": str(manager_id),
                     "transaction_id": str(transaction["id"]),
                     "owner_group_id": str(active_group_id),
-                    "actor_user_id": str(principal.user_id),
+                    "actor_user_id": str(principal.audit_user_id),
                 },
             )
             operation_kinds = {str(item["id"]): str(item["kind"]) for item in operations}

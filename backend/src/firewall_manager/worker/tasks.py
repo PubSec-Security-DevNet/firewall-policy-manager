@@ -4,11 +4,11 @@ import asyncio
 import os
 from datetime import UTC, datetime, timedelta
 from typing import cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import dramatiq
 from redis import Redis
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from firewall_manager.application.changesets import ChangeSetService
 from firewall_manager.application.deployments import DeploymentService
@@ -17,10 +17,12 @@ from firewall_manager.application.synchronization import SynchronizationService
 from firewall_manager.config import get_settings
 from firewall_manager.domain.models import ChangeSetState, Principal
 from firewall_manager.notifications import deliver_queued_email_notifications
+from firewall_manager.observability import job as record_job
 from firewall_manager.persistence.changesets import SqlChangeSetRepository
 from firewall_manager.persistence.database import new_session
 from firewall_manager.persistence.models import (
     AccessPolicy,
+    AuthSession,
     ChangeSet,
     Deployment,
     Device,
@@ -35,6 +37,8 @@ from firewall_manager.persistence.repositories import SqlAuthorizationRepository
 from firewall_manager.persistence.secrets import EncryptedDatabaseSecretStore
 from firewall_manager.providers.factory import build_real_provider
 from firewall_manager.providers.transactions import GuardedProviderTransactionExecutor
+from firewall_manager.security.api_tokens import cleanup_expired as cleanup_expired_api_tokens
+from firewall_manager.security.secret_provider import master_key
 from firewall_manager.worker.broker import broker
 
 BROKER = broker
@@ -48,8 +52,23 @@ def record_worker_heartbeat() -> None:
     redis = Redis.from_url(get_settings().redis_url, decode_responses=True)
     try:
         redis.set(WORKER_HEARTBEAT_KEY, datetime.now(UTC).isoformat(), ex=120)
+        record_job("worker_heartbeat", "success")
     finally:
         redis.close()
+
+
+@dramatiq.actor(max_retries=2, min_backoff=5000)
+def cleanup_expired_authentication() -> None:
+    """Remove expired browser sessions and revoke expired API tokens."""
+    cutoff = datetime.now(UTC)
+    with new_session() as session:
+        session.execute(
+            delete(AuthSession).where(
+                AuthSession.expires_at <= cutoff,
+            )
+        )
+        cleanup_expired_api_tokens(session)
+        session.commit()
 
 
 @dramatiq.actor(max_retries=0)
@@ -102,11 +121,7 @@ async def _execute_change_set(
             subject=user.identity_subject,
         )
         repository = SqlChangeSetRepository(session)
-        encoded_key = (
-            settings.secret_store_master_key.get_secret_value()
-            if settings.secret_store_master_key is not None
-            else None
-        )
+        encoded_key = master_key(settings)
         secrets = EncryptedDatabaseSecretStore(
             session, encoded_key, settings.secret_store_key_version
         )
@@ -234,6 +249,39 @@ def recover_expired_change_set_executions() -> None:
 
 
 @dramatiq.actor(max_retries=0)
+def recover_expired_deployments() -> None:
+    """Fence workers that stopped heartbeating and require explicit reconciliation."""
+    now = datetime.now(UTC)
+    with new_session() as session:
+        rows = list(
+            session.scalars(
+                select(Deployment)
+                .where(
+                    Deployment.lease_until.is_not(None),
+                    Deployment.lease_until <= now,
+                    Deployment.state.in_(("READY", "DEPLOYING", "UNKNOWN")),
+                )
+                .with_for_update()
+            )
+        )
+        for row in rows:
+            row.state = "RECONCILIATION_REQUIRED"
+            row.failure_info = {
+                **row.failure_info,
+                "code": "DEPLOYMENT_WORKER_LEASE_EXPIRED",
+                "message": "Provider state must be reconciled before retrying.",
+            }
+            row.lease_owner = None
+            row.lease_until = None
+            row.heartbeat_at = now
+            if row.provider_connection_id:
+                connection = session.get(ProviderConnection, row.provider_connection_id)
+                if connection is not None:
+                    connection.deployment_status = "RECONCILIATION_REQUIRED"
+        session.commit()
+
+
+@dramatiq.actor(max_retries=0)
 def deliver_email_notifications() -> None:
     """Deliver a bounded durable SMTP outbox batch."""
     with new_session() as session:
@@ -247,10 +295,15 @@ def enqueue_scheduled_deployments() -> None:
     with new_session() as session:
         active_batch_ids = list(
             session.scalars(
-                select(Deployment.id).where(
+                select(Deployment.id)
+                .where(
                     Deployment.state.in_(("READY", "DEPLOYING")),
                     Deployment.provider_connection_id.is_not(None),
                 )
+                .join(
+                    ProviderConnection, ProviderConnection.id == Deployment.provider_connection_id
+                )
+                .where(ProviderConnection.deployment_paused.is_(False))
             )
         )
         connections = list(
@@ -271,6 +324,16 @@ def enqueue_scheduled_deployments() -> None:
         # execution task is state-aware and will only start a READY batch once.
         queued_ids: list[UUID] = list(active_batch_ids)
         for connection in connections:
+            if connection.deployment_paused:
+                if connection.deployment_pause_until and connection.deployment_pause_until <= now:
+                    connection.deployment_paused = False
+                    connection.deployment_pause_reason = None
+                    connection.deployment_paused_at = None
+                    connection.deployment_pause_until = None
+                    connection.deployment_paused_by_user_id = None
+                    connection.deployment_status = None
+                else:
+                    continue
             deployment_due = (
                 connection.deployment_next_at is None or connection.deployment_next_at <= now
             )
@@ -318,21 +381,29 @@ def execute_deployment_batch(deployment_id: str) -> None:
 async def _execute_deployment_batch(deployment_id: UUID) -> None:  # noqa: PLR0912, PLR0915
     settings = get_settings()
     with new_session() as session:
-        deployment = session.get(Deployment, deployment_id)
+        owner = f"deployment:{os.uname().nodename}:{os.getpid()}:{uuid4()}"
+        now = datetime.now(UTC)
+        deployment = session.scalar(
+            select(Deployment).where(Deployment.id == deployment_id).with_for_update()
+        )
         if deployment is None or deployment.provider_connection_id is None:
             return
         connection = session.get(ProviderConnection, deployment.provider_connection_id)
         if connection is None or connection.lifecycle != "ACTIVE":
             return
+        if connection.deployment_paused:
+            return
+        if deployment.lease_until is not None and deployment.lease_until > now:
+            return
+        deployment.lease_owner = owner
+        deployment.lease_until = now + timedelta(minutes=10)
+        deployment.heartbeat_at = now
+        session.commit()
         repository = SqlProviderConnectionRepository(session)
         context = repository.connection_context(connection.organization_id, connection.id)
         if context is None:
             return
-        encoded_key = (
-            settings.secret_store_master_key.get_secret_value()
-            if settings.secret_store_master_key is not None
-            else None
-        )
+        encoded_key = master_key(settings)
         secrets = EncryptedDatabaseSecretStore(
             session, encoded_key, settings.secret_store_key_version
         )
@@ -486,6 +557,8 @@ async def _execute_deployment_batch(deployment_id: UUID) -> None:  # noqa: PLR09
                     item for status in statuses for item in status.get("devices", [])
                 ]
                 connection.deployment_status = "FAILED"
+            deployment.heartbeat_at = datetime.now(UTC)
+            deployment.lease_until = datetime.now(UTC) + timedelta(minutes=10)
             session.commit()
         except Exception as exc:
             session.rollback()
@@ -497,6 +570,8 @@ async def _execute_deployment_batch(deployment_id: UUID) -> None:  # noqa: PLR09
                     "details": str(exc)[:1000],
                 }
                 connection.deployment_status = "FAILED"
+                deployment.heartbeat_at = datetime.now(UTC)
+                deployment.lease_until = datetime.now(UTC) + timedelta(minutes=10)
                 session.commit()
             elif deployment is not None and deployment.state == "READY":
                 deployment.state = "FAILED"
@@ -509,9 +584,17 @@ async def _execute_deployment_batch(deployment_id: UUID) -> None:  # noqa: PLR09
                         failure_info.update(details)
                 deployment.failure_info = failure_info
                 connection.deployment_status = "FAILED"
-                session.commit()
+            deployment.heartbeat_at = datetime.now(UTC)
+            deployment.lease_until = datetime.now(UTC) + timedelta(minutes=10)
+            session.commit()
             raise
         finally:
+            current = session.get(Deployment, deployment_id)
+            if current is not None and current.lease_owner == owner:
+                current.lease_owner = None
+                current.lease_until = None
+                current.heartbeat_at = datetime.now(UTC)
+                session.commit()
             await provider.aclose()
 
 
@@ -529,11 +612,7 @@ async def _synchronize_provider_connection(connection_id: UUID, mode: str = "FUL
             context = connections.connection_context(organization_id, connection_id)
             if context is None:
                 return
-            encoded_key = (
-                settings.secret_store_master_key.get_secret_value()
-                if settings.secret_store_master_key is not None
-                else None
-            )
+            encoded_key = master_key(settings)
             secrets = EncryptedDatabaseSecretStore(
                 session, encoded_key, settings.secret_store_key_version
             )

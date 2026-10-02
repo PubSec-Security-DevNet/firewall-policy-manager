@@ -1,9 +1,12 @@
 """Thin versioned REST routes."""
 
+from datetime import UTC, datetime
 from typing import Annotated, Literal, cast
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, Query, Request, Response
+from fastapi.responses import PlainTextResponse, RedirectResponse
+from sqlalchemy import select
 
 from firewall_manager.api.dependencies import (
     AdministrationRepositoryDependency,
@@ -24,6 +27,9 @@ from firewall_manager.api.dependencies import (
 from firewall_manager.api.schemas import (
     ActiveGroupResponse,
     AdministrationSnapshotResponse,
+    ApiTokenCreatedResponse,
+    ApiTokenCreateRequest,
+    ApiTokenResponse,
     AuthorizationResourceUpsertRequest,
     ChangeSetActionRequest,
     ChangeSetCreateRequest,
@@ -33,6 +39,7 @@ from firewall_manager.api.schemas import (
     DefaultContextResponse,
     DelegatedContextResponse,
     DelegatedPolicySummary,
+    DeploymentPauseRequest,
     DeploymentPlanRequest,
     DeploymentResponse,
     DeploymentRollbackRequest,
@@ -42,11 +49,18 @@ from firewall_manager.api.schemas import (
     DraftOperationUpdateRequest,
     DraftRuleOperationRequest,
     EnabledUpdateRequest,
+    ExternalIdentityCreateRequest,
+    ExternalIdentityResponse,
     GroupApprovalUpdateRequest,
     GroupCreateRequest,
     HealthResponse,
     ManagerResponse,
     ObjectResponse,
+    OidcLoginProviderResponse,
+    OidcProviderCreateRequest,
+    OidcProviderResponse,
+    OidcProviderSecretRequest,
+    OidcProviderUpdateRequest,
     OverviewResponse,
     PageResponse,
     PendingApprovalsResponse,
@@ -60,6 +74,7 @@ from firewall_manager.api.schemas import (
     ProviderLifecycleRequest,
     ProviderStatusResponse,
     ProviderWriteGateRequest,
+    ProxyStartRequest,
     ReconciliationActionResponse,
     ReconciliationRestoreRequest,
     RuleResponse,
@@ -73,12 +88,19 @@ from firewall_manager.application.authorization import require_action
 from firewall_manager.application.changesets import ChangeSetService
 from firewall_manager.application.delegated import DelegatedPolicyService
 from firewall_manager.application.deployments import DeploymentService
-from firewall_manager.application.errors import InvalidChangeSetStateError, ResourceOutOfScopeError
+from firewall_manager.application.errors import (
+    ApplicationError,
+    InvalidChangeSetStateError,
+    InvalidInputError,
+    ResourceOutOfScopeError,
+)
 from firewall_manager.application.inventory import InventoryService
+from firewall_manager.application.oidc_admin import OidcAdministrationService
 from firewall_manager.application.overview import OverviewService
 from firewall_manager.application.ports import ProviderFactory, ProviderReader
 from firewall_manager.application.provider_connections import ProviderConnectionService
 from firewall_manager.application.reconciliation import ReconciliationService
+from firewall_manager.config import get_settings
 from firewall_manager.domain.models import (
     Action,
     ChangeOperationKind,
@@ -86,14 +108,25 @@ from firewall_manager.domain.models import (
     DelegatedPolicyContext,
     ProviderKind,
 )
-from firewall_manager.persistence.models import ChangeSet, Deployment
+from firewall_manager.observability import render as render_metrics
+from firewall_manager.persistence.models import (
+    ApiToken,
+    AuthenticationEvent,
+    ChangeSet,
+    Deployment,
+    OidcProvider,
+    User,
+)
 from firewall_manager.providers.transactions import (
     HttpMockTransactionExecutor,
     ProviderTransactionExecutor,
 )
+from firewall_manager.security import api_tokens
+from firewall_manager.security.oidc import STATE_COOKIE_PREFIX, OidcService
 
 router = APIRouter(prefix="/api/v1")
 dev_router = APIRouter(prefix="/api/v1/dev", tags=["development-auth"])
+auth_router = APIRouter(prefix="/api/v1/auth", tags=["authentication"])
 
 
 def get_provider_readers() -> tuple[ProviderReader, ...]:
@@ -113,9 +146,111 @@ async def development_users(
     ]
 
 
+@auth_router.get("/{provider_id}/login", include_in_schema=True)
+async def oidc_login(
+    provider_id: str,
+    session: SessionDependency,
+) -> RedirectResponse:
+    """Start Authorization Code flow for a deployment-configured provider."""
+    redirect = RedirectResponse("/", status_code=303)
+    target = await OidcService(session, get_settings()).begin(provider_id, redirect)
+    redirect.headers["location"] = target
+    return redirect
+
+
+@auth_router.get("/{provider_id}/test", include_in_schema=True)
+async def oidc_test(
+    provider_id: str,
+    session: SessionDependency,
+) -> RedirectResponse:
+    """Validate an OIDC provider without requiring an application-user mapping."""
+    redirect = RedirectResponse(
+        f"{get_settings().app_public_url.rstrip('/')}/?oidc_test=success", status_code=303
+    )
+    target = await OidcService(session, get_settings()).begin(provider_id, redirect, test_only=True)
+    redirect.headers["location"] = target
+    return redirect
+
+
+@auth_router.get("/providers", include_in_schema=True)
+async def oidc_login_providers(session: SessionDependency) -> list[OidcLoginProviderResponse]:
+    """Expose only safe provider labels for the unauthenticated sign-in page."""
+    configured = {
+        row.provider_id: OidcLoginProviderResponse(
+            provider_id=row.provider_id, kind=row.kind, display_name=row.display_name
+        )
+        for row in session.scalars(select(OidcProvider).where(OidcProvider.enabled.is_(True)))
+    }
+    for provider in get_settings().oidc_provider_configs():
+        configured.setdefault(
+            provider.id,
+            OidcLoginProviderResponse(
+                provider_id=provider.id, kind=provider.kind, display_name=provider.display_name
+            ),
+        )
+    return sorted(configured.values(), key=lambda item: item.display_name.casefold())
+
+
+@auth_router.get("/{provider_id}/callback", include_in_schema=True)
+async def oidc_callback(
+    provider_id: str,
+    code: str,
+    state: str,
+    request: Request,
+    session: SessionDependency,
+) -> RedirectResponse:
+    response = RedirectResponse(f"{get_settings().app_public_url.rstrip('/')}/", status_code=303)
+    try:
+        test_only = await OidcService(session, get_settings()).callback(
+            provider_id, code, state, response, request.cookies.get(f"fm_oidc_state_{provider_id}")
+        )
+    except ApplicationError:
+        response = RedirectResponse(
+            f"{get_settings().app_public_url.rstrip('/')}/?auth_error=authentication_failed",
+            status_code=303,
+        )
+        response.delete_cookie(
+            f"{STATE_COOKIE_PREFIX}{provider_id}", path=f"/api/v1/auth/{provider_id}"
+        )
+        return response
+    if test_only:
+        response.headers["location"] = (
+            f"{get_settings().app_public_url.rstrip('/')}/?oidc_test=success"
+        )
+    return response
+
+
+@auth_router.post("/logout", status_code=204)
+async def oidc_logout(request: Request, response: Response, session: SessionDependency) -> None:
+    OidcService(session, get_settings()).logout(request.cookies.get("fm_session"), response)
+
+
+@auth_router.post("/proxy/exit", status_code=204)
+async def oidc_proxy_exit(request: Request, session: SessionDependency) -> None:
+    OidcService(session, get_settings()).stop_proxy(request.cookies.get("fm_session"))
+
+
+@auth_router.post("/proxy/{user_id}", status_code=204)
+async def oidc_proxy_start(
+    user_id: UUID,
+    body: ProxyStartRequest,
+    request: Request,
+    session: SessionDependency,
+) -> None:
+    OidcService(session, get_settings()).start_proxy(
+        request.cookies.get("fm_session"), user_id, body.reason
+    )
+
+
 @router.get("/health/live", tags=["health"])
 async def live() -> HealthResponse:
     return HealthResponse(status="ok")
+
+
+@router.get("/metrics", include_in_schema=False)
+async def metrics() -> PlainTextResponse:
+    """Expose scrapeable process metrics; keep this endpoint network-policy protected."""
+    return PlainTextResponse(render_metrics(), media_type="text/plain; version=0.0.4")
 
 
 @router.get(
@@ -134,12 +269,13 @@ async def ready(
 async def session(
     principal: PrincipalDependency,
     repository: AuthorizationRepositoryDependency,
+    session: SessionDependency,
 ) -> SessionResponse:
     default_group_id, default_policy_id = repository.default_context_for_user(
         principal.user_id, principal.organization_id
     )
     return SessionResponse(
-        authentication_mode="development",
+        authentication_mode="development" if get_settings().dev_auth_enabled else "oidc",
         user_id=principal.user_id,
         email=principal.email,
         role=principal.role,
@@ -151,6 +287,17 @@ async def session(
         ],
         default_group_id=default_group_id,
         default_policy_id=default_policy_id,
+        proxied=principal.actor_user_id is not None,
+        proxy_actor_email=(
+            session.scalar(select(User.email).where(User.id == principal.actor_user_id))
+            if principal.actor_user_id
+            else None
+        ),
+        proxy_actor_role=(
+            session.scalar(select(User.role).where(User.id == principal.actor_user_id))
+            if principal.actor_user_id
+            else None
+        ),
     )
 
 
@@ -491,6 +638,35 @@ async def force_connector_deployment(
     return DeploymentResponse.model_validate(result)
 
 
+@router.post(
+    "/admin/provider-connections/{connection_id}/deployment/pause",
+    tags=["deployments"],
+)
+async def pause_connector_deployment(
+    connection_id: UUID,
+    body: DeploymentPauseRequest,
+    principal: PrincipalDependency,
+    session: SessionDependency,
+) -> dict[str, object]:
+    result = DeploymentService(session).pause_connector(
+        principal, connection_id, body.reason, body.until
+    )
+    session.commit()
+    return result
+
+
+@router.post(
+    "/admin/provider-connections/{connection_id}/deployment/resume",
+    tags=["deployments"],
+)
+async def resume_connector_deployment(
+    connection_id: UUID, principal: PrincipalDependency, session: SessionDependency
+) -> dict[str, object]:
+    result = DeploymentService(session).resume_connector(principal, connection_id)
+    session.commit()
+    return result
+
+
 @router.post("/deployments/{deployment_id}/approve", tags=["deployments"])
 async def approve_deployment(
     deployment_id: UUID, principal: PrincipalDependency, session: SessionDependency
@@ -658,6 +834,63 @@ async def administration_snapshot(
         principal
     )
     return AdministrationSnapshotResponse.model_validate(result)
+
+
+@router.get("/admin/oidc-providers", tags=["administration"])
+async def list_oidc_providers(
+    principal: PrincipalDependency,
+    session: SessionDependency,
+    authorization_repository: AuthorizationRepositoryDependency,
+    secret_store: SecretStoreDependency,
+) -> list[OidcProviderResponse]:
+    result = OidcAdministrationService(session, authorization_repository, secret_store).list(
+        principal
+    )
+    return [OidcProviderResponse.model_validate(item) for item in result]
+
+
+@router.post("/admin/oidc-providers", status_code=201, tags=["administration"])
+async def create_oidc_provider(
+    body: OidcProviderCreateRequest,
+    principal: PrincipalDependency,
+    session: SessionDependency,
+    authorization_repository: AuthorizationRepositoryDependency,
+    secret_store: SecretStoreDependency,
+) -> OidcProviderResponse:
+    result = OidcAdministrationService(session, authorization_repository, secret_store).create(
+        principal, body.model_dump(exclude={"client_secret"}), body.client_secret.get_secret_value()
+    )
+    return OidcProviderResponse.model_validate(result)
+
+
+@router.patch("/admin/oidc-providers/{provider_id}", tags=["administration"])
+async def update_oidc_provider(  # noqa: PLR0913, PLR0917 -- explicit FastAPI dependencies
+    provider_id: UUID,
+    body: OidcProviderUpdateRequest,
+    principal: PrincipalDependency,
+    session: SessionDependency,
+    authorization_repository: AuthorizationRepositoryDependency,
+    secret_store: SecretStoreDependency,
+) -> OidcProviderResponse:
+    result = OidcAdministrationService(session, authorization_repository, secret_store).update(
+        principal, provider_id, body.model_dump(exclude_none=True)
+    )
+    return OidcProviderResponse.model_validate(result)
+
+
+@router.put("/admin/oidc-providers/{provider_id}/secret", tags=["administration"])
+async def rotate_oidc_provider_secret(  # noqa: PLR0913, PLR0917 -- explicit FastAPI dependencies
+    provider_id: UUID,
+    body: OidcProviderSecretRequest,
+    principal: PrincipalDependency,
+    session: SessionDependency,
+    authorization_repository: AuthorizationRepositoryDependency,
+    secret_store: SecretStoreDependency,
+) -> OidcProviderResponse:
+    result = OidcAdministrationService(session, authorization_repository, secret_store).rotate(
+        principal, provider_id, body.expected_revision, body.client_secret.get_secret_value()
+    )
+    return OidcProviderResponse.model_validate(result)
 
 
 def _provider_connection_service(
@@ -892,6 +1125,128 @@ async def create_user(
 ) -> dict[str, object]:
     return AdministrationService(authorization_repository, administration_repository).create_user(
         principal, body.model_dump()
+    )
+
+
+@router.get("/admin/api-tokens", response_model=list[ApiTokenResponse], tags=["administration"])
+async def list_api_tokens(
+    principal: PrincipalDependency, session: SessionDependency
+) -> list[ApiToken]:
+    if principal.role != "admin":
+        raise ResourceOutOfScopeError
+    return list(
+        session.scalars(
+            select(ApiToken)
+            .where(ApiToken.organization_id == principal.organization_id)
+            .order_by(ApiToken.created_at.desc())
+        )
+    )
+
+
+@router.post("/admin/users/{user_id}/api-tokens", status_code=201, tags=["administration"])
+async def create_api_token(
+    user_id: UUID,
+    body: ApiTokenCreateRequest,
+    principal: PrincipalDependency,
+    session: SessionDependency,
+) -> ApiTokenCreatedResponse:
+    if principal.role != "admin":
+        raise ResourceOutOfScopeError
+    user = session.scalar(
+        select(User).where(User.id == user_id, User.organization_id == principal.organization_id)
+    )
+    if user is None or not user.is_active:
+        raise ResourceOutOfScopeError
+    if body.expires_at is not None and body.expires_at <= datetime.now(UTC):
+        raise InvalidInputError(details={"reason": "expires_at_must_be_in_the_future"})
+    row, raw = api_tokens.create(session, user, body.name, list(body.scopes), body.expires_at)
+    session.add(
+        AuthenticationEvent(
+            organization_id=principal.organization_id,
+            user_id=user.id,
+            event="api_token_created",
+            outcome="SUCCESS",
+            details={"token_id": str(row.id), "name": row.name, "scopes": row.scopes},
+        )
+    )
+    return ApiTokenCreatedResponse.model_validate({**row.__dict__, "token": raw})
+
+
+@router.delete("/admin/api-tokens/{token_id}", status_code=204, tags=["administration"])
+async def revoke_api_token(
+    token_id: UUID, principal: PrincipalDependency, session: SessionDependency
+) -> None:
+    if principal.role != "admin":
+        raise ResourceOutOfScopeError
+    token = session.scalar(
+        select(ApiToken).where(
+            ApiToken.id == token_id, ApiToken.organization_id == principal.organization_id
+        )
+    )
+    if token is None or not api_tokens.revoke(session, token_id, principal.organization_id):
+        raise ResourceOutOfScopeError
+    session.add(
+        AuthenticationEvent(
+            organization_id=principal.organization_id,
+            user_id=token.user_id,
+            event="api_token_revoked",
+            outcome="SUCCESS",
+            details={"token_id": str(token.id), "name": token.name},
+        )
+    )
+
+
+@router.get(
+    "/admin/users/{user_id}/external-identities",
+    tags=["administration"],
+)
+async def list_external_identities(
+    user_id: UUID,
+    principal: PrincipalDependency,
+    session: SessionDependency,
+    authorization_repository: AuthorizationRepositoryDependency,
+    secret_store: SecretStoreDependency,
+) -> list[ExternalIdentityResponse]:
+    rows = OidcAdministrationService(
+        session, authorization_repository, secret_store
+    ).list_identities(principal, user_id)
+    return [ExternalIdentityResponse.model_validate(row) for row in rows]
+
+
+@router.post(
+    "/admin/users/{user_id}/external-identities",
+    status_code=201,
+    tags=["administration"],
+)
+async def add_external_identity(  # noqa: PLR0913, PLR0917 -- explicit FastAPI dependencies
+    user_id: UUID,
+    body: ExternalIdentityCreateRequest,
+    principal: PrincipalDependency,
+    session: SessionDependency,
+    authorization_repository: AuthorizationRepositoryDependency,
+    secret_store: SecretStoreDependency,
+) -> ExternalIdentityResponse:
+    row = OidcAdministrationService(session, authorization_repository, secret_store).add_identity(
+        principal, user_id, body.model_dump()
+    )
+    return ExternalIdentityResponse.model_validate(row)
+
+
+@router.delete(
+    "/admin/users/{user_id}/external-identities/{identity_id}",
+    status_code=204,
+    tags=["administration"],
+)
+async def remove_external_identity(  # noqa: PLR0913, PLR0917 -- explicit FastAPI dependencies
+    user_id: UUID,
+    identity_id: UUID,
+    principal: PrincipalDependency,
+    session: SessionDependency,
+    authorization_repository: AuthorizationRepositoryDependency,
+    secret_store: SecretStoreDependency,
+) -> None:
+    OidcAdministrationService(session, authorization_repository, secret_store).remove_identity(
+        principal, user_id, identity_id
     )
 
 

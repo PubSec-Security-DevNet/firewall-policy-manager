@@ -46,7 +46,9 @@ class AdministrationService:
         required = ("identity_issuer", "identity_subject", "display_name", "email")
         if any(not isinstance(values.get(key), str) or not values[key] for key in required):
             raise InvalidInputError
-        return self._repository.create_user(principal.organization_id, principal.user_id, values)
+        return self._repository.create_user(
+            principal.organization_id, principal.audit_user_id, values
+        )
 
     def create_group(self, principal: Principal, values: dict[str, object]) -> dict[str, object]:
         self._require_admin(principal)
@@ -57,7 +59,9 @@ class AdministrationService:
             values = {**values, "provider_slug": normalize_provider_slug(slug)}
         except ValueError as exc:
             raise InvalidInputError from exc
-        return self._repository.create_group(principal.organization_id, principal.user_id, values)
+        return self._repository.create_group(
+            principal.organization_id, principal.audit_user_id, values
+        )
 
     def update_enabled(
         self,
@@ -72,7 +76,7 @@ class AdministrationService:
             raise InvalidInputError
         return self._repository.update_enabled(
             principal.organization_id,
-            principal.user_id,
+            principal.audit_user_id,
             resource,
             resource_id,
             enabled,
@@ -91,7 +95,7 @@ class AdministrationService:
             raise InvalidInputError
         return self._repository.update_group_approval(
             principal.organization_id,
-            principal.user_id,
+            principal.audit_user_id,
             group_id,
             approval_required,
             expected_revision,
@@ -105,7 +109,7 @@ class AdministrationService:
             raise InvalidInputError
         return self._repository.update_user_role(
             principal.organization_id,
-            principal.user_id,
+            principal.audit_user_id,
             user_id,
             role,
             expected_revision,
@@ -124,7 +128,7 @@ class AdministrationService:
         normalized = self._normalize(resource, values)
         return self._repository.upsert_authorization_resource(
             principal.organization_id,
-            principal.user_id,
+            principal.audit_user_id,
             resource,
             normalized,
             expected_revision,
@@ -143,7 +147,7 @@ class AdministrationService:
             raise ResourceOutOfScopeError
         self._repository.revoke_authorization_resource(
             principal.organization_id,
-            principal.user_id,
+            principal.audit_user_id,
             resource,
             resource_id,
             expected_revision,

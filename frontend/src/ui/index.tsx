@@ -79,6 +79,7 @@ export type AppRoute =
   | 'users'
   | 'groups'
   | 'grants'
+  | 'identity-providers'
   | 'audit';
 
 interface NavigationItem {
@@ -110,6 +111,7 @@ const adminNavigation: NavigationSection[] = [
       { value: 'users', label: 'Users', icon: IconUsersGroup },
       { value: 'groups', label: 'Groups', icon: IconBuildingCommunity },
       { value: 'grants', label: 'Access grants', icon: IconShieldLock },
+      { value: 'identity-providers', label: 'Identity providers', icon: IconCloudLock },
     ],
   },
   {

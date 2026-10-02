@@ -111,7 +111,8 @@ jobs:
           python -m pip install --upgrade pip==26.2.1
           python -m pip install -r backend/requirements-dev.lock
           python -m pip install --no-deps -e backend
-          pip-audit
+          pip-audit -r backend/requirements.lock
+          pip-audit -r backend/requirements-dev.lock
           npm ci --prefix frontend
           npm audit --prefix frontend --audit-level=high
       - name: SAST

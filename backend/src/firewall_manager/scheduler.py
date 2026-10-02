@@ -7,10 +7,13 @@ from collections.abc import Callable
 
 from firewall_manager.config import get_settings
 from firewall_manager.worker.tasks import (
+    cleanup_expired_authentication,
     deliver_email_notifications,
     enqueue_scheduled_deployments,
     enqueue_scheduled_provider_syncs,
     record_worker_heartbeat,
+    recover_expired_change_set_executions,
+    recover_expired_deployments,
 )
 
 _running = True
@@ -33,6 +36,9 @@ def main() -> None:
         _enqueue_safely(enqueue_scheduled_provider_syncs.send)
         _enqueue_safely(deliver_email_notifications.send)
         _enqueue_safely(enqueue_scheduled_deployments.send)
+        _enqueue_safely(cleanup_expired_authentication.send)
+        _enqueue_safely(recover_expired_deployments.send)
+        _enqueue_safely(recover_expired_change_set_executions.send)
         deadline = time.monotonic() + interval
         while _running and time.monotonic() < deadline:
             time.sleep(max(0.0, min(1.0, deadline - time.monotonic())))
