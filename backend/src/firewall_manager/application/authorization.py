@@ -20,13 +20,11 @@ from firewall_manager.domain.models import (
 from firewall_manager.domain.networks import network_is_contained
 
 _ROLE_ACTIONS: dict[str, frozenset[Action]] = {
-    "viewer": frozenset({Action.READ}),
-    "editor": frozenset({Action.READ, Action.USE, Action.MODIFY}),
-    "approver": frozenset({Action.READ, Action.APPROVE}),
-    "group_admin": frozenset(
-        {Action.READ, Action.USE, Action.CREATE, Action.MODIFY, Action.DELETE, Action.REORDER}
-    ),
-    "firewall_admin": frozenset(
+    # Delegated object/rule writes are granted by the active Group and policy.
+    # The platform role only controls platform-wide capabilities.
+    "user": frozenset({Action.READ}),
+    "approver": frozenset({Action.READ, Action.APPROVE, Action.REJECT}),
+    "firewall_operator": frozenset(
         action for action in Action if action not in {Action.MANAGE_GRANTS, Action.MANAGE_PROVIDERS}
     ),
     "admin": frozenset(Action),
@@ -322,7 +320,7 @@ class AuthorizationService:
             return (
                 (
                     AuthorizationReason.ALLOWED
-                    if permission in state[2]
+                    if permission in state[2] or (action is Action.READ and "use" in state[2])
                     else AuthorizationReason.RESOURCE_NOT_USABLE
                 ),
                 state[3],

@@ -2,7 +2,7 @@
 
 import httpx
 
-from firewall_manager.application.errors import ProviderConfigurationError
+from firewall_manager.application.errors import ProviderConfigurationError, ProviderContractError
 from firewall_manager.domain.models import (
     CapabilityStatus,
     DiscoveredDevice,
@@ -130,7 +130,14 @@ class RealSccProvider(CiscoReadOnlyProvider):
             device_id for device_id in dict.fromkeys(device_ids) if device_id in deployable_ids
         ]
         if not selected_device_ids:
-            raise ProviderConfigurationError
+            raise ProviderContractError(
+                details={
+                    "code": "NO_DEPLOYABLE_DEVICES",
+                    "provider_messages": [
+                        {"message": "The policy has no assigned deployable devices."}
+                    ],
+                }
+            )
         response = await self._mutate_json(
             "POST",
             "/v1/inventory/devices/ftds/deploy",

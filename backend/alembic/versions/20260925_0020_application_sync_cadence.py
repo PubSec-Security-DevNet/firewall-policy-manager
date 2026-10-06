@@ -1,7 +1,7 @@
 """Separate application catalog synchronization cadence and state."""
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 
 revision = "20260925_0020"
 down_revision = "20260924_0019"
@@ -12,10 +12,17 @@ depends_on = None
 def upgrade() -> None:
     op.add_column(
         "provider_connections",
-        sa.Column("applications_sync_interval_minutes", sa.Integer(), nullable=False, server_default="1440"),
+        sa.Column(
+            "applications_sync_interval_minutes",
+            sa.Integer(),
+            nullable=False,
+            server_default="1440",
+        ),
     )
     op.add_column("provider_connections", sa.Column("applications_sync_status", sa.String(30)))
-    op.add_column("provider_connections", sa.Column("applications_last_sync", sa.DateTime(timezone=True)))
+    op.add_column(
+        "provider_connections", sa.Column("applications_last_sync", sa.DateTime(timezone=True))
+    )
     op.add_column(
         "provider_connections",
         sa.Column("applications_last_successful_sync", sa.DateTime(timezone=True)),

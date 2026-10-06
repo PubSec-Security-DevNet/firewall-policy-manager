@@ -12,11 +12,21 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.add_column("provider_connections", sa.Column("deployment_paused", sa.Boolean(), nullable=False, server_default=sa.false()))
+    op.add_column(
+        "provider_connections",
+        sa.Column("deployment_paused", sa.Boolean(), nullable=False, server_default=sa.false()),
+    )
     op.add_column("provider_connections", sa.Column("deployment_pause_reason", sa.String(500)))
-    op.add_column("provider_connections", sa.Column("deployment_paused_at", sa.DateTime(timezone=True)))
-    op.add_column("provider_connections", sa.Column("deployment_pause_until", sa.DateTime(timezone=True)))
-    op.add_column("provider_connections", sa.Column("deployment_paused_by_user_id", sa.Uuid(), sa.ForeignKey("users.id")))
+    op.add_column(
+        "provider_connections", sa.Column("deployment_paused_at", sa.DateTime(timezone=True))
+    )
+    op.add_column(
+        "provider_connections", sa.Column("deployment_pause_until", sa.DateTime(timezone=True))
+    )
+    op.add_column(
+        "provider_connections",
+        sa.Column("deployment_paused_by_user_id", sa.Uuid(), sa.ForeignKey("users.id")),
+    )
 
 
 def downgrade() -> None:

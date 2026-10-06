@@ -1,7 +1,7 @@
 """Add imported intrusion policies and variable sets to provider inventory."""
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 
 revision = "20260923_0017"
 down_revision = "20260923_0016"
@@ -13,8 +13,12 @@ def upgrade() -> None:
     op.create_table(
         "intrusion_policies",
         sa.Column("id", sa.UUID(), primary_key=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
+        sa.Column(
+            "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.Column("organization_id", sa.UUID(), sa.ForeignKey("organizations.id"), nullable=False),
         sa.Column("manager_id", sa.UUID(), sa.ForeignKey("firewall_managers.id"), nullable=False),
         sa.Column("native_id", sa.String(200), nullable=False),
@@ -33,8 +37,12 @@ def upgrade() -> None:
     op.create_table(
         "variable_sets",
         sa.Column("id", sa.UUID(), primary_key=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
+        sa.Column(
+            "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.Column("organization_id", sa.UUID(), sa.ForeignKey("organizations.id"), nullable=False),
         sa.Column("manager_id", sa.UUID(), sa.ForeignKey("firewall_managers.id"), nullable=False),
         sa.Column("native_id", sa.String(200), nullable=False),
@@ -52,8 +60,16 @@ def upgrade() -> None:
     )
     op.add_column("access_rules", sa.Column("intrusion_policy_id", sa.UUID()))
     op.add_column("access_rules", sa.Column("variable_set_id", sa.UUID()))
-    op.create_foreign_key("fk_access_rules_intrusion_policy", "access_rules", "intrusion_policies", ["intrusion_policy_id"], ["id"])
-    op.create_foreign_key("fk_access_rules_variable_set", "access_rules", "variable_sets", ["variable_set_id"], ["id"])
+    op.create_foreign_key(
+        "fk_access_rules_intrusion_policy",
+        "access_rules",
+        "intrusion_policies",
+        ["intrusion_policy_id"],
+        ["id"],
+    )
+    op.create_foreign_key(
+        "fk_access_rules_variable_set", "access_rules", "variable_sets", ["variable_set_id"], ["id"]
+    )
 
 
 def downgrade() -> None:

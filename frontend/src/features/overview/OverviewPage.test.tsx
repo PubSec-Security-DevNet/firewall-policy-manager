@@ -64,7 +64,6 @@ const administration = {
       revision: 2,
     },
   ],
-  direct_user_policy_grants: [],
   object_use_grants: [],
   zone_grants: [],
   ip_range_grants: [],
@@ -76,10 +75,11 @@ function session(
   groups = [{ id: finance, name: 'Finance', provider_slug: 'FINANCE', revision: 1 }],
 ) {
   return {
+    environment: 'development',
     authentication_mode: 'development',
     user_id: '30000000-0000-0000-0000-000000000001',
     email: 'viewer@example.test',
-    role: 'viewer',
+    role: 'user',
     groups,
   };
 }
@@ -198,12 +198,14 @@ describe('OverviewPage', () => {
     expect(document.querySelector('.mantine-Modal-body')).toHaveClass('fm-object-dialog-body');
     await user.type(screen.getByRole('textbox', { name: 'Object name' }), 'web-one');
     await user.type(screen.getByRole('textbox', { name: 'Value' }), '10.20.10.1');
-    await user.click(screen.getByRole('button', { name: 'Add object to ChangeSet' }));
+    await user.click(screen.getByRole('button', { name: 'Add object to Changeset' }));
     await user.type(screen.getByRole('textbox', { name: 'Object name' }), 'web-two');
     await user.type(screen.getByRole('textbox', { name: 'Value' }), '10.20.10.2');
-    await user.click(screen.getByRole('button', { name: 'Add object to ChangeSet' }));
-    expect(screen.getByRole('button', { name: 'Review 2 objects' })).toBeEnabled();
-    expect(screen.getByRole('region', { name: 'Objects in this ChangeSet' })).toBeVisible();
+    await user.click(screen.getByRole('button', { name: 'Add object to Changeset' }));
+    const objectBasket = screen.getByRole('region', { name: 'Objects in this Changeset' });
+    expect(objectBasket).toBeVisible();
+    expect(within(objectBasket).getByRole('row', { name: /web-one/ })).toBeVisible();
+    expect(within(objectBasket).getByRole('row', { name: /web-two/ })).toBeVisible();
     await user.click(screen.getByRole('button', { name: 'Cancel' }));
     await waitFor(() => expect(document.querySelectorAll('.mantine-Modal-header')).toHaveLength(0));
     await user.click(
@@ -211,13 +213,23 @@ describe('OverviewPage', () => {
         name: 'Policies',
       }),
     );
-    expect(screen.getByText('10.20.0.0/16')).toBeVisible();
+    await user.click(screen.getByRole('button', { name: 'View access' }));
+    const accessDialog = await screen.findByRole('dialog', {
+      name: 'Finance · Corporate-ACP',
+    });
+    await waitFor(() => expect(accessDialog).toBeVisible());
+    await user.keyboard('{Escape}');
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('dialog', { name: 'Finance · Corporate-ACP' }),
+      ).not.toBeInTheDocument(),
+    );
     await user.click(
       within(screen.getByRole('navigation', { name: 'Primary navigation' })).getByRole('button', {
         name: 'Changes',
       }),
     );
-    expect(screen.getByRole('heading', { name: 'Submitted ChangeSets' })).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Changesets' })).toBeVisible();
     const results = await axe.run(container, {
       rules: { 'color-contrast': { enabled: false } },
     });
@@ -322,7 +334,7 @@ describe('OverviewPage', () => {
     await user.click(navigation.getByRole('button', { name: 'Users' }));
     expect(await screen.findByRole('button', { name: 'Create User' })).toBeVisible();
     expect(screen.getAllByText('1 group').length).toBeGreaterThan(0);
-    await user.click(screen.getByRole('button', { name: 'Manage Groups' }));
+    await user.click(screen.getByRole('button', { name: 'Manage groups' }));
     const groupDialog = await screen.findByRole('dialog', { name: 'Manage Groups' });
     await waitFor(() => expect(groupDialog).toBeVisible());
     expect(within(groupDialog).getByRole('button', { name: 'Remove' })).toBeVisible();
@@ -338,36 +350,22 @@ describe('OverviewPage', () => {
     await user.click(within(groupDialog).getByRole('button', { name: 'Close' }));
 
     await user.click(navigation.getByRole('button', { name: 'Access grants' }));
-    const addGrant = await screen.findByRole('button', { name: 'Add group delegation' });
+    const addGrant = await screen.findByRole('button', { name: 'Add group policy grant' });
     expect(screen.getByRole('textbox', { name: 'Search access grants' })).toBeVisible();
     expect(screen.getByRole('textbox', { name: 'Sort access grants' })).toHaveValue('Sort: A–Z');
     expect(screen.getByRole('tab', { name: 'Policy access' })).toBeVisible();
     expect(screen.queryByRole('button', { name: 'Create User' })).not.toBeInTheDocument();
-    await user.click(addGrant);
-    await waitFor(() =>
-      expect(screen.getByRole('dialog', { name: 'Add group policy delegation' })).toBeVisible(),
-    );
-    expect(screen.getByRole('textbox', { name: 'Authorization record' })).toBeVisible();
-    await user.click(
-      within(screen.getByRole('dialog', { name: 'Add group policy delegation' })).getByRole(
-        'button',
-        { name: 'Close' },
-      ),
-    );
-    await waitFor(() =>
-      expect(
-        screen.queryByRole('dialog', { name: 'Add group policy delegation' }),
-      ).not.toBeInTheDocument(),
-    );
+    expect(addGrant).toBeEnabled();
     await user.click(screen.getByRole('tab', { name: 'Resource access' }));
+    await user.click(screen.getByRole('tab', { name: 'Networks' }));
     expect(screen.getByRole('heading', { name: 'Network objects' })).toBeVisible();
     await user.click(screen.getByRole('button', { name: 'Add network object access' }));
     const networkGrantDialog = await screen.findByRole('dialog', {
       name: 'Add network object access',
     });
     expect(
-      within(networkGrantDialog).getByRole('textbox', { name: 'Object permission' }),
-    ).toHaveValue('Use in policy rules');
+      within(networkGrantDialog).getByRole('textbox', { name: 'Authorization record' }),
+    ).toHaveValue('Object access');
     await user.click(within(networkGrantDialog).getByRole('button', { name: 'Close' }));
     await user.click(screen.getByRole('tab', { name: 'Ports' }));
     expect(screen.getByRole('heading', { name: 'Port objects' })).toBeVisible();

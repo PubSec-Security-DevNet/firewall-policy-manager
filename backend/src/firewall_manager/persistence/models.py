@@ -43,6 +43,18 @@ class Organization(TimestampMixin, Base):
     name: Mapped[str] = mapped_column(String(200), unique=True)
 
 
+class SetupRecovery(TimestampMixin, Base):
+    """Operator-authorized, one-time recovery window for an existing organization."""
+
+    __tablename__ = "setup_recovery"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    organization_id: Mapped[UUID] = mapped_column(ForeignKey("organizations.id"))
+    code_hash: Mapped[str] = mapped_column(String(64))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class Group(TimestampMixin, Base):
     __tablename__ = "application_groups"
     __table_args__ = (
@@ -228,6 +240,32 @@ class EmailNotification(TimestampMixin, Base):
     lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class SmtpSettings(TimestampMixin, Base):
+    """Organization-scoped SMTP delivery settings; the password is encrypted separately."""
+
+    __tablename__ = "smtp_settings"
+    __table_args__ = (
+        UniqueConstraint("organization_id"),
+        CheckConstraint("encryption IN ('NONE','STARTTLS','SSL_TLS')", name="ck_smtp_encryption"),
+        CheckConstraint("port >= 1 AND port <= 65535", name="ck_smtp_port"),
+        CheckConstraint("revision >= 1", name="ck_smtp_revision"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(ForeignKey("organizations.id"), index=True)
+    host: Mapped[str] = mapped_column(String(500))
+    port: Mapped[int] = mapped_column(Integer, default=587)
+    from_address: Mapped[str] = mapped_column(String(320))
+    encryption: Mapped[str] = mapped_column(String(20), default="STARTTLS")
+    authentication_required: Mapped[bool] = mapped_column(Boolean, default=False)
+    username: Mapped[str | None] = mapped_column(String(320))
+    custom_ca_certificate: Mapped[str | None] = mapped_column(Text)
+    password_reference: Mapped[UUID | None] = mapped_column(
+        ForeignKey("secret_records.id", ondelete="RESTRICT"), unique=True
+    )
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+
+
 class SecretRecord(TimestampMixin, Base):
     """Authenticated ciphertext; the root key is deliberately external to PostgreSQL."""
 
@@ -275,6 +313,10 @@ class ProviderConnection(TimestampMixin, Base):
             "AND applications_sync_interval_minutes <= 43200",
             name="ck_provider_connections_applications_sync_interval",
         ),
+        CheckConstraint(
+            "deployment_interval_minutes >= 5 AND deployment_interval_minutes <= 10080",
+            name="ck_provider_connections_deployment_interval",
+        ),
         Index("ix_provider_connections_org_lifecycle", "organization_id", "lifecycle"),
         Index("ix_provider_connections_sync_due", "lifecycle", "next_sync_at"),
     )
@@ -316,6 +358,7 @@ class ProviderConnection(TimestampMixin, Base):
     )
     applications_next_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     deployment_schedule_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    deployment_interval_minutes: Mapped[int] = mapped_column(Integer, default=15)
     deployment_paused: Mapped[bool] = mapped_column(Boolean, default=False)
     deployment_pause_reason: Mapped[str | None] = mapped_column(String(500))
     deployment_paused_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -828,37 +871,8 @@ class PolicyDelegation(TimestampMixin, Base):
     revision: Mapped[int] = mapped_column(Integer, default=1)
 
 
-class DirectUserPolicyGrant(TimestampMixin, Base):
-    """Capabilities granted to one User without escaping its Group+Policy context."""
-
-    __tablename__ = "direct_user_policy_grants"
-    __table_args__ = (
-        ForeignKeyConstraint(["organization_id", "user_id"], ["users.organization_id", "users.id"]),
-        ForeignKeyConstraint(
-            ["organization_id", "group_id"],
-            ["application_groups.organization_id", "application_groups.id"],
-        ),
-        ForeignKeyConstraint(
-            ["organization_id", "policy_id"],
-            ["access_policies.organization_id", "access_policies.id"],
-        ),
-        UniqueConstraint("user_id", "group_id", "policy_id"),
-        CheckConstraint("revision >= 1", name="ck_direct_user_policy_grants_revision"),
-        Index("ix_direct_user_policy_grants_context", "user_id", "group_id", "policy_id"),
-    )
-
-    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
-    organization_id: Mapped[UUID] = mapped_column(ForeignKey("organizations.id"), index=True)
-    user_id: Mapped[UUID] = mapped_column(index=True)
-    group_id: Mapped[UUID] = mapped_column(index=True)
-    policy_id: Mapped[UUID] = mapped_column(index=True)
-    capabilities: Mapped[list[str]] = mapped_column(JSONB, default=list)
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    revision: Mapped[int] = mapped_column(Integer, default=1)
-
-
 class ObjectUseGrant(TimestampMixin, Base):
-    """Explicit READ/USE/MODIFY permission for one synchronized object."""
+    """Explicit USE/MODIFY permission for one synchronized object."""
 
     __tablename__ = "object_use_grants"
     __table_args__ = (
@@ -875,7 +889,7 @@ class ObjectUseGrant(TimestampMixin, Base):
             ["firewall_objects.organization_id", "firewall_objects.id"],
         ),
         UniqueConstraint("group_id", "policy_id", "object_id", "permission"),
-        CheckConstraint("permission IN ('read','use','modify')", name="ck_object_use_permission"),
+        CheckConstraint("permission IN ('use','modify')", name="ck_object_use_permission"),
         CheckConstraint("revision >= 1", name="ck_object_use_grants_revision"),
         Index("ix_object_use_grants_context", "group_id", "policy_id", "object_id"),
     )
@@ -1048,6 +1062,10 @@ class ChangeSet(TimestampMixin, Base):
     approved_by_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
     approved_revision: Mapped[int | None] = mapped_column(Integer)
     approval_invalidated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    rejected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    rejected_by_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
+    rejection_reason: Mapped[str | None] = mapped_column(Text)
+    rejection_notice_dismissed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     execution_owner: Mapped[str | None] = mapped_column(String(200))
     execution_lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     execution_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

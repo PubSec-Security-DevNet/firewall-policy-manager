@@ -346,6 +346,14 @@ class ChangeSetRepository(Protocol):
         provider_snapshot: dict[str, object],
     ) -> dict[str, object]: ...
 
+    def reject_change_set(
+        self, principal: Principal, group_id: UUID, change_set_id: UUID, reason: str
+    ) -> dict[str, object]: ...
+
+    def dismiss_rejection_notice(
+        self, principal: Principal, group_id: UUID, change_set_id: UUID
+    ) -> dict[str, object]: ...
+
     def current_revision_snapshot(
         self, operation: dict[str, object], organization_id: UUID
     ) -> dict[str, str]: ...
@@ -474,6 +482,8 @@ class OverviewRepository(Protocol):
     def organization_name(self, organization_id: UUID) -> str | None: ...
 
     def counts(self, organization_id: UUID) -> dict[str, int]: ...
+
+    def counts_for_user(self, organization_id: UUID, user_id: UUID) -> dict[str, int]: ...
 
 
 class DevelopmentIdentityRepository(Protocol):
@@ -750,7 +760,12 @@ class InventoryRepository(OverviewRepository, Protocol):
     ) -> list[dict[str, object]]: ...
 
     def accept_provider_state(
-        self, organization_id: UUID, drift_id: UUID, actor_user_id: UUID
+        self,
+        organization_id: UUID,
+        drift_id: UUID,
+        actor_user_id: UUID,
+        active_group_id: UUID | None = None,
+        scope_to_membership: bool = False,
     ) -> dict[str, object] | None: ...
 
     def reconciliation_proposal(

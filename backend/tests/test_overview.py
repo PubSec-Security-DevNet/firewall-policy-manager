@@ -32,7 +32,7 @@ async def test_overview_is_bounded_and_read_only() -> None:
         UUID("30000000-0000-0000-0000-000000000001"),
         UUID("10000000-0000-0000-0000-000000000001"),
         "viewer@example.test",
-        "viewer",
+        "user",
     )
     result = await OverviewService(FakeRepository(), (FakeProvider(),)).get(principal)
     assert result["organization"] == "Example Organization"

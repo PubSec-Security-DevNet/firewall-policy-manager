@@ -52,7 +52,8 @@ export function retryableChangeSet(item: ChangeSet) {
         transaction.state === 'EXECUTING' && transaction.operation_results.length === 0,
     );
   return (
-    (['FAILED', 'CONFLICT'].includes(item.state) && safeTransactions) ||
+    (['VALIDATION_FAILED', 'FAILED', 'CONFLICT'].includes(item.state) &&
+      (item.state === 'VALIDATION_FAILED' || safeTransactions)) ||
     partialCategoryRecovery ||
     interruptedIdempotentCreate
   );

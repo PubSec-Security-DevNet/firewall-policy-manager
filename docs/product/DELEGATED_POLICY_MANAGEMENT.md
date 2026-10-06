@@ -74,8 +74,8 @@ Initial policy capabilities are `view`, `create_rule`, `modify_rule`, `delete_ru
 object modify. Workflow capabilities later include `submit`, `approve`, and `deploy`, preserving
 the canonical distinction between read, use, modify, approval, and deployment.
 
-Direct User grants may exist, but delegated rule operations still require an active Group and
-Access Policy. There is no implicit personal Group.
+Policy access is granted through Group delegation only. Delegated rule operations still require
+an active Group and Access Policy. There is no implicit personal Group or direct-user policy grant.
 
 ## Rule ownership, visibility, and ordering
 

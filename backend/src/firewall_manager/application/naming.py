@@ -9,6 +9,8 @@ from firewall_manager.domain.networks import normalize_ip_value
 
 _SAFE_COMPONENT = re.compile(r"[^A-Za-z0-9_.-]+")
 _PORT = re.compile(r"^(tcp|udp)/(\d{1,5})(?:-(\d{1,5}))?$", re.IGNORECASE)
+_ICMP = re.compile(r"^(icmp|ipv6-icmp)/([A-Za-z0-9_-]+)/([A-Za-z0-9_-]+)$", re.IGNORECASE)
+_OTHER_PROTOCOL = re.compile(r"^other/([A-Za-z0-9_-]+)$", re.IGNORECASE)
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,24 +41,33 @@ class NamingResolution:
 class ProviderObjectNamingService:
     """Resolve object names once, outside UI and provider-specific adapters."""
 
-    def normalize_value(self, object_type: str, value: str) -> str:
+    def normalize_value(self, object_type: str, value: str) -> str:  # noqa: PLR0911
         kind = FirewallObjectType(object_type)
         stripped = value.strip()
         if kind is FirewallObjectType.NETWORK:
             return normalize_ip_value(stripped)
         if kind is FirewallObjectType.PORT_SERVICE:
             match = _PORT.fullmatch(stripped)
-            if match is None:
-                msg = "port service must use protocol/port or protocol/start-end"
-                raise ValueError(msg)
-            protocol = match.group(1).lower()
-            start = int(match.group(2))
-            end = int(match.group(3) or start)
-            if not 1 <= start <= end <= 65535:
-                msg = "port range must be between 1 and 65535"
-                raise ValueError(msg)
-            suffix = str(start) if start == end else f"{start}-{end}"
-            return f"{protocol}/{suffix}"
+            if match is not None:
+                protocol = match.group(1).lower()
+                start = int(match.group(2))
+                end = int(match.group(3) or start)
+                if not 1 <= start <= end <= 65535:
+                    msg = "port range must be between 1 and 65535"
+                    raise ValueError(msg)
+                suffix = str(start) if start == end else f"{start}-{end}"
+                return f"{protocol}/{suffix}"
+            match = _ICMP.fullmatch(stripped)
+            if match is not None:
+                return f"{match.group(1).lower()}/{match.group(2).upper()}/{match.group(3).upper()}"
+            match = _OTHER_PROTOCOL.fullmatch(stripped)
+            if match is not None:
+                return f"other/{match.group(1).upper()}"
+            msg = (
+                "port service must use protocol/port, protocol/start-end, icmp/type/code, "
+                "ipv6-icmp/type/code, or other/protocol"
+            )
+            raise ValueError(msg)
         if kind is FirewallObjectType.URL:
             return stripped.rstrip("/").casefold()
         if kind in {

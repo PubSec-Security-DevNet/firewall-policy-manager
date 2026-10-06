@@ -15,15 +15,13 @@ _RESOURCE_NAMES = frozenset(
     {
         "memberships",
         "policy-delegations",
-        "direct-user-policy-grants",
         "object-use-grants",
         "zone-grants",
         "ip-range-grants",
         "object-create-grants",
-        "category-mappings",
     }
 )
-_USER_ROLES = frozenset({"viewer", "editor", "approver", "group_admin", "firewall_admin", "admin"})
+_USER_ROLES = frozenset({"user", "approver", "firewall_operator", "admin"})
 
 
 class AdministrationService:
@@ -43,11 +41,14 @@ class AdministrationService:
 
     def create_user(self, principal: Principal, values: dict[str, object]) -> dict[str, object]:
         self._require_admin(principal)
-        required = ("identity_issuer", "identity_subject", "display_name", "email")
+        required = ("display_name", "email")
         if any(not isinstance(values.get(key), str) or not values[key] for key in required):
             raise InvalidInputError
+        role = values.get("role", "user")
+        if not isinstance(role, str) or role not in _USER_ROLES:
+            raise InvalidInputError
         return self._repository.create_user(
-            principal.organization_id, principal.audit_user_id, values
+            principal.organization_id, principal.audit_user_id, {**values, "role": role}
         )
 
     def create_group(self, principal: Principal, values: dict[str, object]) -> dict[str, object]:
@@ -166,27 +167,14 @@ class AdministrationService:
             required = {
                 "memberships": {"user_id", "group_id", "status"},
                 "policy-delegations": {"group_id", "policy_id", "capabilities"},
-                "direct-user-policy-grants": {
-                    "user_id",
-                    "group_id",
-                    "policy_id",
-                    "capabilities",
-                },
                 "object-use-grants": {"group_id", "policy_id", "object_id", "permission"},
                 "zone-grants": {"group_id", "policy_id", "zone_id", "direction"},
                 "ip-range-grants": {"group_id", "policy_id", "network"},
                 "object-create-grants": {"group_id", "policy_id", "object_type"},
-                "category-mappings": {
-                    "group_id",
-                    "policy_id",
-                    "category_id",
-                    "expected_category_name",
-                    "sync_state",
-                },
             }[resource]
             if not required <= values.keys():
                 raise ValueError
-            if resource in {"policy-delegations", "direct-user-policy-grants"}:
+            if resource == "policy-delegations":
                 raw = values.get("capabilities")
                 if not isinstance(raw, list) or not raw:
                     raise ValueError
@@ -195,7 +183,7 @@ class AdministrationService:
                 )
             elif resource == "object-use-grants":
                 permission = str(values.get("permission"))
-                if permission not in {"read", "use", "modify"}:
+                if permission not in {"use", "modify"}:
                     raise ValueError
             elif resource == "zone-grants":
                 direction = str(values.get("direction"))
@@ -216,9 +204,6 @@ class AdministrationService:
                 if object_type is FirewallObjectType.NETWORK_GROUP:
                     raise ValueError
                 normalized["object_type"] = object_type.value
-            elif resource == "category-mappings":
-                if not str(values.get("expected_category_name", "")).strip():
-                    raise ValueError
         except (TypeError, ValueError) as exc:
             raise InvalidInputError from exc
         return normalized

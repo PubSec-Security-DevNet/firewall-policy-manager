@@ -12,7 +12,6 @@ function rowsForViewport() {
 }
 
 // The hook and component intentionally share this small pagination module.
-// eslint-disable-next-line react-refresh/only-export-components
 export function useAdaptivePageSize() {
   const [pageSize, setPageSize] = useState(rowsForViewport);
 

@@ -11,7 +11,7 @@ import {
 } from '../../api/client';
 import {
   AppAlert as Alert,
-  AppButton as Button,
+  AppActionButton,
   AppCard as Card,
   AppDataTable,
   AppDialog as Dialog,
@@ -29,11 +29,13 @@ import {
   MetricCard,
 } from '../../ui';
 import { retryableChangeSet } from './changeSetRetry';
+import { AdaptivePagination, useAdaptivePageSize } from '../shared/AdaptivePagination';
 
 const SUBMITTED_STATES = new Set([
   'DRAFT',
   'VALIDATION_FAILED',
   'READY',
+  'APPROVED',
   'QUEUED',
   'EXECUTING',
   'SUCCEEDED',
@@ -41,7 +43,30 @@ const SUBMITTED_STATES = new Set([
   'PARTIALLY_SUCCEEDED',
   'CONFLICT',
   'RECONCILIATION_REQUIRED',
+  'REJECTED',
 ]);
+const FAILURE_STATES = new Set([
+  'VALIDATION_FAILED',
+  'FAILED',
+  'PARTIALLY_SUCCEEDED',
+  'CONFLICT',
+  'RECONCILIATION_REQUIRED',
+]);
+const FAILURE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+
+export function changeSetStatusLabel(item: Pick<ChangeSet, 'state' | 'approval_required'>) {
+  if (item.state === 'READY' && item.approval_required) return 'Awaiting approval';
+  const labels: Record<string, string> = {
+    FAILED: 'Failed',
+    SUCCEEDED: 'Succeeded',
+    VALIDATION_FAILED: 'Validation failed',
+    PARTIALLY_SUCCEEDED: 'Partially succeeded',
+    CONFLICT: 'Conflict',
+    RECONCILIATION_REQUIRED: 'Reconciliation required',
+    REJECTED: 'Rejected',
+  };
+  return labels[item.state] ?? item.state.charAt(0) + item.state.slice(1).toLowerCase();
+}
 
 export function ChangeSetPanel({
   activeGroupId,
@@ -57,6 +82,8 @@ export function ChangeSetPanel({
   const [executingId, setExecutingId] = useState('');
   const [deletingId, setDeletingId] = useState('');
   const [detailsId, setDetailsId] = useState('');
+  const [page, setPage] = useState(1);
+  const pageSize = useAdaptivePageSize();
   const selected = items.find((item) => item.id === detailsId);
 
   useEffect(() => {
@@ -85,6 +112,11 @@ export function ChangeSetPanel({
       window.clearInterval(refresh);
     };
   }, [activeGroupId, context.policy.id]);
+
+  useEffect(() => {
+    const pageCount = Math.max(1, Math.ceil(items.length / pageSize));
+    setPage((current) => Math.min(current, pageCount));
+  }, [items.length, pageSize]);
 
   const retry = async (item: ChangeSet) => {
     if (
@@ -125,7 +157,7 @@ export function ChangeSetPanel({
   };
 
   const remove = async (item: ChangeSet) => {
-    if (!window.confirm(`Delete the ${item.state.toLowerCase()} ChangeSet “${item.title}”?`))
+    if (!window.confirm(`Delete the ${item.state.toLowerCase()} Changeset “${item.title}”?`))
       return;
     setDeletingId(item.id);
     setError('');
@@ -141,12 +173,16 @@ export function ChangeSetPanel({
   };
 
   const inProgress = items.filter((item) => ['QUEUED', 'EXECUTING'].includes(item.state)).length;
-  const successful = items.filter((item) => item.state === 'SUCCEEDED').length;
-  const attention = items.filter((item) =>
-    ['FAILED', 'PARTIALLY_SUCCEEDED', 'CONFLICT', 'RECONCILIATION_REQUIRED'].includes(item.state),
+  const failureWindowStart = Date.now() - FAILURE_WINDOW_MS;
+  const recentSuccessful = items.filter(
+    (item) => item.state === 'SUCCEEDED' && Date.parse(item.updated_at) >= failureWindowStart,
   ).length;
+  const recentFailures = items.filter(
+    (item) => FAILURE_STATES.has(item.state) && Date.parse(item.updated_at) >= failureWindowStart,
+  ).length;
+  const pagedItems = items.slice((page - 1) * pageSize, page * pageSize);
 
-  if (loading) return <AppLoadingState label="Loading ChangeSets" />;
+  if (loading) return <AppLoadingState label="Loading Changesets" />;
 
   return (
     <Stack gap="lg">
@@ -154,7 +190,7 @@ export function ChangeSetPanel({
         <MetricCard
           label="Tracked"
           value={items.length}
-          detail="Validated and submitted ChangeSets"
+          detail="Validated and submitted Changesets"
           icon={<IconFileDiff size={19} />}
         />
         <MetricCard
@@ -164,15 +200,15 @@ export function ChangeSetPanel({
           icon={<IconLoader2 size={19} />}
         />
         <MetricCard
-          label="Succeeded"
-          value={successful}
+          label="Succeeded (30 days)"
+          value={recentSuccessful}
           detail="Provider writes completed"
           icon={<IconCircleCheck size={19} />}
         />
         <MetricCard
-          label="Needs attention"
-          value={attention}
-          detail="Failed, conflicted, or unresolved"
+          label="Failures (30 days)"
+          value={recentFailures}
+          detail="Validation, execution, or conflict failures"
           icon={<IconAlertTriangle size={19} />}
         />
       </SimpleGrid>
@@ -180,120 +216,119 @@ export function ChangeSetPanel({
         <Group justify="space-between" align="start" mb="md">
           <div>
             <Title id="changeset-heading" order={2} size="h4">
-              Submitted ChangeSets
+              Submitted Changesets
             </Title>
             <Text size="sm" c="dimmed">
               Provider configuration submissions and their current execution status.
             </Text>
           </div>
-          <AppStatusBadge
-            value={context.provider_writable ? 'ACTIVE' : 'READ_ONLY'}
-            label={context.provider_writable ? 'Submission enabled' : 'Provider read-only'}
-          />
         </Group>
 
         {error && (
-          <Alert color="red" title="ChangeSet status could not be loaded" mb="md" role="alert">
+          <Alert color="red" title="Changeset action could not be completed" mb="md" role="alert">
             {error}
           </Alert>
         )}
 
         {!error && items.length === 0 ? (
           <AppEmptyState
-            title="No ChangeSets for this policy"
-            description="Draft, validated, and submitted ChangeSets appear here."
+            title="No Changesets for this policy"
+            description="Draft, validated, and submitted Changesets appear here."
           />
         ) : (
           items.length > 0 && (
-            <AppDataTable label="Submitted ChangeSets">
-              <Table.Thead>
-                <Table.Tr>
-                  <Table.Th>ChangeSet</Table.Th>
-                  <Table.Th>Operations</Table.Th>
-                  <Table.Th>Provider</Table.Th>
-                  <Table.Th>Status</Table.Th>
-                  <Table.Th>Updated</Table.Th>
-                  <Table.Th>Actions</Table.Th>
-                </Table.Tr>
-              </Table.Thead>
-              <Table.Tbody>
-                {items.map((item) => (
-                  <Table.Tr key={item.id}>
-                    <Table.Td>
-                      <Text fw={650}>{item.title}</Text>
-                      {item.description && (
-                        <Text size="xs" c="dimmed" lineClamp={1}>
-                          {item.description}
-                        </Text>
-                      )}
-                    </Table.Td>
-                    <Table.Td>{item.operations.length}</Table.Td>
-                    <Table.Td>
-                      {context.provider_name} ({context.provider_type.toUpperCase()})
-                    </Table.Td>
-                    <Table.Td>
-                      <AppStatusBadge value={item.state} />
-                    </Table.Td>
-                    <Table.Td>{new Date(item.updated_at).toLocaleString()}</Table.Td>
-                    <Table.Td>
-                      <Group gap="xs" wrap="nowrap">
-                        <Button size="xs" variant="subtle" onClick={() => setDetailsId(item.id)}>
-                          View details
-                        </Button>
-                        <Button
-                          size="xs"
-                          variant="light"
-                          color="blue"
-                          loading={executingId === item.id}
-                          disabled={
-                            item.state !== 'READY' || Boolean(retryingId) || Boolean(executingId)
-                          }
-                          onClick={() => void execute(item)}
-                        >
-                          Execute
-                        </Button>
-                        <Button
-                          size="xs"
-                          variant="subtle"
-                          color="red"
-                          loading={deletingId === item.id}
-                          disabled={
-                            !['DRAFT', 'VALIDATION_FAILED', 'READY'].includes(item.state) ||
-                            Boolean(retryingId) ||
-                            Boolean(executingId) ||
-                            Boolean(deletingId)
-                          }
-                          onClick={() => void remove(item)}
-                        >
-                          Delete
-                        </Button>
-                        <Button
-                          size="xs"
-                          variant="light"
-                          loading={retryingId === item.id}
-                          disabled={
-                            !retryableChangeSet(item) || Boolean(retryingId) || Boolean(executingId)
-                          }
-                          onClick={() => void retry(item)}
-                        >
-                          Retry
-                        </Button>
-                      </Group>
-                    </Table.Td>
+            <div className="fm-changeset-table">
+              <AppDataTable label="Submitted Changesets">
+                <Table.Thead>
+                  <Table.Tr>
+                    <Table.Th>Changeset</Table.Th>
+                    <Table.Th>Operations</Table.Th>
+                    <Table.Th>Provider</Table.Th>
+                    <Table.Th>Status</Table.Th>
+                    <Table.Th>Updated</Table.Th>
+                    <Table.Th>Actions</Table.Th>
                   </Table.Tr>
-                ))}
-              </Table.Tbody>
-            </AppDataTable>
+                </Table.Thead>
+                <Table.Tbody>
+                  {pagedItems.map((item) => (
+                    <Table.Tr key={item.id}>
+                      <Table.Td>
+                        <Text fw={650}>{item.title}</Text>
+                        {item.description && (
+                          <Text size="xs" c="dimmed" lineClamp={1}>
+                            {item.description}
+                          </Text>
+                        )}
+                      </Table.Td>
+                      <Table.Td>{item.operations.length}</Table.Td>
+                      <Table.Td>
+                        {context.provider_name} ({context.provider_type.toUpperCase()})
+                      </Table.Td>
+                      <Table.Td>
+                        <AppStatusBadge value={item.state} label={changeSetStatusLabel(item)} />
+                      </Table.Td>
+                      <Table.Td>{new Date(item.updated_at).toLocaleString()}</Table.Td>
+                      <Table.Td>
+                        <Group gap="xs" wrap="nowrap">
+                          <AppActionButton intent="quiet" onClick={() => setDetailsId(item.id)}>
+                            View details
+                          </AppActionButton>
+                          {['READY', 'APPROVED'].includes(item.state) &&
+                            !(item.state === 'READY' && item.approval_required) && (
+                              <AppActionButton
+                                intent="secondary"
+                                loading={executingId === item.id}
+                                disabled={Boolean(retryingId) || Boolean(executingId)}
+                                onClick={() => void execute(item)}
+                              >
+                                Execute
+                              </AppActionButton>
+                            )}
+                          {['DRAFT', 'VALIDATION_FAILED', 'READY'].includes(item.state) && (
+                            <AppActionButton
+                              intent="quiet-danger"
+                              loading={deletingId === item.id}
+                              disabled={
+                                Boolean(retryingId) || Boolean(executingId) || Boolean(deletingId)
+                              }
+                              onClick={() => void remove(item)}
+                            >
+                              Delete
+                            </AppActionButton>
+                          )}
+                          {retryableChangeSet(item) && (
+                            <AppActionButton
+                              intent="secondary"
+                              loading={retryingId === item.id}
+                              disabled={Boolean(retryingId) || Boolean(executingId)}
+                              onClick={() => void retry(item)}
+                            >
+                              Retry
+                            </AppActionButton>
+                          )}
+                        </Group>
+                      </Table.Td>
+                    </Table.Tr>
+                  ))}
+                </Table.Tbody>
+              </AppDataTable>
+              <AdaptivePagination
+                page={page}
+                pageSize={pageSize}
+                total={items.length}
+                onPageChange={setPage}
+              />
+            </div>
           )
         )}
 
         <Dialog
           opened={Boolean(selected)}
           onClose={() => setDetailsId('')}
-          title="ChangeSet details"
+          title="Changeset details"
           size="xl"
           centered
-          closeButtonProps={{ 'aria-label': 'Close ChangeSet details' }}
+          closeButtonProps={{ 'aria-label': 'Close Changeset details' }}
           styles={{
             content: { maxHeight: 'calc(100dvh - 2rem)' },
             body: { overflowY: 'auto' },
@@ -329,7 +364,7 @@ export function ChangeSetDetails({
             </Text>
           )}
         </div>
-        <AppStatusBadge value={item.state} />
+        <AppStatusBadge value={item.state} label={changeSetStatusLabel(item)} />
       </Group>
 
       <Paper withBorder p="md">
@@ -345,7 +380,7 @@ export function ChangeSetDetails({
           <Detail label="Requested by" value={requestingUser(item)} />
           <Detail label="Created" value={new Date(item.created_at).toLocaleString()} />
           <Detail label="Last updated" value={new Date(item.updated_at).toLocaleString()} />
-          <Detail label="ChangeSet ID" value={item.id} code />
+          <Detail label="Changeset ID" value={item.id} code />
         </Group>
       </Paper>
 
@@ -366,14 +401,21 @@ export function ChangeSetDetails({
 
       {pendingWarnings.length > 0 && (
         <Alert color="yellow" title="Other provider changes are pending">
-          This ChangeSet was applied independently after re-reading its affected resources. Provider
-          deployment remains separate and may also deploy changes outside this ChangeSet.
+          This Changeset was applied independently after re-reading its affected resources. Provider
+          deployment remains separate and may also deploy changes outside this Changeset.
           {pendingWarnings.some((warning) => warning.actors.length > 0) && (
             <Text size="xs" mt={5}>
               Reported provider actors:{' '}
               {[...new Set(pendingWarnings.flatMap((warning) => warning.actors))].join(', ')}
             </Text>
           )}
+        </Alert>
+      )}
+
+      {item.state === 'REJECTED' && (
+        <Alert color="red" title="Rejected by an approver">
+          Rejected by {item.rejected_by_display_name ?? item.rejected_by_email ?? 'an approver'}:{' '}
+          {item.rejection_reason ?? 'No rejection reason was provided.'}
         </Alert>
       )}
 
@@ -591,6 +633,11 @@ function stringValue(value: unknown) {
 }
 
 function humanize(value: string) {
+  const objectTypeLabels: Record<string, string> = {
+    PORT_SERVICE: 'Port',
+    PORT_SERVICE_GROUP: 'Port Group',
+  };
+  if (objectTypeLabels[value]) return objectTypeLabels[value];
   return value
     .toLowerCase()
     .replaceAll('_', ' ')
@@ -629,7 +676,10 @@ function providerFailureDetails(item: ChangeSet) {
     }
     if (typeof value !== 'object' || value === null) return;
     const recordValue = value as Record<string, unknown>;
-    if (typeof recordValue.provider_status === 'number' || typeof recordValue.provider_status === 'string') {
+    if (
+      typeof recordValue.provider_status === 'number' ||
+      typeof recordValue.provider_status === 'string'
+    ) {
       details.push(`Provider returned HTTP ${String(recordValue.provider_status)}`);
     }
     if (Array.isArray(recordValue.provider_messages)) {
@@ -672,7 +722,14 @@ function pendingChangeWarnings(item: ChangeSet) {
 }
 
 function message(error: unknown) {
-  return error instanceof ApiError
-    ? `${error.message} Reference: ${error.correlationId}`
-    : 'The request failed.';
+  if (!(error instanceof ApiError)) return 'The request failed.';
+  const requiredState = error.details.required_state;
+  const approvalRequired =
+    error.code === 'INVALID_CHANGE_SET_STATE' &&
+    Array.isArray(requiredState) &&
+    requiredState.includes('APPROVED');
+  if (approvalRequired) {
+    return `This Changeset requires approval before it can be executed. An authorized approver must approve it first. Reference: ${error.correlationId}`;
+  }
+  return `${error.message} Reference: ${error.correlationId}`;
 }

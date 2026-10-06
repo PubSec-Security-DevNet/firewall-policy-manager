@@ -1,6 +1,7 @@
 """Idempotent worker tasks for health and queue-backed provider synchronization."""
 
 import asyncio
+import calendar
 import os
 from datetime import UTC, datetime, timedelta
 from typing import cast
@@ -22,6 +23,8 @@ from firewall_manager.persistence.changesets import SqlChangeSetRepository
 from firewall_manager.persistence.database import new_session
 from firewall_manager.persistence.models import (
     AccessPolicy,
+    AuditEvent,
+    AuthenticationEvent,
     AuthSession,
     ChangeSet,
     Deployment,
@@ -44,6 +47,7 @@ from firewall_manager.worker.broker import broker
 BROKER = broker
 
 WORKER_HEARTBEAT_KEY = "firewall-manager:worker:last-heartbeat"
+AUDIT_PURGE_LOCK_KEY = "firewall-manager:audit-retention:last-run"
 
 
 @dramatiq.actor(max_retries=3, min_backoff=1000)
@@ -69,6 +73,46 @@ def cleanup_expired_authentication() -> None:
         )
         cleanup_expired_api_tokens(session)
         session.commit()
+
+
+@dramatiq.actor(max_retries=1, min_backoff=5000)
+def purge_expired_audit_events() -> None:
+    """Purge audit and authentication evidence beyond the configured retention window."""
+    settings = get_settings()
+    redis = Redis.from_url(settings.redis_url, decode_responses=True)
+    try:
+        # The scheduler ticks frequently; use a Redis lease so this maintenance task runs once
+        # per day even when several scheduler ticks or worker processes are active.
+        if not redis.set(AUDIT_PURGE_LOCK_KEY, "1", nx=True, ex=86400):
+            return
+    finally:
+        redis.close()
+
+    try:
+        cutoff = subtract_calendar_months(datetime.now(UTC), settings.audit_retention_months)
+        with new_session() as session:
+            session.execute(delete(AuditEvent).where(AuditEvent.occurred_at < cutoff))
+            session.execute(
+                delete(AuthenticationEvent).where(AuthenticationEvent.occurred_at < cutoff)
+            )
+            session.commit()
+    except Exception:
+        # Let a transient database failure retry instead of suppressing maintenance for a day.
+        retry_redis = Redis.from_url(settings.redis_url, decode_responses=True)
+        try:
+            retry_redis.delete(AUDIT_PURGE_LOCK_KEY)
+        finally:
+            retry_redis.close()
+        raise
+
+
+def subtract_calendar_months(value: datetime, months: int) -> datetime:
+    """Subtract calendar months while preserving a valid day at month end."""
+    month_index = value.year * 12 + value.month - 1 - months
+    year, month_zero_based = divmod(month_index, 12)
+    month = month_zero_based + 1
+    day = min(value.day, calendar.monthrange(year, month)[1])
+    return value.replace(year=year, month=month, day=day)
 
 
 @dramatiq.actor(max_retries=0)
@@ -315,7 +359,7 @@ def enqueue_scheduled_deployments() -> None:
                     (ProviderConnection.deployment_status.is_(None))
                     # QUEUED means a batch exists and must still be dispatched. Only
                     # RUNNING suppresses creation of another batch for this connector.
-                    | ProviderConnection.deployment_status.notin_(("RUNNING",)),
+                    | ProviderConnection.deployment_status.notin_(("RUNNING", "NOT_APPLICABLE")),
                 )
             )
         )
@@ -363,10 +407,14 @@ def enqueue_scheduled_deployments() -> None:
             else:
                 result = {"status": "SCHEDULED_ONLY"}
             if result.get("id"):
-                connection.deployment_next_at = now + timedelta(minutes=15)
+                connection.deployment_next_at = now + timedelta(
+                    minutes=connection.deployment_interval_minutes
+                )
                 queued_ids.append(UUID(str(result["id"])))
             elif result.get("status") == "NO_PENDING_CHANGES":
-                connection.deployment_next_at = now + timedelta(minutes=15)
+                connection.deployment_next_at = now + timedelta(
+                    minutes=connection.deployment_interval_minutes
+                )
         session.commit()
     for deployment_id in queued_ids:
         execute_deployment_batch.send(str(deployment_id))
@@ -546,6 +594,30 @@ async def _execute_deployment_batch(deployment_id: UUID) -> None:  # noqa: PLR09
         except Exception as exc:
             session.rollback()
             deployment = session.get(Deployment, deployment_id)
+            details = getattr(exc, "details", None)
+            if (
+                deployment is not None
+                and deployment.state == "READY"
+                and isinstance(details, dict)
+                and details.get("code") == "NO_DEPLOYABLE_DEVICES"
+            ):
+                deployment.state = "NOT_DEPLOYED"
+                deployment.failure_info = {
+                    "code": "DEPLOYMENT_NOT_APPLICABLE",
+                    "reason": "POLICY_HAS_NO_ASSIGNED_DEVICES",
+                    "provider_messages": details.get("provider_messages", []),
+                }
+                deployment.plan_snapshot = {
+                    **deployment.plan_snapshot,
+                    "deployment_skipped": True,
+                    "skip_reason": "POLICY_HAS_NO_ASSIGNED_DEVICES",
+                }
+                connection.deployment_status = "NOT_APPLICABLE"
+                deployment.heartbeat_at = datetime.now(UTC)
+                deployment.lease_owner = None
+                deployment.lease_until = None
+                session.commit()
+                return
             if deployment is not None and deployment.rollback_state in ("READY", "ROLLING_BACK"):
                 deployment.rollback_state = "FAILED"
                 deployment.rollback_failure_info = {

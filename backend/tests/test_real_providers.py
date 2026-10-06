@@ -238,6 +238,33 @@ def test_real_object_payload_maps_network_hosts_subnets_and_ranges() -> None:
     )
 
 
+def test_real_object_payload_maps_fmc_icmp_fields() -> None:
+    assert RealFmcProvider._object_payload(  # pyright: ignore[reportPrivateUsage]
+        {
+            "object_type": "PORT_SERVICE",
+            "provider_name": "FINANCE__icmp",
+            "normalized_value": "icmp/ECHO_REPLY/ANY",
+        }
+    ) == (
+        "icmpv4objects",
+        {
+            "type": "ICMPV4Object",
+            "name": "FINANCE__icmp",
+            "icmpType": "0",
+        },
+    )
+    assert (
+        RealFmcProvider._object_payload(  # pyright: ignore[reportPrivateUsage]
+            {
+                "object_type": "PORT_SERVICE",
+                "provider_name": "FINANCE__icmp",
+                "normalized_value": "ipv6-icmp/ECHO_REQUEST/PORT_UNREACHABLE",
+            }
+        )[1]["code"]
+        == 4
+    )
+
+
 @pytest.mark.parametrize(
     ("endpoint", "criterion"),
     [
@@ -269,9 +296,14 @@ def test_system_application_criteria_are_sent_as_provider_app_conditions() -> No
     )
 
     assert payload == {
-        "appConditions": [
-            {"categories": [{"id": "category-1", "name": "Social"}]}
-        ]
+        "type": "ApplicationFilterCondition",
+        "categories": [
+            {
+                "id": "category-1",
+                "name": "Social",
+                "type": "ApplicationCategory",
+            }
+        ],
     }
 
 

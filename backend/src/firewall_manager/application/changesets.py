@@ -476,7 +476,7 @@ class ChangeSetService:
     ) -> dict[str, object]:
         """Approve exactly the validated revision; edits invalidate this evidence."""
         require_action(principal, Action.APPROVE)
-        current = self._load(principal, active_group_id, change_set_id)
+        current = self._load_for_approval(principal, active_group_id, change_set_id)
         if current["state"] != ChangeSetState.READY.value:
             raise InvalidChangeSetStateError
         result = self._repository.approve_change_set(principal, active_group_id, change_set_id)
@@ -490,6 +490,31 @@ class ChangeSetService:
             },
         )
         return result
+
+    def reject(
+        self, principal: Principal, active_group_id: UUID, change_set_id: UUID, reason: str
+    ) -> dict[str, object]:
+        """Reject a validated ChangeSet without applying any provider operations."""
+        require_action(principal, Action.REJECT)
+        current = self._load_for_approval(principal, active_group_id, change_set_id)
+        if current["state"] != ChangeSetState.READY.value:
+            raise InvalidChangeSetStateError
+        result = self._repository.reject_change_set(
+            principal, active_group_id, change_set_id, reason.strip()
+        )
+        self._audit_for(
+            current,
+            principal,
+            "change_set_rejected",
+            "DENY",
+            {"reason": reason.strip()},
+        )
+        return result
+
+    def dismiss_rejection_notice(
+        self, principal: Principal, active_group_id: UUID, change_set_id: UUID
+    ) -> dict[str, object]:
+        return self._repository.dismiss_rejection_notice(principal, active_group_id, change_set_id)
 
     def refresh(
         self, principal: Principal, active_group_id: UUID, change_set_id: UUID
@@ -524,9 +549,17 @@ class ChangeSetService:
         dispatch: Callable[[UUID, UUID, UUID, UUID], object],
     ) -> dict[str, object]:
         """Durably claim a validated ChangeSet and publish its security context."""
-        change_set = self._load(principal, active_group_id, change_set_id)
+        change_set = self._load_for_approval(principal, active_group_id, change_set_id)
         executable_states = (
-            {ChangeSetState.APPROVED.value}
+            {
+                ChangeSetState.APPROVED.value,
+                *(
+                    {ChangeSetState.READY.value}
+                    if change_set.get("approved_revision") is not None
+                    and change_set.get("approval_invalidated_at") is None
+                    else set()
+                ),
+            }
             if bool(change_set.get("approval_required"))
             else {ChangeSetState.READY.value, ChangeSetState.APPROVED.value}
         )
@@ -573,6 +606,7 @@ class ChangeSetService:
         """Revalidate and requeue a failed submission only after a known non-mutating attempt."""
         change_set = self._load(principal, active_group_id, change_set_id)
         retryable_state = change_set["state"] in {
+            ChangeSetState.VALIDATION_FAILED.value,
             ChangeSetState.FAILED.value,
             ChangeSetState.CONFLICT.value,
         }
@@ -684,6 +718,13 @@ class ChangeSetService:
             )
             self._audit_for(change_set, principal, "change_set_retry_failed", "DENY")
             return failed
+        # A retry of an approval-required submission must return to the approval
+        # queue. It has been revalidated, but it has not been approved for this
+        # new revision; queueing it for execution would produce the misleading
+        # "requires approval" execution error.
+        if bool(validated.get("approval_required")):
+            self._audit_for(change_set, principal, "change_set_retry_awaiting_approval", "ALLOW")
+            return validated
         return self.queue_execution(
             principal,
             active_group_id,
@@ -965,6 +1006,17 @@ class ChangeSetService:
             Action.READ,
             AuthorizationResource(AuthorizationResourceType.POLICY, policy_id),
         )
+        return row
+
+    def _load_for_approval(
+        self, principal: Principal, active_group_id: UUID, change_set_id: UUID
+    ) -> dict[str, object]:
+        """Load an approval target using the approval queue's organization scope."""
+        if principal.role not in {"admin", "firewall_operator"}:
+            return self._load(principal, active_group_id, change_set_id)
+        row = self._repository.get_change_set(principal, active_group_id, change_set_id)
+        if row is None:
+            raise ResourceOutOfScopeError
         return row
 
     def _evaluate_operation(
@@ -1428,7 +1480,7 @@ class ChangeSetService:
             for item in selected
             if member_type == "PORT_SERVICE" and "/" in str(item.get("normalized_value", ""))
         }
-        protocol_ok = len(protocols) <= 1
+        protocol_ok = protocols.issubset({"tcp", "udp"}) and len(protocols) <= 1
         self._append_decision(
             checks,
             ChangeOperationKind.CREATE_OBJECT,
@@ -1685,6 +1737,11 @@ class ChangeSetService:
     ) -> list[dict[str, object]]:
         conflicts: list[dict[str, object]] = []
         for operation in _as_dict_list(change_set["operations"]):
+            # Create operations do not overwrite an existing provider resource. A
+            # provider inventory revision may advance while approval is pending,
+            # but that must not force a user to manually retry a create-only request.
+            if str(operation.get("kind")) == ChangeOperationKind.CREATE_OBJECT.value:
+                continue
             expected = cast("dict[str, str]", _as_dict(operation["expected_revisions"]))
             current = self._repository.current_revision_snapshot(operation, organization_id)
             for resource, expected_revision in expected.items():

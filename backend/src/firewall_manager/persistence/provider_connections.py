@@ -117,6 +117,7 @@ class SqlProviderConnectionRepository:
             applications_sync_interval_minutes=int(
                 str(values.get("applications_sync_interval_minutes", 1440))
             ),
+            deployment_interval_minutes=int(str(values.get("deployment_interval_minutes", 15))),
             revision=1,
         )
         manager = FirewallManager(
@@ -165,6 +166,7 @@ class SqlProviderConnectionRepository:
             "sync_interval_minutes",
             "applications_sync_interval_minutes",
             "deployment_schedule_enabled",
+            "deployment_interval_minutes",
         ):
             if key in values:
                 setattr(row, key, values[key])
@@ -176,6 +178,8 @@ class SqlProviderConnectionRepository:
             row.last_error_code = None
             row.last_error_message = None
             row.next_sync_at = None
+        if "deployment_interval_minutes" in values:
+            row.deployment_next_at = None
         row.revision += 1
         manager = self._manager(organization_id, connection_id)
         manager.display_name = row.display_name
@@ -642,6 +646,7 @@ class SqlProviderConnectionRepository:
             "certificate_info": dict(row.certificate_info),
             "sync_interval_minutes": row.sync_interval_minutes,
             "applications_sync_interval_minutes": row.applications_sync_interval_minutes,
+            "deployment_interval_minutes": row.deployment_interval_minutes,
             "applications_sync_status": row.applications_sync_status,
             "applications_last_sync": row.applications_last_sync,
             "applications_last_successful_sync": row.applications_last_successful_sync,

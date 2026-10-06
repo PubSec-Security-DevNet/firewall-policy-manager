@@ -102,7 +102,7 @@ def _session(path: Path) -> Session:
                 identity_subject="normal",
                 email="normal@example.test",
                 display_name="Normal User",
-                role="viewer",
+                role="user",
             ),
             User(
                 id=GROUP_ADMIN,
@@ -111,7 +111,7 @@ def _session(path: Path) -> Session:
                 identity_subject="group-admin",
                 email="group-admin@example.test",
                 display_name="Group Admin",
-                role="group_admin",
+                role="user",
             ),
         ]
     )
@@ -669,9 +669,9 @@ async def test_provider_admin_boundary_bola_rotation_and_stale_updates(tmp_path:
     connection = _connections(service, admin, session)[0]
     connection_id = UUID(str(connection["id"]))
 
-    normal = _principal(NORMAL_USER, ORG, "viewer")
-    group_admin = _principal(GROUP_ADMIN, ORG, "group_admin")
-    for denied in (normal, group_admin):
+    normal = _principal(NORMAL_USER, ORG, "user")
+    group_user = _principal(GROUP_ADMIN, ORG, "user")
+    for denied in (normal, group_user):
         with pytest.raises(ResourceOutOfScopeError):
             service.list(denied)
         with pytest.raises(ResourceOutOfScopeError):

@@ -87,6 +87,45 @@ export interface DevelopmentIdentity {
   enabled: boolean;
 }
 
+export async function loadAdministratorContact(): Promise<{ email: string | null }> {
+  return get<{ email: string | null }>('/api/v1/auth/contact');
+}
+
+export async function logout(): Promise<void> {
+  await request<void>('/api/v1/auth/logout', { method: 'POST', body: '{}' });
+}
+
+export async function loadInitialSetupStatus(
+  recoveryCode?: string,
+): Promise<{ available: boolean; recovery: boolean }> {
+  const query = recoveryCode ? `?recovery_code=${encodeURIComponent(recoveryCode)}` : '';
+  return get<{ available: boolean; recovery: boolean }>(`/api/v1/auth/setup/status${query}`);
+}
+
+export async function createInitialSetup(
+  values: Record<string, unknown>,
+): Promise<{ organization_name: string; provider_id: string }> {
+  return request<{ organization_name: string; provider_id: string }>('/api/v1/auth/setup', {
+    method: 'POST',
+    body: JSON.stringify(values),
+  });
+}
+
+export async function testInitialSetup(
+  values: Record<string, unknown>,
+): Promise<{ login_url: string }> {
+  return request<{ login_url: string }>('/api/v1/auth/setup/test', {
+    method: 'POST',
+    body: JSON.stringify(values),
+  });
+}
+
+export async function loadInitialSetupDraft(draftId: string): Promise<Record<string, unknown>> {
+  return get<Record<string, unknown>>(
+    `/api/v1/auth/setup/test/draft/${encodeURIComponent(draftId)}`,
+  );
+}
+
 export interface ProviderConnectionScope {
   id: string;
   native_id: string;
@@ -131,6 +170,7 @@ export interface ProviderConnection {
   certificate_info: Record<string, string>;
   sync_interval_minutes: number;
   applications_sync_interval_minutes: number;
+  deployment_interval_minutes: number;
   applications_sync_status: string | null;
   applications_last_sync: string | null;
   applications_last_successful_sync: string | null;
@@ -178,6 +218,21 @@ export interface OidcProvider {
   updated_at: string;
 }
 
+export interface SmtpSettings {
+  id: string | null;
+  host: string;
+  port: number;
+  from_address: string;
+  encryption: 'NONE' | 'STARTTLS' | 'SSL_TLS';
+  authentication_required: boolean;
+  username: string | null;
+  password_configured: boolean;
+  custom_ca_configured: boolean;
+  configured: boolean;
+  revision: number;
+  updated_at: string | null;
+}
+
 export interface OidcLoginProvider {
   provider_id: string;
   kind: 'entra' | 'duo' | 'generic';
@@ -201,6 +256,17 @@ export async function exitProxySession(): Promise<void> {
 
 export async function loadOidcProviders(): Promise<OidcProvider[]> {
   return get<OidcProvider[]>('/api/v1/admin/oidc-providers');
+}
+
+export async function loadSmtpSettings(): Promise<SmtpSettings> {
+  return get<SmtpSettings>('/api/v1/admin/smtp');
+}
+
+export async function updateSmtpSettings(values: Record<string, unknown>): Promise<SmtpSettings> {
+  return request<SmtpSettings>('/api/v1/admin/smtp', {
+    method: 'PUT',
+    body: JSON.stringify(values),
+  });
 }
 
 export async function createOidcProvider(values: Record<string, unknown>): Promise<OidcProvider> {
@@ -611,14 +677,36 @@ export async function approveChangeSet(
   return changeSetAction(changeSetId, activeGroupId, 'approve');
 }
 
+export async function rejectChangeSet(
+  changeSetId: string,
+  activeGroupId: string,
+  reason: string,
+): Promise<ChangeSet> {
+  return request<ChangeSet>(`/api/v1/changesets/${encodeURIComponent(changeSetId)}/reject`, {
+    method: 'POST',
+    body: JSON.stringify({ active_group_id: activeGroupId, reason }),
+  });
+}
+
+export async function dismissChangeSetRejection(
+  changeSetId: string,
+  activeGroupId: string,
+): Promise<ChangeSet> {
+  return request<ChangeSet>(
+    `/api/v1/changesets/${encodeURIComponent(changeSetId)}/dismiss-rejection`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ active_group_id: activeGroupId }),
+    },
+  );
+}
+
 export async function loadDeployments(): Promise<Deployment[]> {
   return get<Deployment[]>('/api/v1/deployments');
 }
 
 export async function loadDeploymentChangeSets(deploymentId: string): Promise<ChangeSet[]> {
-  return get<ChangeSet[]>(
-    `/api/v1/deployments/${encodeURIComponent(deploymentId)}/changesets`,
-  );
+  return get<ChangeSet[]>(`/api/v1/deployments/${encodeURIComponent(deploymentId)}/changesets`);
 }
 
 export async function retryDeployment(
@@ -634,10 +722,10 @@ export async function rollbackDeployment(
   deploymentId: string,
   selectedChangeSetIds: string[],
 ): Promise<ChangeSet[]> {
-  return request<ChangeSet[]>(
-    `/api/v1/deployments/${encodeURIComponent(deploymentId)}/rollback`,
-    { method: 'POST', body: JSON.stringify({ selected_change_set_ids: selectedChangeSetIds }) },
-  );
+  return request<ChangeSet[]>(`/api/v1/deployments/${encodeURIComponent(deploymentId)}/rollback`, {
+    method: 'POST',
+    body: JSON.stringify({ selected_change_set_ids: selectedChangeSetIds }),
+  });
 }
 
 export interface Inventory {
@@ -653,10 +741,16 @@ export async function loadSynchronizationDiscrepancies(): Promise<Synchronizatio
   return get<SynchronizationDiscrepancy[]>('/api/v1/synchronization/discrepancies');
 }
 
-export async function acceptProviderState(driftId: string): Promise<{ id: string; state: string }> {
+export async function acceptProviderState(
+  driftId: string,
+  activeGroupId?: string,
+): Promise<{ id: string; state: string }> {
   return request<{ id: string; state: string }>(
     `/api/v1/synchronization/discrepancies/${encodeURIComponent(driftId)}/accept-provider-state`,
-    { method: 'POST', body: '{}' },
+    {
+      method: 'POST',
+      body: JSON.stringify(activeGroupId ? { active_group_id: activeGroupId } : {}),
+    },
   );
 }
 

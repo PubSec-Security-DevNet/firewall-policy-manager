@@ -139,7 +139,7 @@ describe('ProviderConnectionsPanel', () => {
 
     expect(await screen.findByText('Version untested')).toBeVisible();
     expect(screen.getByText(warning)).toBeVisible();
-    expect(screen.getByRole('button', { name: 'Enable production writes' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Enable writes' })).toBeEnabled();
     expect(screen.queryByText(/validation writes/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/non-production/i)).not.toBeInTheDocument();
   });

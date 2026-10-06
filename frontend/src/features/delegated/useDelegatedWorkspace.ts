@@ -32,6 +32,7 @@ export function useDelegatedWorkspace(
   preferredPolicyId?: string,
   includeApplications = true,
   includeRules = true,
+  viewKey = 'default',
 ) {
   const initialGroupId = groups.some((group) => group.id === preferredGroupId)
     ? (preferredGroupId ?? '')
@@ -52,6 +53,16 @@ export function useDelegatedWorkspace(
     if (!activeGroupId) return;
     const generation = ++requestGeneration.current;
     let current = true;
+    setState((existing) =>
+      existing.status === 'ready'
+        ? {
+            status: 'loading',
+            activeGroupId,
+            activePolicyId: existing.activePolicyId,
+            policies: existing.policies,
+          }
+        : existing,
+    );
     void loadDelegatedPolicies(activeGroupId)
       .then((policies) => {
         if (!current || generation !== requestGeneration.current) return;
@@ -97,7 +108,7 @@ export function useDelegatedWorkspace(
     return () => {
       current = false;
     };
-  }, [activeGroupId, includeApplications, includeRules]);
+  }, [activeGroupId, includeApplications, includeRules, viewKey]);
 
   useEffect(() => {
     if (!activeGroupId || !activePolicyId || state.status !== 'ready') return;
@@ -187,6 +198,22 @@ export function useDelegatedWorkspace(
     }
     selectPolicy(policyId);
   };
+  const refreshContext = async () => {
+    if (!activeGroupId || !activePolicyId || state.status !== 'ready') return;
+    const context = await loadDelegatedContext(
+      activeGroupId,
+      activePolicyId,
+      includeApplications,
+      includeRules,
+    );
+    setState((existing) =>
+      existing.status === 'ready' &&
+      existing.activeGroupId === activeGroupId &&
+      existing.activePolicyId === activePolicyId
+        ? { ...existing, context }
+        : existing,
+    );
+  };
   return {
     state,
     activeGroupId,
@@ -194,6 +221,7 @@ export function useDelegatedWorkspace(
     setActiveGroupId: selectGroup,
     setActivePolicyId: selectPolicy,
     activateMapping,
+    refreshContext,
   };
 }
 

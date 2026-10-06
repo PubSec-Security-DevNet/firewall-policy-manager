@@ -92,7 +92,7 @@ def viewer() -> Principal:
         UUID("30000000-0000-0000-0000-000000000001"),
         UUID("10000000-0000-0000-0000-000000000001"),
         "viewer@example.test",
-        "viewer",
+        "user",
     )
 
 
@@ -224,12 +224,10 @@ class FakeAdministrationRepository:
             "categories": [],
             "memberships": [],
             "policy_delegations": [],
-            "direct_user_policy_grants": [],
             "object_use_grants": [],
             "zone_grants": [],
             "ip_range_grants": [],
             "object_create_grants": [],
-            "category_mappings": [],
         }
 
     def revoke_authorization_resource(
@@ -337,7 +335,7 @@ def test_invalid_pagination_uses_canonical_error_envelope_and_correlation_id() -
     assert response.json()["error"] == {
         "code": "INVALID_REQUEST",
         "message": "The request parameters are invalid.",
-        "details": {},
+        "details": {"fields": ["limit"]},
         "correlation_id": "bad-page",
     }
 

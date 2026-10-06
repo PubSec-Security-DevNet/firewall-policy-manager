@@ -34,12 +34,10 @@ function snapshot(): AdministrationSnapshot {
         revision: 4,
       },
     ],
-    direct_user_policy_grants: [],
     object_use_grants: [],
     zone_grants: [],
     ip_range_grants: [],
     object_create_grants: [],
-    category_mappings: [],
   };
 }
 
@@ -73,13 +71,5 @@ describe('authorizationExpectedRevision', () => {
     expect(
       providerResourcesForPolicy(snapshot(), 'zone-grants', 'policy-1').map((item) => item.id),
     ).toEqual(['zone-1']);
-  });
-
-  it('only offers categories attached to the selected policy', () => {
-    expect(
-      providerResourcesForPolicy(snapshot(), 'category-mappings', 'policy-2').map(
-        (item) => item.id,
-      ),
-    ).toEqual(['category-2']);
   });
 });

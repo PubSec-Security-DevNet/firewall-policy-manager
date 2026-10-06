@@ -83,9 +83,7 @@ def _proposal(resource_type: str, status: str) -> dict[str, object]:
 def test_drift_restore_creates_complete_rule_changeset_operation() -> None:
     service, spy = _service(_proposal("access_rules", "DRIFTED"))
 
-    result = service.restore(
-        Principal(USER, ORG, "admin@example.test", "admin"), uuid4(), GROUP
-    )
+    result = service.restore(Principal(USER, ORG, "admin@example.test", "admin"), uuid4(), GROUP)
 
     assert result["action"] == "RESTORE_PROPOSED"
     kind, payload = spy.operations[0]
@@ -106,9 +104,7 @@ def test_missing_object_creates_recreate_changeset_operation() -> None:
     }
     service, spy = _service(proposal)
 
-    result = service.restore(
-        Principal(USER, ORG, "admin@example.test", "admin"), uuid4(), GROUP
-    )
+    result = service.restore(Principal(USER, ORG, "admin@example.test", "admin"), uuid4(), GROUP)
 
     assert result["action"] == "RECREATE_PROPOSED"
     kind, payload = spy.operations[0]

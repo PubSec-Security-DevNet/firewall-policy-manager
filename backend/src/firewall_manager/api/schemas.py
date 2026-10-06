@@ -23,6 +23,7 @@ class HealthResponse(BaseModel):
 
 
 class SessionResponse(BaseModel):
+    environment: Literal["development", "test", "staging", "production"]
     authentication_mode: Literal["development", "oidc"]
     user_id: UUID
     email: str
@@ -56,6 +57,52 @@ class DevelopmentIdentityResponse(BaseModel):
     enabled: bool
 
 
+class AdministratorContactResponse(BaseModel):
+    email: str | None = None
+
+
+class InitialSetupRequest(BaseModel):
+    recovery_code: str | None = None
+    setup_test_id: str | None = None
+    organization_name: str | None = Field(default=None, min_length=1, max_length=200)
+    admin_email: str = Field(min_length=3, max_length=320)
+    admin_display_name: str = Field(min_length=1, max_length=200)
+    admin_issuer: str | None = Field(default=None, max_length=500)
+    provider_id: str = Field(min_length=1, max_length=80, pattern=r"^[a-z0-9-]+$")
+    provider_kind: Literal["entra", "duo", "generic"]
+    provider_display_name: str = Field(min_length=1, max_length=120)
+    provider_issuer_url: str = Field(min_length=1, max_length=500)
+    provider_client_id: str = Field(min_length=1, max_length=300)
+    provider_client_secret: SecretStr
+
+
+class InitialSetupTestRequest(BaseModel):
+    recovery_code: str | None = None
+    admin_email: str = Field(min_length=3, max_length=320)
+    admin_display_name: str = Field(min_length=1, max_length=200)
+    admin_issuer: str | None = Field(default=None, max_length=500)
+    provider_id: str = Field(min_length=1, max_length=80, pattern=r"^[a-z0-9-]+$")
+    provider_kind: Literal["entra", "duo", "generic"]
+    provider_display_name: str = Field(min_length=1, max_length=120)
+    provider_issuer_url: str = Field(min_length=1, max_length=500)
+    provider_client_id: str = Field(min_length=1, max_length=300)
+    provider_client_secret: SecretStr
+
+
+class InitialSetupTestResponse(BaseModel):
+    login_url: str
+
+
+class InitialSetupStatusResponse(BaseModel):
+    available: bool
+    recovery: bool = False
+
+
+class InitialSetupResponse(BaseModel):
+    organization_name: str
+    provider_id: str
+
+
 class ActiveGroupResponse(BaseModel):
     id: UUID
     name: str
@@ -79,6 +126,11 @@ class ProviderSummary(BaseModel):
     rule_count: int = 0
     object_count: int
     writable: bool
+    sync_status: str | None = None
+    sync_complete: bool = False
+    resources_seen: int = 0
+    last_sync_at: datetime | None = None
+    error_code: str | None = None
 
 
 class OverviewResponse(BaseModel):
@@ -193,6 +245,7 @@ class DelegatedRuleResponse(BaseModel):
     logging: Literal["NONE", "BEGIN", "END"] = "NONE"
     position: int
     management_state: str
+    drift_id: UUID | None = None
     firewall_state: Literal["DEPLOYED", "UNDEPLOYED", "NOT_PRESENT", "UNKNOWN"] = "UNKNOWN"
     revision: int
     category_id: UUID | None = None
@@ -206,6 +259,7 @@ class DelegatedRuleResponse(BaseModel):
     source_services: list[str] = Field(default_factory=list)
     destination_services: list[str] = Field(default_factory=list)
     applications: list[str] = Field(default_factory=list)
+    application_object_ids: list[UUID] = Field(default_factory=list)
     urls: list[str] = Field(default_factory=list)
 
 
@@ -217,8 +271,10 @@ class DelegatedObjectResponse(BaseModel):
     management_state: str = "OBSERVED"
     firewall_state: Literal["DEPLOYED", "UNDEPLOYED", "NOT_PRESENT", "UNKNOWN"] = "UNKNOWN"
     owner_type: Literal["GROUP", "PROVIDER"] = "PROVIDER"
+    access_permission: Literal["use"] = "use"
     owner_group_id: UUID | None = None
     owner_policy_id: UUID | None = None
+    provider_metadata: dict[str, str] = Field(default_factory=dict)
     created_by_user_id: UUID | None = None
     member_object_ids: list[UUID] = Field(default_factory=list)
 
@@ -260,6 +316,7 @@ class DelegatedContextResponse(BaseModel):
     policy: DelegatedPolicySummary
     provider_writable: bool = False
     firewall_deployment_status: Literal["SUPPORTED", "NOT_AVAILABLE"] = "NOT_AVAILABLE"
+    policy_device_assignment: Literal["ASSIGNED", "UNASSIGNED", "UNKNOWN"] = "UNKNOWN"
     provider_type: Literal["fmc", "scc"] = "fmc"
     provider_name: str = "Provider"
     provider_is_mock: bool = True
@@ -276,11 +333,11 @@ class DelegatedContextResponse(BaseModel):
 
 
 class UserCreateRequest(BaseModel):
-    identity_issuer: str
-    identity_subject: str
-    display_name: str
-    email: str
-    role: str = "viewer"
+    display_name: str = Field(min_length=1, max_length=200)
+    email: str = Field(min_length=3, max_length=320)
+    identity_issuer: str | None = None
+    identity_subject: str | None = None
+    role: Literal["user", "approver", "firewall_operator", "admin"] = "user"
 
 
 class ExternalIdentityCreateRequest(BaseModel):
@@ -352,7 +409,7 @@ class GroupApprovalUpdateRequest(BaseModel):
 
 
 class UserRoleUpdateRequest(BaseModel):
-    role: Literal["viewer", "editor", "approver", "group_admin", "firewall_admin", "admin"]
+    role: Literal["user", "approver", "firewall_operator", "admin"]
     expected_revision: int
 
 
@@ -416,7 +473,35 @@ class OidcLoginProviderResponse(BaseModel):
     display_name: str
 
 
+class SmtpSettingsRequest(BaseModel):
+    host: str = Field(min_length=1, max_length=500)
+    port: int = Field(ge=1, le=65535)
+    from_address: str = Field(min_length=3, max_length=320)
+    encryption: Literal["NONE", "STARTTLS", "SSL_TLS"]
+    authentication_required: bool = False
+    username: str | None = Field(default=None, max_length=320)
+    password: SecretStr | None = None
+    custom_ca_certificate: str | None = Field(default=None, max_length=100_000)
+    expected_revision: int = Field(default=0, ge=0)
+
+
+class SmtpSettingsResponse(BaseModel):
+    id: UUID | None = None
+    host: str = ""
+    port: int = 587
+    from_address: str = ""
+    encryption: Literal["NONE", "STARTTLS", "SSL_TLS"] = "STARTTLS"
+    authentication_required: bool = False
+    username: str | None = None
+    password_configured: bool = False
+    custom_ca_configured: bool = False
+    configured: bool = False
+    revision: int = 0
+    updated_at: datetime | None = None
+
+
 class AuthorizationResourceUpsertRequest(BaseModel):
+    id: UUID | None = None
     user_id: UUID | None = None
     group_id: UUID | None = None
     policy_id: UUID | None = None
@@ -444,12 +529,10 @@ class AdministrationSnapshotResponse(BaseModel):
     categories: list[dict[str, object]]
     memberships: list[dict[str, object]]
     policy_delegations: list[dict[str, object]]
-    direct_user_policy_grants: list[dict[str, object]]
     object_use_grants: list[dict[str, object]]
     zone_grants: list[dict[str, object]]
     ip_range_grants: list[dict[str, object]]
     object_create_grants: list[dict[str, object]]
-    category_mappings: list[dict[str, object]]
     audit_events: list[dict[str, object]] = Field(default_factory=list)
 
 
@@ -502,6 +585,7 @@ class ProviderConnectionResponse(BaseModel):
     applications_last_successful_sync: datetime | None
     applications_next_sync_at: datetime | None
     deployment_schedule_enabled: bool = True
+    deployment_interval_minutes: int = Field(default=15, ge=5, le=10080)
     deployment_paused: bool = False
     deployment_pause_reason: str | None = None
     deployment_paused_at: datetime | None = None
@@ -541,6 +625,7 @@ class ProviderConnectionCreateRequest(BaseModel):
     ca_certificate: SecretStr | None = Field(default=None, repr=False)
     sync_interval_minutes: int = Field(default=60, ge=5, le=10080)
     applications_sync_interval_minutes: int = Field(default=1440, ge=60, le=43200)
+    deployment_interval_minutes: int = Field(default=15, ge=5, le=10080)
 
     @model_validator(mode="after")
     def validate_provider_fields(self) -> "ProviderConnectionCreateRequest":
@@ -567,6 +652,7 @@ class ProviderConnectionUpdateRequest(BaseModel):
     sync_interval_minutes: int | None = Field(default=None, ge=5, le=10080)
     applications_sync_interval_minutes: int | None = Field(default=None, ge=60, le=43200)
     deployment_schedule_enabled: bool | None = None
+    deployment_interval_minutes: int | None = Field(default=None, ge=5, le=10080)
 
 
 class ProviderCredentialUpdateRequest(BaseModel):
@@ -672,10 +758,15 @@ class DraftRuleOperationRequest(BaseModel):
             rule = self.rule
             if not rule.source_zone_ids or not rule.destination_zone_ids:
                 raise ValueError("source and destination zones are required")
-            if not rule.source_object_ids and not rule.manual_source_networks:
-                raise ValueError("at least one source network is required")
-            if not rule.destination_object_ids and not rule.manual_destination_networks:
-                raise ValueError("at least one destination network is required")
+            has_source_network = bool(rule.source_object_ids or rule.manual_source_networks)
+            has_destination_network = bool(
+                rule.destination_object_ids or rule.manual_destination_networks
+            )
+            if not has_source_network and not has_destination_network:
+                raise ValueError(
+                    "at least one source or destination network is required; "
+                    "both sides cannot be Any"
+                )
         return self
 
 
@@ -726,6 +817,15 @@ class ChangeSetActionRequest(BaseModel):
     active_group_id: UUID
 
 
+class ChangeSetNotificationDismissRequest(BaseModel):
+    active_group_id: UUID
+
+
+class ChangeSetRejectionRequest(BaseModel):
+    active_group_id: UUID
+    reason: str = Field(min_length=1, max_length=2000)
+
+
 class ChangeSetOperationResponse(BaseModel):
     id: UUID
     manager_id: UUID
@@ -772,6 +872,7 @@ class ChangeSetResponse(BaseModel):
     creator_display_name: str | None = None
     creator_email: str | None = None
     active_group_id: UUID
+    active_group_name: str | None = None
     access_policy_id: UUID
     approval_required: bool = False
     target_policy_ids: list[str]
@@ -786,6 +887,12 @@ class ChangeSetResponse(BaseModel):
     approved_by_user_id: UUID | None = None
     approved_revision: int | None = None
     approval_invalidated_at: datetime | None = None
+    rejected_at: datetime | None = None
+    rejected_by_user_id: UUID | None = None
+    rejected_by_display_name: str | None = None
+    rejected_by_email: str | None = None
+    rejection_reason: str | None = None
+    rejection_notice_dismissed_at: datetime | None = None
     execution_owner: str | None = None
     execution_lease_until: datetime | None = None
     execution_heartbeat_at: datetime | None = None

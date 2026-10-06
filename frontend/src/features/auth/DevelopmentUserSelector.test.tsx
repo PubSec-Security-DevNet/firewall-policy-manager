@@ -24,7 +24,7 @@ describe('DevelopmentUserSelector', () => {
             {
               email: 'disabled@example.test',
               display_name: 'Disabled User',
-              role: 'viewer',
+              role: 'user',
               enabled: false,
             },
           ]),
@@ -40,6 +40,6 @@ describe('DevelopmentUserSelector', () => {
     const selector = await screen.findByRole('textbox', { name: 'Development user' });
     await userEvent.setup().click(selector);
     expect(screen.getByText(/Platform Admin — admin/)).toBeInTheDocument();
-    expect(screen.getByText(/Disabled User — viewer \(disabled\)/)).toBeInTheDocument();
+    expect(screen.getByText(/Disabled User — user \(disabled\)/)).toBeInTheDocument();
   });
 });

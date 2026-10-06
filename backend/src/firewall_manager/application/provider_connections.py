@@ -600,6 +600,8 @@ class ProviderConnectionService:
             "display_name",
             "sync_interval_minutes",
             "applications_sync_interval_minutes",
+            "deployment_schedule_enabled",
+            "deployment_interval_minutes",
         }
         if provider is ProviderKind.FMC:
             allowed.update({"base_endpoint", "tls_mode"})
@@ -622,6 +624,15 @@ class ProviderConnectionService:
             if not 60 <= applications_interval <= 43200:
                 raise InvalidInputError
             result["applications_sync_interval_minutes"] = applications_interval
+        if "deployment_schedule_enabled" in result and not isinstance(
+            result["deployment_schedule_enabled"], bool
+        ):
+            raise InvalidInputError
+        if "deployment_interval_minutes" in result:
+            deployment_interval = int(str(result["deployment_interval_minutes"]))
+            if not 5 <= deployment_interval <= 10080:
+                raise InvalidInputError
+            result["deployment_interval_minutes"] = deployment_interval
         if "base_endpoint" in result:
             result["base_endpoint"] = normalize_fmc_endpoint(str(result["base_endpoint"]))
         if "tls_mode" in result:

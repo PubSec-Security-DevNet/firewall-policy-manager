@@ -1,11 +1,14 @@
 """Thin versioned REST routes."""
 
+import json
 from datetime import UTC, datetime
 from typing import Annotated, Literal, cast
-from uuid import UUID
+from urllib.parse import quote
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, Query, Request, Response
 from fastapi.responses import PlainTextResponse, RedirectResponse
+from redis import Redis
 from sqlalchemy import select
 
 from firewall_manager.api.dependencies import (
@@ -27,6 +30,7 @@ from firewall_manager.api.dependencies import (
 from firewall_manager.api.schemas import (
     ActiveGroupResponse,
     AdministrationSnapshotResponse,
+    AdministratorContactResponse,
     ApiTokenCreatedResponse,
     ApiTokenCreateRequest,
     ApiTokenResponse,
@@ -34,6 +38,8 @@ from firewall_manager.api.schemas import (
     ChangeSetActionRequest,
     ChangeSetCreateRequest,
     ChangeSetMetadataUpdateRequest,
+    ChangeSetNotificationDismissRequest,
+    ChangeSetRejectionRequest,
     ChangeSetResponse,
     DefaultContextRequest,
     DefaultContextResponse,
@@ -54,6 +60,11 @@ from firewall_manager.api.schemas import (
     GroupApprovalUpdateRequest,
     GroupCreateRequest,
     HealthResponse,
+    InitialSetupRequest,
+    InitialSetupResponse,
+    InitialSetupStatusResponse,
+    InitialSetupTestRequest,
+    InitialSetupTestResponse,
     ManagerResponse,
     ObjectResponse,
     OidcLoginProviderResponse,
@@ -79,6 +90,8 @@ from firewall_manager.api.schemas import (
     ReconciliationRestoreRequest,
     RuleResponse,
     SessionResponse,
+    SmtpSettingsRequest,
+    SmtpSettingsResponse,
     SynchronizationDiscrepancyResponse,
     UserCreateRequest,
     UserRoleUpdateRequest,
@@ -92,6 +105,7 @@ from firewall_manager.application.errors import (
     ApplicationError,
     InvalidChangeSetStateError,
     InvalidInputError,
+    NotAuthenticatedError,
     ResourceOutOfScopeError,
 )
 from firewall_manager.application.inventory import InventoryService
@@ -100,7 +114,9 @@ from firewall_manager.application.overview import OverviewService
 from firewall_manager.application.ports import ProviderFactory, ProviderReader
 from firewall_manager.application.provider_connections import ProviderConnectionService
 from firewall_manager.application.reconciliation import ReconciliationService
-from firewall_manager.config import get_settings
+from firewall_manager.application.setup import InitialSetupService
+from firewall_manager.application.smtp_admin import SmtpAdministrationService
+from firewall_manager.config import OidcProviderConfig, get_settings
 from firewall_manager.domain.models import (
     Action,
     ChangeOperationKind,
@@ -122,7 +138,13 @@ from firewall_manager.providers.transactions import (
     ProviderTransactionExecutor,
 )
 from firewall_manager.security import api_tokens
-from firewall_manager.security.oidc import STATE_COOKIE_PREFIX, OidcService
+from firewall_manager.security.oidc import (
+    STATE_COOKIE_PREFIX,
+    OidcService,
+    _unb64,
+    _verify,
+    redirect_uri,
+)
 
 router = APIRouter(prefix="/api/v1")
 dev_router = APIRouter(prefix="/api/v1/dev", tags=["development-auth"])
@@ -153,6 +175,7 @@ async def oidc_login(
 ) -> RedirectResponse:
     """Start Authorization Code flow for a deployment-configured provider."""
     redirect = RedirectResponse("/", status_code=303)
+    redirect.delete_cookie("fm_setup_test", path="/api/v1/auth")
     target = await OidcService(session, get_settings()).begin(provider_id, redirect)
     redirect.headers["location"] = target
     return redirect
@@ -191,6 +214,211 @@ async def oidc_login_providers(session: SessionDependency) -> list[OidcLoginProv
     return sorted(configured.values(), key=lambda item: item.display_name.casefold())
 
 
+@auth_router.get("/contact", include_in_schema=True)
+async def administrator_contact() -> AdministratorContactResponse:
+    """Expose only the deployment-configured administrator contact address."""
+    return AdministratorContactResponse(email=get_settings().administrator_email or None)
+
+
+@auth_router.get("/setup/status", include_in_schema=True)
+async def initial_setup_status(
+    session: SessionDependency,
+    secret_store: SecretStoreDependency,
+    recovery_code: Annotated[str | None, Query()] = None,
+) -> InitialSetupStatusResponse:
+    service = InitialSetupService(session, secret_store)
+    return InitialSetupStatusResponse(
+        available=service.available(),
+        recovery=service.recovery_available(recovery_code),
+    )
+
+
+@auth_router.post("/setup", status_code=201, include_in_schema=True)
+async def initial_setup(
+    body: InitialSetupRequest,
+    session: SessionDependency,
+    secret_store: SecretStoreDependency,
+) -> InitialSetupResponse:
+    values = body.model_dump(exclude={"provider_client_secret", "recovery_code", "setup_test_id"})
+    values["admin_issuer"] = body.provider_issuer_url
+    values["provider_client_secret"] = body.provider_client_secret.get_secret_value()
+    await _test_setup_provider(
+        values, body.recovery_code, body.setup_test_id, session, secret_store
+    )
+    result = InitialSetupService(session, secret_store).create(values)
+    if body.setup_test_id:
+        Redis.from_url(get_settings().redis_url, decode_responses=True).delete(
+            f"firewall-manager:setup-test:{body.setup_test_id}"
+        )
+    return InitialSetupResponse.model_validate(result)
+
+
+@auth_router.post("/setup/test", include_in_schema=True)
+async def test_initial_setup(
+    body: InitialSetupTestRequest,
+    session: SessionDependency,
+    secret_store: SecretStoreDependency,
+) -> InitialSetupTestResponse:
+    values = body.model_dump(exclude={"provider_client_secret", "recovery_code"})
+    values["admin_issuer"] = body.provider_issuer_url
+    values["provider_client_secret"] = body.provider_client_secret.get_secret_value()
+    service = InitialSetupService(session, secret_store)
+    if not service.available() and not service.recovery_available(body.recovery_code):
+        raise ResourceOutOfScopeError
+    config = _setup_provider_config(values)
+    await OidcService(session, get_settings()).discover(config)
+    draft_id = str(UUID(int=uuid4().int))
+    Redis.from_url(get_settings().redis_url, decode_responses=True).setex(
+        f"firewall-manager:setup-test:{draft_id}",
+        600,
+        json.dumps(
+            {
+                **values,
+                "recovery_code": body.recovery_code,
+                "provider_client_secret": config.client_secret.get_secret_value(),
+                "tested": False,
+            }
+        ),
+    )
+    return InitialSetupTestResponse(login_url=f"/api/v1/auth/setup/test/login?draft_id={draft_id}")
+
+
+@auth_router.get("/setup/test/draft/{draft_id}")
+async def setup_test_draft(draft_id: str) -> dict[str, object]:
+    redis = Redis.from_url(get_settings().redis_url, decode_responses=True)
+    raw = redis.get(f"firewall-manager:setup-test:{draft_id}")
+    redis.close()
+    if not raw:
+        raise InvalidInputError(details={"reason": "test sign-in expired; test again"})
+    draft = json.loads(raw)
+    return {
+        key: value
+        for key, value in draft.items()
+        if key not in {"provider_client_secret", "recovery_code", "tested"}
+    }
+
+
+async def _test_setup_provider(
+    values: dict[str, object],
+    recovery_code: str | None,
+    setup_test_id: str | None,
+    session: SessionDependency,
+    secret_store: SecretStoreDependency,
+) -> OidcProviderConfig:
+    service = InitialSetupService(session, secret_store)
+    if not setup_test_id:
+        raise InvalidInputError(details={"reason": "test sign-in must succeed before saving"})
+    redis = Redis.from_url(get_settings().redis_url, decode_responses=True)
+    draft = redis.get(f"firewall-manager:setup-test:{setup_test_id}")
+    redis.close()
+    if not draft:
+        raise InvalidInputError(details={"reason": "test sign-in expired; test again"})
+    draft_values = json.loads(draft)
+    effective_recovery_code = recovery_code or draft_values.get("recovery_code")
+    if not service.available() and not service.recovery_available(effective_recovery_code):
+        raise ResourceOutOfScopeError
+    values["admin_subject"] = draft_values.get("admin_subject")
+    if any(
+        values.get(key) != draft_values.get(key)
+        for key in draft_values
+        if key not in {"admin_email", "recovery_code", "tested", "provider_client_secret"}
+    ):
+        raise InvalidInputError(details={"reason": "provider settings changed; test again"})
+    if not draft_values.get("tested"):
+        raise InvalidInputError(details={"reason": "test sign-in did not succeed"})
+    values["recovery_code"] = effective_recovery_code
+    values["provider_client_secret"] = draft_values["provider_client_secret"]
+    return _setup_provider_config(values)
+
+
+def _setup_provider_config(values: dict[str, object]) -> OidcProviderConfig:
+    try:
+        return OidcProviderConfig.model_validate(
+            {
+                "id": values.get("provider_id"),
+                "kind": values.get("provider_kind"),
+                "display_name": values.get("provider_display_name"),
+                "issuer_url": values.get("provider_issuer_url"),
+                "client_id": values.get("provider_client_id"),
+                "client_secret": values.get("provider_client_secret"),
+            }
+        )
+    except ValueError as exc:
+        raise InvalidInputError(details={"reason": "provider configuration is invalid"}) from exc
+
+
+@auth_router.get("/setup/test/login")
+async def setup_test_login(draft_id: str, session: SessionDependency) -> RedirectResponse:
+    redis = Redis.from_url(get_settings().redis_url, decode_responses=True)
+    draft = redis.get(f"firewall-manager:setup-test:{draft_id}")
+    redis.close()
+    if not draft:
+        raise InvalidInputError(details={"reason": "test sign-in expired; test again"})
+    config = _setup_provider_config(json.loads(draft))
+    redirect = RedirectResponse("/", status_code=303)
+    target = await OidcService(session, get_settings()).begin_ephemeral_test(
+        config,
+        redirect,
+        redirect_uri(get_settings(), config.id),
+        draft_id,
+    )
+    redirect.headers["location"] = target
+    return redirect
+
+
+@auth_router.get("/setup/test/callback")
+async def setup_test_callback(
+    code: str,
+    state: str,
+    request: Request,
+    session: SessionDependency,
+) -> RedirectResponse:
+    redis = Redis.from_url(get_settings().redis_url, decode_responses=True)
+    try:
+        raw_state = _verify(state, get_settings())
+        if raw_state is None:
+            raise NotAuthenticatedError
+        state_payload = json.loads(_unb64(raw_state))
+        draft_id = str(state_payload["draft_id"])
+        draft_json = redis.get(f"firewall-manager:setup-test:{draft_id}")
+        if not draft_json:
+            raise NotAuthenticatedError
+        result = await OidcService(session, get_settings()).complete_ephemeral_test(
+            _setup_provider_config(json.loads(draft_json)),
+            code,
+            state,
+            request.cookies.get("fm_setup_test"),
+            redirect_uri(get_settings(), _setup_provider_config(json.loads(draft_json)).id),
+        )
+        draft = json.loads(draft_json)
+        email = result["claims"].get("email")
+        if (
+            not isinstance(email, str)
+            or email.casefold() != str(draft.get("admin_email", "")).casefold()
+        ):
+            raise NotAuthenticatedError
+        subject = result["claims"].get("sub")
+        if not isinstance(subject, str) or not subject:
+            raise NotAuthenticatedError
+        draft["admin_subject"] = subject
+        draft["tested"] = True
+        redis.setex(f"firewall-manager:setup-test:{draft_id}", 600, json.dumps(draft))
+    except (ApplicationError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+        redis.close()
+        return RedirectResponse("/?setup_test=failed", status_code=303)
+    redis.close()
+    recovery_query = (
+        f"&setup_recovery={quote(str(draft.get('recovery_code')), safe='')}"
+        if draft.get("recovery_code")
+        else ""
+    )
+    response = RedirectResponse(
+        f"/?setup_test=success&setup_test_id={draft_id}{recovery_query}", status_code=303
+    )
+    response.delete_cookie("fm_setup_test", path="/api/v1/auth")
+    return response
+
+
 @auth_router.get("/{provider_id}/callback", include_in_schema=True)
 async def oidc_callback(
     provider_id: str,
@@ -199,6 +427,8 @@ async def oidc_callback(
     request: Request,
     session: SessionDependency,
 ) -> RedirectResponse:
+    if request.cookies.get("fm_setup_test"):
+        return await setup_test_callback(code, state, request, session)
     response = RedirectResponse(f"{get_settings().app_public_url.rstrip('/')}/", status_code=303)
     try:
         test_only = await OidcService(session, get_settings()).callback(
@@ -275,6 +505,7 @@ async def session(
         principal.user_id, principal.organization_id
     )
     return SessionResponse(
+        environment=get_settings().app_environment,
         authentication_mode="development" if get_settings().dev_auth_enabled else "oidc",
         user_id=principal.user_id,
         email=principal.email,
@@ -564,16 +795,45 @@ async def refresh_change_set(
 
 
 @router.post("/changesets/{change_set_id}/approve", tags=["change-sets"])
-async def approve_change_set(
+async def approve_change_set(  # noqa: PLR0913, PLR0917 -- approval also publishes execution
     change_set_id: UUID,
     body: ChangeSetActionRequest,
     principal: PrincipalDependency,
     authorization_repository: AuthorizationRepositoryDependency,
     change_set_repository: ChangeSetRepositoryDependency,
+    dispatch: ChangeSetExecutionDispatcherDependency,
 ) -> ChangeSetResponse:
-    result = _change_set_service(authorization_repository, change_set_repository).approve(
-        principal, body.active_group_id, change_set_id
+    service = _change_set_service(authorization_repository, change_set_repository)
+    service.approve(principal, body.active_group_id, change_set_id)
+    result = service.queue_execution(principal, body.active_group_id, change_set_id, dispatch)
+    return ChangeSetResponse.model_validate(result)
+
+
+@router.post("/changesets/{change_set_id}/reject", tags=["change-sets"])
+async def reject_change_set(
+    change_set_id: UUID,
+    body: ChangeSetRejectionRequest,
+    principal: PrincipalDependency,
+    authorization_repository: AuthorizationRepositoryDependency,
+    change_set_repository: ChangeSetRepositoryDependency,
+) -> ChangeSetResponse:
+    result = _change_set_service(authorization_repository, change_set_repository).reject(
+        principal, body.active_group_id, change_set_id, body.reason
     )
+    return ChangeSetResponse.model_validate(result)
+
+
+@router.post("/changesets/{change_set_id}/dismiss-rejection", tags=["change-sets"])
+async def dismiss_rejection_notice(
+    change_set_id: UUID,
+    body: ChangeSetNotificationDismissRequest,
+    principal: PrincipalDependency,
+    authorization_repository: AuthorizationRepositoryDependency,
+    change_set_repository: ChangeSetRepositoryDependency,
+) -> ChangeSetResponse:
+    result = _change_set_service(
+        authorization_repository, change_set_repository
+    ).dismiss_rejection_notice(principal, body.active_group_id, change_set_id)
     return ChangeSetResponse.model_validate(result)
 
 
@@ -849,6 +1109,50 @@ async def list_oidc_providers(
     return [OidcProviderResponse.model_validate(item) for item in result]
 
 
+@router.get("/admin/smtp", tags=["administration"])
+async def get_smtp_settings(
+    principal: PrincipalDependency,
+    session: SessionDependency,
+    authorization_repository: AuthorizationRepositoryDependency,
+    secret_store: SecretStoreDependency,
+) -> SmtpSettingsResponse:
+    settings = get_settings()
+    result = SmtpAdministrationService(session, authorization_repository, secret_store).get(
+        principal,
+        {
+            "host": settings.smtp_host or "",
+            "port": settings.smtp_port,
+            "from_address": settings.smtp_from or "",
+            "encryption": "SSL_TLS"
+            if settings.smtp_use_ssl
+            else "STARTTLS"
+            if settings.smtp_use_starttls
+            else "NONE",
+            "authentication_required": bool(settings.smtp_username),
+            "username": settings.smtp_username,
+            "password_configured": settings.smtp_password is not None,
+        },
+    )
+    return SmtpSettingsResponse.model_validate(result)
+
+
+@router.put("/admin/smtp", tags=["administration"])
+async def update_smtp_settings(
+    body: SmtpSettingsRequest,
+    principal: PrincipalDependency,
+    session: SessionDependency,
+    authorization_repository: AuthorizationRepositoryDependency,
+    secret_store: SecretStoreDependency,
+) -> SmtpSettingsResponse:
+    values = body.model_dump(exclude={"password"}, exclude_unset=True)
+    if body.password is not None:
+        values["password"] = body.password.get_secret_value()
+    result = SmtpAdministrationService(session, authorization_repository, secret_store).upsert(
+        principal, values
+    )
+    return SmtpSettingsResponse.model_validate(result)
+
+
 @router.post("/admin/oidc-providers", status_code=201, tags=["administration"])
 async def create_oidc_provider(
     body: OidcProviderCreateRequest,
@@ -971,6 +1275,7 @@ async def create_provider_connection(
         "ca_certificate": body.ca_certificate.get_secret_value() if body.ca_certificate else None,
         "sync_interval_minutes": body.sync_interval_minutes,
         "applications_sync_interval_minutes": body.applications_sync_interval_minutes,
+        "deployment_interval_minutes": body.deployment_interval_minutes,
     }
     result = _provider_connection_service(
         authorization_repository, connection_repository, secret_store
@@ -1435,8 +1740,11 @@ async def accept_provider_state(
     drift_id: UUID,
     principal: PrincipalDependency,
     repository: InventoryRepositoryDependency,
+    body: ReconciliationRestoreRequest | None = None,
 ) -> dict[str, object]:
-    return InventoryService(repository).accept_provider_state(principal, drift_id)
+    return InventoryService(repository).accept_provider_state(
+        principal, drift_id, body.active_group_id if body else None
+    )
 
 
 @router.post(

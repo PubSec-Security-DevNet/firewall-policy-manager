@@ -44,7 +44,7 @@ class FakeAuthorizationRepository:
             (ENGINEERING, POLICY_A, ENGINEERING_OBJECT): (
                 MANAGER,
                 "OBSERVED",
-                {"read", "use"},
+                {"use"},
                 4,
             ),
         }
@@ -191,7 +191,7 @@ class FakeAuthorizationRepository:
 
 def context(group_id: UUID = FINANCE, policy_id: UUID = POLICY_A) -> DelegatedPolicyContext:
     return DelegatedPolicyContext(
-        Principal(USER, ORG, "alice@example.test", "viewer"), group_id, policy_id
+        Principal(USER, ORG, "alice@example.test", "user"), group_id, policy_id
     )
 
 
@@ -321,15 +321,15 @@ def test_granted_resources_from_another_policy_manager_are_denied() -> None:
     ).allowed
 
 
-def test_read_does_not_imply_object_use_and_drift_fails_closed() -> None:
+def test_without_object_use_grant_access_is_denied() -> None:
     repository = FakeAuthorizationRepository()
     repository.objects[(FINANCE, POLICY_A, FINANCE_OBJECT)] = (
         MANAGER,
         "OBSERVED",
-        {"read"},
+        set(),
         5,
     )
-    assert authorize(
+    assert not authorize(
         repository,
         AuthorizationResourceType.OBJECT,
         action=Action.READ,
@@ -469,7 +469,7 @@ def test_direct_user_grant_is_only_effective_in_same_group_policy() -> None:
 def test_only_current_enabled_admin_can_manage_grants() -> None:
     repository = FakeAuthorizationRepository()
     admin = Principal(USER, ORG, "admin@example.test", "admin")
-    delegated = Principal(USER, ORG, "alice@example.test", "viewer")
+    delegated = Principal(USER, ORG, "alice@example.test", "user")
     assert AuthorizationService(repository).authorize_administration(admin).allowed
     assert not AuthorizationService(repository).authorize_administration(delegated).allowed
     repository.user_enabled = False

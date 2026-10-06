@@ -26,7 +26,10 @@ class OverviewService:
             raise ResourceOutOfScopeError
         normalized_summaries = getattr(self._repository, "provider_summaries", None)
         if normalized_summaries is not None:
-            providers = normalized_summaries(principal.organization_id)
+            providers = normalized_summaries(
+                principal.organization_id,
+                None if principal.role == "admin" else principal.user_id,
+            )
         else:
             providers = [
                 {
@@ -39,8 +42,14 @@ class OverviewService:
                 )
                 if inventory.evidence_profile is not ProviderEvidenceProfile.MOCK
             ]
+        scoped_counts = getattr(self._repository, "counts_for_user", None)
+        counts = (
+            self._repository.counts(principal.organization_id)
+            if principal.role == "admin" or scoped_counts is None
+            else scoped_counts(principal.organization_id, principal.user_id)
+        )
         return {
             "organization": organization,
-            "counts": self._repository.counts(principal.organization_id),
+            "counts": counts,
             "providers": providers,
         }

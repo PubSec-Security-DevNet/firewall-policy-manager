@@ -22,8 +22,12 @@ def upgrade() -> None:
         sa.Column("subject", sa.String(500), nullable=False),
         sa.Column("email_claim", sa.String(320)),
         sa.Column("display_name_claim", sa.String(200)),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
+        sa.Column(
+            "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.UniqueConstraint("issuer", "subject"),
     )
     op.create_index("ix_external_identities_user_id", "external_identities", ["user_id"])
@@ -38,10 +42,14 @@ def upgrade() -> None:
         sa.Column("outcome", sa.String(20), nullable=False),
         sa.Column("correlation_id", sa.String(100)),
         sa.Column("details", sa.dialects.postgresql.JSONB(), nullable=False, server_default="{}"),
-        sa.Column("occurred_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "occurred_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
     )
     op.create_index("ix_authentication_events_occurred", "authentication_events", ["occurred_at"])
-    op.create_index("ix_authentication_events_provider", "authentication_events", ["provider_id", "occurred_at"])
+    op.create_index(
+        "ix_authentication_events_provider", "authentication_events", ["provider_id", "occurred_at"]
+    )
     op.execute(
         sa.text(
             """

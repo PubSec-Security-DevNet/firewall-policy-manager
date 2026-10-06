@@ -13,6 +13,7 @@ import {
   type Inventory,
 } from '../../api/client';
 import {
+  AppActionButton,
   AppCard,
   AppButton,
   AppDataTable,
@@ -129,9 +130,11 @@ function SyncDriftContent({
   const [policyFilter, setPolicyFilter] = useState('ALL');
   const [typeFilter, setTypeFilter] = useState('ALL');
   const [stateFilter, setStateFilter] = useState('ALL');
+  const [query, setQuery] = useState('');
   const [resourcePage, setResourcePage] = useState(1);
   const resourcePageSize = useAdaptivePageSize();
   const [busy, setBusy] = useState<string | null>(null);
+  const [selectedResource, setSelectedResource] = useState<SyncRow | null>(null);
   const [refreshedInventory, setRefreshedInventory] = useState<Inventory | null>(null);
   const [syncNotice, setSyncNotice] = useState<{
     connectionId: string;
@@ -139,6 +142,9 @@ function SyncDriftContent({
     message: string;
   } | null>(null);
   const displayedInventory = refreshedInventory ?? inventory;
+  useEffect(() => {
+    setResourcePage(1);
+  }, [managerFilter, policyFilter, typeFilter, stateFilter, query]);
   const providerByManager = new Map(
     displayedInventory.statuses.map((status) => [
       status.manager_id,
@@ -270,13 +276,21 @@ function SyncDriftContent({
       ].map((item) => [item.resource_id, item] as const),
     ).values(),
   );
-  const visibleResources = allResources.filter(
-    (item) =>
+  const visibleResources = allResources.filter((item) => {
+    const search = query.trim().toLowerCase();
+    const matchesQuery =
+      !search ||
+      [item.name, item.provider, item.kind, item.value, item.resource_id].some((value) =>
+        value?.toLowerCase().includes(search),
+      );
+    return (
+      matchesQuery &&
       (managerFilter === 'ALL' || item.manager_id === managerFilter) &&
       (policyFilter === 'ALL' || item.policy_id === policyFilter) &&
       (typeFilter === 'ALL' || item.kind === typeFilter) &&
-      (stateFilter === 'ALL' || item.management_state === stateFilter),
-  );
+      (stateFilter === 'ALL' || item.management_state === stateFilter)
+    );
+  });
   const resourcePageCount = Math.max(1, Math.ceil(visibleResources.length / resourcePageSize));
   const currentResourcePage = Math.min(resourcePage, resourcePageCount);
   const pagedResources = visibleResources.slice(
@@ -309,61 +323,6 @@ function SyncDriftContent({
           detail="Missing, drifted, unmanaged, or conflicting resources"
         />
       </SimpleGrid>
-      <AppCard>
-        <Group gap="sm" wrap="wrap">
-          <Select
-            className="fm-sync-filter"
-            aria-label="Filter provider connection"
-            value={managerFilter}
-            onChange={(value) => setManagerFilter(value ?? 'ALL')}
-            data={[
-              { value: 'ALL', label: 'All provider connections' },
-              ...displayedInventory.statuses.map((item) => ({
-                value: item.manager_id,
-                label: `${item.provider.toUpperCase()} · ${item.display_name}`,
-              })),
-            ]}
-          />
-          <Select
-            className="fm-sync-filter"
-            aria-label="Filter policy"
-            value={policyFilter}
-            onChange={(value) => setPolicyFilter(value ?? 'ALL')}
-            data={[
-              { value: 'ALL', label: 'All policies' },
-              ...displayedInventory.policies.map((item) => ({
-                value: item.id,
-                label: `Policy · ${item.name}`,
-              })),
-            ]}
-          />
-          <Select
-            className="fm-sync-filter"
-            aria-label="Filter resource type"
-            value={typeFilter}
-            onChange={(value) => setTypeFilter(value ?? 'ALL')}
-            data={[
-              { value: 'ALL', label: 'All resource types' },
-              ...Array.from(new Set(allResources.map((item) => item.kind))).map((value) => ({
-                value,
-                label: humanize(value),
-              })),
-            ]}
-          />
-          <Select
-            className="fm-sync-filter"
-            aria-label="Filter synchronization state"
-            value={stateFilter}
-            onChange={(value) => setStateFilter(value ?? 'ALL')}
-            data={[
-              { value: 'ALL', label: 'All sync states' },
-              ...Array.from(new Set(allResources.map((item) => item.management_state))).map(
-                (value) => ({ value, label: humanize(value) }),
-              ),
-            ]}
-          />
-        </Group>
-      </AppCard>
       <AppCard>
         <Group justify="space-between" mb="md">
           <div>
@@ -464,6 +423,69 @@ function SyncDriftContent({
         )}
       </AppCard>
       <AppCard>
+        <Group gap="sm" wrap="wrap">
+          <TextInput
+            className="fm-sync-search"
+            aria-label="Search synchronized resources"
+            placeholder="Search resources"
+            leftSection={<IconSearch size={16} />}
+            value={query}
+            onChange={(event) => setQuery(event.currentTarget.value)}
+          />
+          <Select
+            className="fm-sync-filter"
+            aria-label="Filter provider connection"
+            value={managerFilter}
+            onChange={(value) => setManagerFilter(value ?? 'ALL')}
+            data={[
+              { value: 'ALL', label: 'All provider connections' },
+              ...displayedInventory.statuses.map((item) => ({
+                value: item.manager_id,
+                label: `${item.provider.toUpperCase()} · ${item.display_name}`,
+              })),
+            ]}
+          />
+          <Select
+            className="fm-sync-filter"
+            aria-label="Filter policy"
+            value={policyFilter}
+            onChange={(value) => setPolicyFilter(value ?? 'ALL')}
+            data={[
+              { value: 'ALL', label: 'All policies' },
+              ...displayedInventory.policies.map((item) => ({
+                value: item.id,
+                label: `Policy · ${item.name}`,
+              })),
+            ]}
+          />
+          <Select
+            className="fm-sync-filter"
+            aria-label="Filter resource type"
+            value={typeFilter}
+            onChange={(value) => setTypeFilter(value ?? 'ALL')}
+            data={[
+              { value: 'ALL', label: 'All resource types' },
+              ...Array.from(new Set(allResources.map((item) => item.kind))).map((value) => ({
+                value,
+                label: humanize(value),
+              })),
+            ]}
+          />
+          <Select
+            className="fm-sync-filter"
+            aria-label="Filter synchronization state"
+            value={stateFilter}
+            onChange={(value) => setStateFilter(value ?? 'ALL')}
+            data={[
+              { value: 'ALL', label: 'All sync states' },
+              ...Array.from(new Set(allResources.map((item) => item.management_state))).map(
+                (value) => ({ value, label: humanize(value) }),
+              ),
+            ]}
+          />
+        </Group>
+      </AppCard>
+      <AppCard>
         <Text className="fm-eyebrow">Reconciliation queue</Text>
         <Title order={2} size="h4" mb="md">
           Current resource state
@@ -496,65 +518,15 @@ function SyncDriftContent({
                     <AppStatusBadge value={item.management_state} />
                   </Table.Td>
                   <Table.Td>
-                    {!['OBSERVED', 'MANAGED', 'UNMANAGED'].includes(item.management_state) ? (
+                    {!['OBSERVED', 'MANAGED'].includes(item.management_state) ? (
                       <>
-                        <details>
-                          <summary>Review provider state</summary>
-                          <Text size="xs" mt="xs">
-                            {differenceSummary(item)}
-                          </Text>
-                        </details>
-                        {item.drift_id && (
-                          <Group gap="xs" mt="xs">
-                            {item.connection_id && (
-                              <AppButton
-                                size="xs"
-                                variant="subtle"
-                                loading={busy === item.connection_id}
-                                onClick={() => {
-                                  if (item.connection_id) void handleSync(item.connection_id);
-                                }}
-                              >
-                                Refresh from provider
-                              </AppButton>
-                            )}
-                            {item.management_state !== 'MISSING' && (
-                              <AppButton
-                                size="xs"
-                                variant="subtle"
-                                loading={busy === item.id}
-                                onClick={() => {
-                                  if (!item.drift_id) return;
-                                  setBusy(item.drift_id);
-                                  void acceptProviderState(item.drift_id).finally(() =>
-                                    setBusy(null),
-                                  );
-                                }}
-                              >
-                                Accept provider state
-                              </AppButton>
-                            )}
-                            {activeGroupId &&
-                              ['DRIFTED', 'MISSING'].includes(item.management_state) && (
-                                <AppButton
-                                  size="xs"
-                                  variant="subtle"
-                                  loading={busy === `restore-${item.drift_id}`}
-                                  onClick={() => {
-                                    if (!item.drift_id) return;
-                                    setBusy(`restore-${item.drift_id}`);
-                                    void restoreProviderState(item.drift_id, activeGroupId).finally(
-                                      () => setBusy(null),
-                                    );
-                                  }}
-                                >
-                                  {item.management_state === 'MISSING'
-                                    ? 'Propose recreate'
-                                    : 'Propose restore'}
-                                </AppButton>
-                              )}
-                          </Group>
-                        )}
+                        <AppButton
+                          size="xs"
+                          variant="light"
+                          onClick={() => setSelectedResource(item)}
+                        >
+                          View details
+                        </AppButton>
                       </>
                     ) : (
                       <Text size="sm" c="dimmed">
@@ -576,40 +548,146 @@ function SyncDriftContent({
           onPageChange={setResourcePage}
         />
       </AppCard>
+      <AppDialog
+        opened={selectedResource !== null}
+        onClose={() => setSelectedResource(null)}
+        title={selectedResource ? `${selectedResource.kind} discrepancy` : 'Discrepancy details'}
+        centered
+        size="lg"
+      >
+        {selectedResource && (
+          <div>
+            <Text size="sm" fw={700} mb={4}>
+              {selectedResource.name}
+            </Text>
+            <Text size="sm" c="dimmed" mb="md">
+              {selectedResource.provider ?? 'Provider'} · {selectedResource.kind}
+            </Text>
+            <Group gap="xs" mb="md">
+              <Text size="sm">Current state:</Text>
+              <AppStatusBadge value={selectedResource.management_state} />
+            </Group>
+            <Text size="sm" fw={700} mb={4}>
+              What this means
+            </Text>
+            <Text size="sm" mb="md">
+              {explainDiscrepancy(selectedResource)}
+            </Text>
+            <Group gap="xs" mb="md">
+              <Text size="sm" fw={600}>
+                Recorded value:
+              </Text>
+              <Text size="sm">{selectedResource.value ?? 'Not available'}</Text>
+            </Group>
+            {selectedResource.drift_id && (
+              <Group justify="flex-end" mt="xl">
+                {selectedResource.connection_id && (
+                  <AppButton
+                    size="sm"
+                    variant="light"
+                    loading={busy === selectedResource.connection_id}
+                    onClick={() => {
+                      if (selectedResource.connection_id)
+                        void handleSync(selectedResource.connection_id);
+                    }}
+                  >
+                    Refresh provider
+                  </AppButton>
+                )}
+                {selectedResource.management_state !== 'MISSING' && (
+                  <AppButton
+                    size="sm"
+                    variant="light"
+                    loading={busy === selectedResource.id}
+                    onClick={() => {
+                      if (!selectedResource.drift_id) return;
+                      setBusy(selectedResource.drift_id);
+                      void acceptProviderState(selectedResource.drift_id).finally(() => {
+                        setBusy(null);
+                        setSelectedResource(null);
+                      });
+                    }}
+                  >
+                    Accept provider state
+                  </AppButton>
+                )}
+                {activeGroupId &&
+                  ['DRIFTED', 'MISSING'].includes(selectedResource.management_state) && (
+                    <AppButton
+                      size="sm"
+                      variant="light"
+                      loading={busy === `restore-${selectedResource.drift_id}`}
+                      onClick={() => {
+                        if (!selectedResource.drift_id) return;
+                        setBusy(`restore-${selectedResource.drift_id}`);
+                        void restoreProviderState(selectedResource.drift_id, activeGroupId).finally(
+                          () => {
+                            setBusy(null);
+                            setSelectedResource(null);
+                          },
+                        );
+                      }}
+                    >
+                      {selectedResource.management_state === 'MISSING'
+                        ? 'Propose recreate'
+                        : 'Propose restore'}
+                    </AppButton>
+                  )}
+                <AppButton size="sm" variant="subtle" onClick={() => setSelectedResource(null)}>
+                  Close
+                </AppButton>
+              </Group>
+            )}
+          </div>
+        )}
+      </AppDialog>
     </>
   );
 }
 
-function differenceSummary(item: {
+function explainDiscrepancy(item: {
+  management_state: string;
+  kind: string;
+  provider?: string;
   previous_snapshot?: Record<string, unknown>;
   observed_snapshot?: Record<string, unknown>;
   details?: Record<string, unknown>;
 }) {
+  const provider = item.provider ?? 'the provider';
+  const resource = item.kind.toLowerCase();
+  if (item.management_state === 'MISSING') {
+    return `This ${resource} is recorded in the application, but it was not found on ${provider}. Refresh the provider to check again, or propose recreating it on the provider.`;
+  }
+  if (item.management_state === 'UNMANAGED') {
+    return `This ${resource} was found on ${provider}, but the application does not manage it. No application change is required unless you choose to take ownership of it.`;
+  }
+  if (item.management_state === 'CONFLICT') {
+    return `This ${resource} has changed in both the application and ${provider}. Review the details before choosing which version to keep.`;
+  }
   const previous = item.previous_snapshot ?? {};
   const observed = item.observed_snapshot ?? {};
+  const ignoredKeys = new Set([
+    'metadata',
+    'domain_id',
+    'sharing_mode',
+    'provider_version',
+    'member_object_ids',
+  ]);
   const changed = Object.keys({ ...previous, ...observed }).filter(
-    (key) => JSON.stringify(previous[key]) !== JSON.stringify(observed[key]),
+    (key) =>
+      !ignoredKeys.has(key) && JSON.stringify(previous[key]) !== JSON.stringify(observed[key]),
   );
   if (changed.length) {
-    return `${changed
-      .map(
-        (key) =>
-          `${key}: ${formatSnapshotValue(previous[key])} → ${formatSnapshotValue(observed[key])}`,
-      )
-      .join(' · ')}. Provider state is current; restore requires a new ChangeSet.`;
+    return `This ${resource} exists in both places, but its ${changed
+      .map((key) => humanize(key))
+      .join(
+        ', ',
+      )} do not match. The provider is currently reporting the latest value. Choose Accept provider state to update the application, or Propose restore to submit the application's value back to the provider.`;
   }
   const summary = item.details?.summary;
   return typeof summary === 'string'
     ? summary
-    : 'Provider state differs from the last synchronized snapshot.';
-}
-
-function formatSnapshotValue(value: unknown) {
-  if (value === undefined) return 'not set';
-  if (value === null) return 'none';
-  if (typeof value === 'string') return value || 'empty';
-  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
-  return JSON.stringify(value);
+    : `This ${resource} does not match the last synchronized state from ${provider}. Review the available actions before making a change.`;
 }
 
 export function AuditPage() {
@@ -631,7 +709,7 @@ export function AuditPage() {
     <AppPage
       eyebrow="Operations"
       title="Audit"
-      description="Append-oriented authorization, administration, ChangeSet, and provider activity."
+      description="Append-oriented authorization, administration, Changeset, and provider activity."
     >
       {state.status === 'loading' && <AppLoadingState label="Loading audit evidence" />}
       {state.status === 'error' && (
@@ -650,6 +728,8 @@ function AuditContent({ snapshot }: { snapshot: AdministrationSnapshot }) {
   const [query, setQuery] = useState('');
   const [outcome, setOutcome] = useState<string | null>('ALL');
   const [selectedEvent, setSelectedEvent] = useState<AuditEvent | null>(null);
+  const [page, setPage] = useState(1);
+  const pageSize = useAdaptivePageSize();
   const rows = useMemo(
     () =>
       events.filter((event) => {
@@ -666,16 +746,24 @@ function AuditContent({ snapshot }: { snapshot: AdministrationSnapshot }) {
       }),
     [events, outcome, query],
   );
+  const pageCount = Math.max(1, Math.ceil(rows.length / pageSize));
+  const currentPage = Math.min(page, pageCount);
+  const pagedRows = rows.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  useEffect(() => {
+    setPage(1);
+  }, [query, outcome]);
+  useEffect(() => {
+    setPage((current) => Math.min(current, pageCount));
+  }, [pageCount]);
   return (
     <AppCard>
       <Group justify="space-between" align="end" mb="md">
         <div>
-          <Text className="fm-eyebrow">Latest 200 events</Text>
+          <Text className="fm-eyebrow">Audit event history</Text>
           <Title order={2} size="h4">
             Security activity
           </Title>
         </div>
-        <AppStatusBadge value="READ_ONLY" label="Append-oriented evidence" />
       </Group>
       <Group mb="md">
         <TextInput
@@ -709,44 +797,48 @@ function AuditContent({ snapshot }: { snapshot: AdministrationSnapshot }) {
           }
         />
       ) : (
-        <AppDataTable label="Audit event history">
-          <Table.Thead>
-            <Table.Tr>
-              <Table.Th>Date / time</Table.Th>
-              <Table.Th>Actor</Table.Th>
-              <Table.Th>Acting Group</Table.Th>
-              <Table.Th>Policy</Table.Th>
-              <Table.Th>Action</Table.Th>
-              <Table.Th>Resource</Table.Th>
-              <Table.Th>Outcome</Table.Th>
-              <Table.Th>Details</Table.Th>
-            </Table.Tr>
-          </Table.Thead>
-          <Table.Tbody>
-            {rows.map((event) => (
-              <Table.Tr key={event.id}>
-                <Table.Td>{formatDate(event.occurred_at)}</Table.Td>
-                <Table.Td>{event.actor}</Table.Td>
-                <Table.Td>{event.acting_group ?? 'Organization'}</Table.Td>
-                <Table.Td>{event.policy ?? 'Not policy-scoped'}</Table.Td>
-                <Table.Td>{humanize(event.action)}</Table.Td>
-                <Table.Td>{humanize(event.resource_type)}</Table.Td>
-                <Table.Td>
-                  <AppStatusBadge value={event.decision} />
-                </Table.Td>
-                <Table.Td>
-                  <AppButton
-                    size="compact-xs"
-                    variant="subtle"
-                    onClick={() => setSelectedEvent(event)}
-                  >
-                    View details
-                  </AppButton>
-                </Table.Td>
+        <>
+          <AppDataTable label="Audit event history">
+            <Table.Thead>
+              <Table.Tr>
+                <Table.Th>Date / time</Table.Th>
+                <Table.Th>Actor</Table.Th>
+                <Table.Th>Acting Group</Table.Th>
+                <Table.Th>Policy</Table.Th>
+                <Table.Th>Action</Table.Th>
+                <Table.Th>Resource</Table.Th>
+                <Table.Th>Outcome</Table.Th>
+                <Table.Th>Details</Table.Th>
               </Table.Tr>
-            ))}
-          </Table.Tbody>
-        </AppDataTable>
+            </Table.Thead>
+            <Table.Tbody>
+              {pagedRows.map((event) => (
+                <Table.Tr key={event.id}>
+                  <Table.Td>{formatDate(event.occurred_at)}</Table.Td>
+                  <Table.Td>{event.actor}</Table.Td>
+                  <Table.Td>{event.acting_group ?? 'Organization'}</Table.Td>
+                  <Table.Td>{event.policy ?? 'Not policy-scoped'}</Table.Td>
+                  <Table.Td>{humanize(event.action)}</Table.Td>
+                  <Table.Td>{humanize(event.resource_type)}</Table.Td>
+                  <Table.Td>
+                    <AppStatusBadge value={event.decision} />
+                  </Table.Td>
+                  <Table.Td>
+                    <AppActionButton intent="quiet" onClick={() => setSelectedEvent(event)}>
+                      View details
+                    </AppActionButton>
+                  </Table.Td>
+                </Table.Tr>
+              ))}
+            </Table.Tbody>
+          </AppDataTable>
+          <AdaptivePagination
+            page={currentPage}
+            pageSize={pageSize}
+            total={rows.length}
+            onPageChange={setPage}
+          />
+        </>
       )}
       <AppDialog
         opened={selectedEvent !== null}
@@ -863,6 +955,11 @@ function formatDate(value: string | null | undefined) {
 }
 
 function humanize(value: string) {
+  const objectTypeLabels: Record<string, string> = {
+    PORT_SERVICE: 'Port',
+    PORT_SERVICE_GROUP: 'Port Group',
+  };
+  if (objectTypeLabels[value]) return objectTypeLabels[value];
   return value
     .toLowerCase()
     .replaceAll('_', ' ')

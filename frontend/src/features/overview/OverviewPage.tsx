@@ -9,19 +9,15 @@ import {
 
 import {
   loadDelegatedPolicies,
+  loadChangeSets,
   loadPendingApprovals,
   exitProxySession,
+  logout,
   type Overview,
   type Session,
 } from '../../api/client';
-import { ApprovalsPage } from '../approvals/ApprovalsPage';
 import { DevelopmentUserSelector } from '../auth/DevelopmentUserSelector';
 import { LoginPage } from '../auth/LoginPage';
-import { DelegatedWorkspace } from '../delegated/DelegatedWorkspace';
-import { AuditPage, SyncDriftPage } from '../operations/OperationsPages';
-import { ProviderConnectionsPanel } from '../provider-connections/ProviderConnectionsPanel';
-import { AdminChangeSetsPanel } from '../changesets/AdminChangeSetsPanel';
-import { DeploymentsPage } from '../deployments/DeploymentsPage';
 import {
   AppCard,
   AppAlert,
@@ -29,13 +25,13 @@ import {
   AppEmptyState,
   AppErrorState,
   AppGroup,
-  AppIdentityNotice,
   AppLayout,
   AppLoadingState,
   AppPage,
   AppProviderBadge,
   AppSection,
   AppSimpleGrid,
+  AppStack,
   AppStatusBadge,
   AppText,
   AppThemeIcon,
@@ -49,22 +45,64 @@ const AdministrationPanel = lazy(() =>
     default: module.AdministrationPanel,
   })),
 );
+const ApprovalsPage = lazy(() =>
+  import('../approvals/ApprovalsPage').then((module) => ({ default: module.ApprovalsPage })),
+);
+const DelegatedWorkspace = lazy(() =>
+  import('../delegated/DelegatedWorkspace').then((module) => ({
+    default: module.DelegatedWorkspace,
+  })),
+);
+const AdminChangeSetsPanel = lazy(() =>
+  import('../changesets/AdminChangeSetsPanel').then((module) => ({
+    default: module.AdminChangeSetsPanel,
+  })),
+);
+const DeploymentsPage = lazy(() =>
+  import('../deployments/DeploymentsPage').then((module) => ({ default: module.DeploymentsPage })),
+);
+const ProviderConnectionsPanel = lazy(() =>
+  import('../provider-connections/ProviderConnectionsPanel').then((module) => ({
+    default: module.ProviderConnectionsPanel,
+  })),
+);
+const SyncDriftPage = lazy(() =>
+  import('../operations/OperationsPages').then((module) => ({ default: module.SyncDriftPage })),
+);
+const AuditPage = lazy(() =>
+  import('../operations/OperationsPages').then((module) => ({ default: module.AuditPage })),
+);
+
+const REJECTION_NOTICE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+
+function rejectionNoticeActive(item: {
+  rejected_at?: string | null;
+  rejection_notice_dismissed_at?: string | null;
+}) {
+  if (item.rejection_notice_dismissed_at) return false;
+  if (!item.rejected_at) return true;
+  return Date.now() - Date.parse(item.rejected_at) < REJECTION_NOTICE_MAX_AGE_MS;
+}
 const IdentityProvidersPanel = lazy(() =>
   import('../admin/IdentityProvidersPanel').then((module) => ({
     default: module.IdentityProvidersPanel,
   })),
 );
+const SmtpSettingsPanel = lazy(() =>
+  import('../admin/SmtpSettingsPanel').then((module) => ({ default: module.SmtpSettingsPanel })),
+);
 
 export function OverviewPage() {
   const query = new URLSearchParams(window.location.search);
+  if (query.get('preview') === 'login') return <LoginPage />;
   const oidcTest = query.get('oidc_test');
   const authError = query.get('auth_error');
   if (oidcTest === 'success') {
     return (
       <StandaloneState>
         <AppAlert color="green">
-          OIDC test successful. The provider authenticated successfully and passed validation.
-          No application user session was created.
+          OIDC test successful. The provider authenticated successfully and passed validation. No
+          application user session was created.
         </AppAlert>
       </StandaloneState>
     );
@@ -87,7 +125,15 @@ function AuthenticatedOverviewPage({ authError }: { authError: string | null }) 
       </StandaloneState>
     );
   if (state.status === 'unauthenticated') {
-    return <LoginPage initialError={authError ? 'Authentication could not be completed. Try again or contact an administrator.' : undefined} />;
+    return (
+      <LoginPage
+        initialError={
+          authError
+            ? 'Authentication could not be completed. Try again or contact an administrator.'
+            : undefined
+        }
+      />
+    );
   }
   return <ReadyApplication overview={state.overview} session={state.session} />;
 }
@@ -102,8 +148,9 @@ function ReadyApplication({ overview, session }: { overview: Overview; session: 
   const [route, setRoute] = useState<AppRoute>('home');
   const [changeSetDetailsId, setChangeSetDetailsId] = useState<string>();
   const [approvalCount, setApprovalCount] = useState(0);
+  const [rejectedChangeSetCount, setRejectedChangeSetCount] = useState(0);
   useEffect(() => {
-    if (!['approver', 'firewall_admin', 'admin'].includes(session.role)) return;
+    if (!['approver', 'firewall_operator', 'admin'].includes(session.role ?? '')) return;
     const refreshApprovals = () => {
       void loadPendingApprovals()
         .then((result) => setApprovalCount(result.count))
@@ -142,6 +189,29 @@ function ReadyApplication({ overview, session }: { overview: Overview; session: 
     groupId: session.default_group_id ?? undefined,
     policyId: session.default_policy_id ?? undefined,
   });
+  useEffect(() => {
+    if (!workingContext.groupId) {
+      setRejectedChangeSetCount(0);
+      return;
+    }
+    const refreshRejected = () => {
+      void loadChangeSets(workingContext.groupId!)
+        .then((items) =>
+          setRejectedChangeSetCount(
+            items.filter((item) => item.state === 'REJECTED' && rejectionNoticeActive(item)).length,
+          ),
+        )
+        .catch(() => undefined);
+    };
+    refreshRejected();
+    const onRejectionDismissed = () => refreshRejected();
+    window.addEventListener('firewall-manager:rejection-dismissed', onRejectionDismissed);
+    const timer = window.setInterval(refreshRejected, 15_000);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener('firewall-manager:rejection-dismissed', onRejectionDismissed);
+    };
+  }, [workingContext.groupId]);
   const updateWorkingContext = useCallback(
     (groupId?: string, policyId?: string, group?: string, policy?: string) => {
       setWorkingContext((current) => {
@@ -207,18 +277,40 @@ function ReadyApplication({ overview, session }: { overview: Overview; session: 
       workingPolicy={workingContext.policy}
       session={session}
       approvalCount={approvalCount}
+      rejectedChangeSetCount={rejectedChangeSetCount}
       route={route}
-      onRouteChange={setRoute}
+      onRouteChange={(nextRoute) => setRoute(nextRoute)}
+      onLogout={() => {
+        void logout()
+          .catch(() => undefined)
+          .finally(() => {
+            window.location.assign('/');
+          });
+      }}
       headerActions={<DevelopmentUserSelector compact />}
     >
       {session.proxied && (
         <div className="fm-proxy-banner" role="status">
-          <AppThemeIcon className="fm-proxy-banner-icon" size={30} radius="xl" variant="light" color="orange">
+          <AppThemeIcon
+            className="fm-proxy-banner-icon"
+            size={30}
+            radius="xl"
+            variant="light"
+            color="orange"
+          >
             <IconAlertTriangle size={16} />
           </AppThemeIcon>
           <div className="fm-proxy-banner-copy">
-            <AppText size="xs" fw={750} tt="uppercase" lts=".08em">Proxy session active</AppText>
-            <AppText size="sm">Viewing as <strong>{session.email}</strong><span className="fm-proxy-banner-detail"> · Actions remain attributed to your Platform Admin identity.</span></AppText>
+            <AppText size="xs" fw={750} tt="uppercase" lts=".08em">
+              Proxy session active
+            </AppText>
+            <AppText size="sm">
+              Viewing as <strong>{session.email}</strong>
+              <span className="fm-proxy-banner-detail">
+                {' '}
+                · Actions remain attributed to your Platform Admin identity.
+              </span>
+            </AppText>
           </div>
           <AppButton
             className="fm-proxy-banner-action"
@@ -234,90 +326,109 @@ function ReadyApplication({ overview, session }: { overview: Overview; session: 
                 })
                 .catch((error: unknown) => {
                   setProxyExiting(false);
-                  setProxyExitError(error instanceof Error ? error.message : 'Unable to exit proxy session.');
+                  setProxyExitError(
+                    error instanceof Error ? error.message : 'Unable to exit proxy session.',
+                  );
                 });
             }}
           >
             Exit proxy
           </AppButton>
-          {proxyExitError && <AppText className="fm-proxy-banner-error" size="xs">{proxyExitError}</AppText>}
+          {proxyExitError && (
+            <AppText className="fm-proxy-banner-error" size="xs">
+              {proxyExitError}
+            </AppText>
+          )}
         </div>
       )}
-      {route === 'home' && (
-        <Dashboard overview={overview} session={session} onNavigate={setRoute} />
-      )}
-      {['policies', 'rules', 'objects', 'changes'].includes(route) && (
-        <DelegatedWorkspace
-          groups={session.groups}
-          initialView={route as 'policies' | 'rules' | 'objects' | 'changes'}
-          initialGroupId={workingContext.groupId}
-          initialPolicyId={workingContext.policyId}
-          defaultGroupId={defaultContext.groupId}
-          defaultPolicyId={defaultContext.policyId}
-          onContextChange={updateWorkingContext}
-          onDefaultChange={(groupId, policyId) => setDefaultContext({ groupId, policyId })}
-          onNavigate={(view) => setRoute(view)}
-        />
-      )}
-      {route === 'providers' && admin && (
-        <AppPage
-          eyebrow="Infrastructure"
-          title="Provider connections"
-          description="Manage FMC and Security Cloud Control connectivity, synchronization, and production writes."
-        >
-          <ProviderConnectionsPanel />
-        </AppPage>
-      )}
-      {['users', 'groups', 'grants'].includes(route) && admin && (
-        <AppPage
-          eyebrow="Access & delegation"
-          title={route === 'grants' ? 'Access grants' : route[0]!.toUpperCase() + route.slice(1)}
-          description={
-            route === 'groups'
-              ? 'Create and govern ownership groups used for provider naming and policy delegation.'
-              : route === 'users'
-                ? 'Manage control-plane identities, roles, status, and Group membership.'
-                : 'Build and review policy-scoped delegations and explicit resource permissions.'
-          }
-        >
-          <Suspense fallback={<AppLoadingState label="Loading access administration" />}>
-            <AdministrationPanel view={route as 'users' | 'groups' | 'grants'} />
-          </Suspense>
-        </AppPage>
-      )}
-      {route === 'identity-providers' && admin && (
-        <AppPage
-          eyebrow="Access & delegation"
-          title="Identity providers"
-          description="Configure enterprise OIDC providers. Client secrets are encrypted and write-only."
-        >
-          <Suspense fallback={<AppLoadingState label="Loading identity providers" />}>
-            <IdentityProvidersPanel />
-          </Suspense>
-        </AppPage>
-      )}
-      {route === 'changesets-admin' && admin && (
-        <AppPage
-          eyebrow="Operations"
-          title="All ChangeSets"
-          description="Organization-wide ChangeSet status and cleanup for administrators."
-        >
-          <AdminChangeSetsPanel initialDetailsId={changeSetDetailsId} />
-        </AppPage>
-      )}
-      {route === 'deployments' && admin && (
-        <DeploymentsPage
-          onViewChangeSet={(changeSetId) => {
-            setChangeSetDetailsId(changeSetId);
-            setRoute('changesets-admin');
-          }}
-        />
-      )}
-      {route === 'approvals' && ['approver', 'firewall_admin', 'admin'].includes(session.role) && (
-        <ApprovalsPage />
-      )}
-      {route === 'sync' && admin && <SyncDriftPage activeGroupId={workingContext.groupId} />}
-      {route === 'audit' && admin && <AuditPage />}
+      <Suspense fallback={<AppLoadingState label="Loading workspace" />}>
+        {route === 'home' && <Dashboard overview={overview} onNavigate={setRoute} />}
+        {['policies', 'rules', 'objects', 'changes'].includes(route) && (
+          <DelegatedWorkspace
+            groups={session.groups}
+            initialView={route as 'policies' | 'rules' | 'objects' | 'changes'}
+            initialGroupId={workingContext.groupId}
+            initialPolicyId={workingContext.policyId}
+            defaultGroupId={defaultContext.groupId}
+            defaultPolicyId={defaultContext.policyId}
+            onContextChange={updateWorkingContext}
+            onDefaultChange={(groupId, policyId) => setDefaultContext({ groupId, policyId })}
+          />
+        )}
+        {route === 'providers' && admin && (
+          <AppPage
+            eyebrow="Infrastructure"
+            title="Provider connections"
+            description="Manage FMC and Security Cloud Control connectivity, synchronization, and production writes."
+          >
+            <ProviderConnectionsPanel />
+          </AppPage>
+        )}
+        {['users', 'groups', 'grants'].includes(route) && admin && (
+          <AppPage
+            eyebrow="Access & delegation"
+            title={route === 'grants' ? 'Access grants' : route[0]!.toUpperCase() + route.slice(1)}
+            description={
+              route === 'groups'
+                ? 'Create and govern ownership groups used for provider naming and policy delegation.'
+                : route === 'users'
+                  ? 'Manage control-plane identities, roles, status, and Group membership.'
+                  : 'Build and review policy-scoped delegations and explicit resource permissions.'
+            }
+          >
+            <Suspense fallback={<AppLoadingState label="Loading access administration" />}>
+              <AdministrationPanel view={route as 'users' | 'groups' | 'grants'} />
+            </Suspense>
+          </AppPage>
+        )}
+        {route === 'identity-providers' && admin && (
+          <AppPage
+            eyebrow="Access & delegation"
+            title="Identity providers"
+            description="Configure enterprise OIDC providers. Client secrets are encrypted and write-only."
+          >
+            <Suspense fallback={<AppLoadingState label="Loading identity providers" />}>
+              <IdentityProvidersPanel />
+            </Suspense>
+          </AppPage>
+        )}
+        {route === 'smtp' && admin && (
+          <AppPage
+            eyebrow="Operations"
+            title="SMTP notifications"
+            description="Configure authenticated and encrypted email delivery for approval notifications."
+          >
+            <Suspense fallback={<AppLoadingState label="Loading SMTP settings" />}>
+              <SmtpSettingsPanel />
+            </Suspense>
+          </AppPage>
+        )}
+        {route === 'changesets-admin' && admin && (
+          <AppPage
+            eyebrow="Operations"
+            title="All Changesets"
+            description="Organization-wide Changeset status and cleanup for administrators."
+          >
+            <AdminChangeSetsPanel initialDetailsId={changeSetDetailsId} />
+          </AppPage>
+        )}
+        {route === 'deployments' && admin && (
+          <DeploymentsPage
+            onViewChangeSet={(changeSetId) => {
+              setChangeSetDetailsId(changeSetId);
+              setRoute('changesets-admin');
+            }}
+          />
+        )}
+        {route === 'approvals' &&
+          ['approver', 'firewall_operator', 'admin'].includes(session.role ?? '') && (
+            <ApprovalsPage />
+          )}
+        {route === 'sync' && admin && (
+          <SyncDriftPage activeGroupId={workingContext.groupId ?? ''} />
+        )}
+        {route === 'audit' && admin && <AuditPage />}
+      </Suspense>
     </AppLayout>
   );
 }
@@ -349,28 +460,50 @@ function readStoredContext(
 
 function Dashboard({
   overview,
-  session,
   onNavigate,
 }: {
   overview: Overview;
-  session: Session;
   onNavigate: (route: AppRoute) => void;
 }) {
-  const providersHealthy = overview.providers.filter(
-    (provider) => provider.policy_count > 0,
-  ).length;
+  const providersReporting = overview.providers.filter((provider) => provider.sync_complete).length;
+  const providerAlerts = overview.providers.flatMap((provider) => {
+    if (provider.sync_status === 'FAILED') {
+      return [
+        {
+          provider: provider.display_name,
+          message: `Synchronization failed${provider.error_code ? ` (${provider.error_code})` : ''}.`,
+        },
+      ];
+    }
+    if (
+      provider.sync_status === 'INCOMPLETE' ||
+      (provider.sync_status === 'COMPLETED' && !provider.sync_complete)
+    ) {
+      return [
+        {
+          provider: provider.display_name,
+          message: 'Synchronization completed without a complete inventory.',
+        },
+      ];
+    }
+    if (provider.sync_status === 'RUNNING') {
+      return [
+        { provider: provider.display_name, message: 'Synchronization is currently in progress.' },
+      ];
+    }
+    return [];
+  });
   return (
     <AppPage
       eyebrow="Operational overview"
       title="Security posture"
       description="Current provider inventory and delegated firewall-management activity across your accessible control plane."
     >
-      <AppIdentityNotice email={session.email} role={session.role} />
       <AppSimpleGrid cols={{ base: 1, xs: 2, lg: 4 }}>
         <MetricCard
           label="Synchronized providers"
           value={overview.counts.managers}
-          detail={`${providersHealthy} with reporting inventory`}
+          detail={`${providersReporting} with complete inventory`}
           icon={<IconPlugConnected size={19} />}
         />
         <MetricCard
@@ -386,7 +519,7 @@ function Dashboard({
           icon={<IconPackages size={19} />}
         />
         <MetricCard
-          label="Open ChangeSets"
+          label="Open Changesets"
           value={overview.counts.change_sets}
           detail="Ready, queued, or executing"
           icon={<IconFileDiff size={19} />}
@@ -451,27 +584,35 @@ function Dashboard({
         </AppCard>
         <AppCard>
           <AppSection title="Needs attention" description="Conditions that may affect operations">
-            {overview.providers.length > 0 && providersHealthy === overview.providers.length ? (
+            {overview.providers.length > 0 && providerAlerts.length === 0 ? (
               <AppEmptyState
                 title="No active alerts"
                 description="All reporting providers have synchronized policy inventory."
               />
-            ) : (
+            ) : overview.providers.length === 0 ? (
               <AppGroup align="start" wrap="nowrap">
                 <IconAlertTriangle color="var(--fm-warning)" size={20} />
                 <div>
-                  <AppText fw={650}>
-                    {overview.providers.length === 0
-                      ? 'No provider inventory'
-                      : 'Inventory unavailable'}
-                  </AppText>
+                  <AppText fw={650}>No provider inventory</AppText>
                   <AppText size="xs" c="dimmed">
-                    {overview.providers.length === 0
-                      ? 'No real provider inventory is available to report.'
-                      : 'One or more providers have no synchronized policies.'}
+                    No reporting providers are available to synchronize.
                   </AppText>
                 </div>
               </AppGroup>
+            ) : (
+              <AppStack gap="sm">
+                {providerAlerts.map((alert) => (
+                  <AppGroup key={`${alert.provider}-${alert.message}`} align="start" wrap="nowrap">
+                    <IconAlertTriangle color="var(--fm-warning)" size={20} />
+                    <div>
+                      <AppText fw={650}>{alert.provider}</AppText>
+                      <AppText size="xs" c="dimmed">
+                        {alert.message}
+                      </AppText>
+                    </div>
+                  </AppGroup>
+                ))}
+              </AppStack>
             )}
           </AppSection>
         </AppCard>
@@ -486,7 +627,7 @@ function Dashboard({
             />
             <QuickLink
               title="Rules"
-              description="Review Group-owned rules and create safe mock-provider changes."
+              description="Review Group-owned rules and create controlled policy changes."
               onClick={() => onNavigate('rules')}
             />
             <QuickLink

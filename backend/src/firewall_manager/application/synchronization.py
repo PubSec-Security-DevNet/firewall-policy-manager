@@ -42,7 +42,7 @@ def validate_provider_object_groups(objects: list[DiscoveredObject]) -> None:
                 and member.normalized_value
                 and "/" in member.normalized_value
             }
-            if len(protocols) > 1:
+            if not protocols.issubset({"tcp", "udp"}) or len(protocols) > 1:
                 raise ProviderContractError(
                     details={
                         "code": "PORT_GROUP_MIXED_PROTOCOLS",
@@ -199,7 +199,17 @@ class SynchronizationService:
                     )
                 )
                 validate_provider_object_groups(objects)
-                resources_seen += len(objects)
+                # Application catalogs are provider metadata, not delegated
+                # firewall objects. Keep this health metric aligned with the
+                # inventory/object counts used elsewhere in the application.
+                resources_seen += sum(
+                    item.object_type
+                    not in {
+                        FirewallObjectType.APPLICATION,
+                        FirewallObjectType.APPLICATION_FILTER,
+                    }
+                    for item in objects
+                )
                 for item in objects:
                     object_id = self._repository.upsert_object(
                         organization_id, manager_id, domain_id, run_id, item

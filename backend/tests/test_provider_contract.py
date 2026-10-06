@@ -34,15 +34,26 @@ def as_dict(value: object) -> dict[str, object]:
 
 def test_port_groups_reject_mixed_protocol_members_but_network_groups_are_family_neutral() -> None:
     tcp = DiscoveredObject(
-        "tcp", "TCP", "1", "tcp-fp", object_type=FirewallObjectType.PORT_SERVICE,
+        "tcp",
+        "TCP",
+        "1",
+        "tcp-fp",
+        object_type=FirewallObjectType.PORT_SERVICE,
         normalized_value="tcp/443",
     )
     udp = DiscoveredObject(
-        "udp", "UDP", "1", "udp-fp", object_type=FirewallObjectType.PORT_SERVICE,
+        "udp",
+        "UDP",
+        "1",
+        "udp-fp",
+        object_type=FirewallObjectType.PORT_SERVICE,
         normalized_value="udp/443",
     )
     port_group = DiscoveredObject(
-        "ports", "Ports", "1", "ports-fp",
+        "ports",
+        "Ports",
+        "1",
+        "ports-fp",
         object_type=FirewallObjectType.PORT_SERVICE_GROUP,
         referenced_object_native_ids=("tcp", "udp"),
     )
@@ -50,15 +61,26 @@ def test_port_groups_reject_mixed_protocol_members_but_network_groups_are_family
         validate_provider_object_groups([tcp, udp, port_group])
 
     ipv4 = DiscoveredObject(
-        "v4", "IPv4", "1", "v4-fp", object_type=FirewallObjectType.NETWORK,
+        "v4",
+        "IPv4",
+        "1",
+        "v4-fp",
+        object_type=FirewallObjectType.NETWORK,
         normalized_value="192.0.2.0/24",
     )
     ipv6 = DiscoveredObject(
-        "v6", "IPv6", "1", "v6-fp", object_type=FirewallObjectType.NETWORK,
+        "v6",
+        "IPv6",
+        "1",
+        "v6-fp",
+        object_type=FirewallObjectType.NETWORK,
         normalized_value="2001:db8::/64",
     )
     network_group = DiscoveredObject(
-        "networks", "Networks", "1", "networks-fp",
+        "networks",
+        "Networks",
+        "1",
+        "networks-fp",
         object_type=FirewallObjectType.NETWORK_GROUP,
         referenced_object_native_ids=("v4", "v6"),
     )

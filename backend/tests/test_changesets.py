@@ -50,12 +50,12 @@ ADMIN_CATEGORY = UUID("51000000-0000-0000-0000-000000000099")
 OTHER_POLICY = UUID("50000000-0000-0000-0000-000000000099")
 
 
-def principal(role: str = "editor") -> Principal:
+def principal(role: str = "user") -> Principal:
     return Principal(USER, ORG, f"{role}@example.test", role)
 
 
 def other_finance_principal() -> Principal:
-    return Principal(OTHER_FINANCE_USER, ORG, "other-editor@example.test", "editor")
+    return Principal(OTHER_FINANCE_USER, ORG, "other-editor@example.test", "user")
 
 
 class MemoryChangeSetRepository:
@@ -1551,7 +1551,7 @@ def test_network_normalization_rejects_invalid_ranges(value: str) -> None:
         ProviderObjectNamingService().normalize_value("NETWORK", value)
 
 
-@pytest.mark.parametrize("role", ["viewer", "editor", "approver", "admin"])
+@pytest.mark.parametrize("role", ["user", "approver", "admin"])
 def test_defined_roles_do_not_bypass_current_group_policy_grants(role: str) -> None:
     repository = MemoryChangeSetRepository()
     repository.capabilities = {"view"}

@@ -48,22 +48,6 @@
             "title": "Categories",
             "type": "array"
           },
-          "category_mappings": {
-            "items": {
-              "additionalProperties": true,
-              "type": "object"
-            },
-            "title": "Category Mappings",
-            "type": "array"
-          },
-          "direct_user_policy_grants": {
-            "items": {
-              "additionalProperties": true,
-              "type": "object"
-            },
-            "title": "Direct User Policy Grants",
-            "type": "array"
-          },
           "groups": {
             "items": {
               "additionalProperties": true,
@@ -162,14 +146,29 @@
           "categories",
           "memberships",
           "policy_delegations",
-          "direct_user_policy_grants",
           "object_use_grants",
           "zone_grants",
           "ip_range_grants",
           "object_create_grants",
-          "category_mappings"
         ],
         "title": "AdministrationSnapshotResponse",
+        "type": "object"
+      },
+      "AdministratorContactResponse": {
+        "properties": {
+          "email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email"
+          }
+        },
+        "title": "AdministratorContactResponse",
         "type": "object"
       },
       "ApiTokenCreateRequest": {
@@ -386,6 +385,18 @@
       },
       "AuthorizationResourceUpsertRequest": {
         "properties": {
+          "id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Id"
+          },
           "capabilities": {
             "anyOf": [
               {
@@ -655,6 +666,20 @@
         "title": "ChangeSetMetadataUpdateRequest",
         "type": "object"
       },
+      "ChangeSetNotificationDismissRequest": {
+        "properties": {
+          "active_group_id": {
+            "format": "uuid",
+            "title": "Active Group Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "active_group_id"
+        ],
+        "title": "ChangeSetNotificationDismissRequest",
+        "type": "object"
+      },
       "ChangeSetOperationResponse": {
         "properties": {
           "access_policy_id": {
@@ -784,6 +809,27 @@
         "title": "ChangeSetOperationResponse",
         "type": "object"
       },
+      "ChangeSetRejectionRequest": {
+        "properties": {
+          "active_group_id": {
+            "format": "uuid",
+            "title": "Active Group Id",
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "active_group_id",
+          "reason"
+        ],
+        "title": "ChangeSetRejectionRequest",
+        "type": "object"
+      },
       "ChangeSetResponse": {
         "properties": {
           "access_policy_id": {
@@ -795,6 +841,17 @@
             "format": "uuid",
             "title": "Active Group Id",
             "type": "string"
+          },
+          "active_group_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Group Name"
           },
           "approval_invalidated_at": {
             "anyOf": [
@@ -966,6 +1023,75 @@
             "additionalProperties": true,
             "title": "Provider Revision Snapshot",
             "type": "object"
+          },
+          "rejected_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rejected At"
+          },
+          "rejected_by_display_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rejected By Display Name"
+          },
+          "rejected_by_email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rejected By Email"
+          },
+          "rejected_by_user_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rejected By User Id"
+          },
+          "rejection_notice_dismissed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rejection Notice Dismissed At"
+          },
+          "rejection_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rejection Reason"
           },
           "revision": {
             "title": "Revision",
@@ -1333,6 +1459,14 @@
       },
       "DelegatedObjectResponse": {
         "properties": {
+          "access_permission": {
+            "default": "use",
+            "enum": [
+              "use"
+            ],
+            "title": "Access Permission",
+            "type": "string"
+          },
           "created_by_user_id": {
             "anyOf": [
               {
@@ -1377,6 +1511,17 @@
           "name": {
             "title": "Name",
             "type": "string"
+          },
+          "normalized_value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Normalized Value"
           },
           "object_type": {
             "title": "Object Type",
@@ -2675,6 +2820,261 @@
           "status"
         ],
         "title": "HealthResponse",
+        "type": "object"
+      },
+      "InitialSetupRequest": {
+        "properties": {
+          "admin_display_name": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Admin Display Name",
+            "type": "string"
+          },
+          "admin_email": {
+            "maxLength": 320,
+            "minLength": 3,
+            "title": "Admin Email",
+            "type": "string"
+          },
+          "admin_issuer": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Admin Issuer"
+          },
+          "organization_name": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Organization Name"
+          },
+          "provider_client_id": {
+            "maxLength": 300,
+            "minLength": 1,
+            "title": "Provider Client Id",
+            "type": "string"
+          },
+          "provider_client_secret": {
+            "format": "password",
+            "title": "Provider Client Secret",
+            "type": "string",
+            "writeOnly": true
+          },
+          "provider_display_name": {
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Provider Display Name",
+            "type": "string"
+          },
+          "provider_id": {
+            "maxLength": 80,
+            "minLength": 1,
+            "pattern": "^[a-z0-9-]+$",
+            "title": "Provider Id",
+            "type": "string"
+          },
+          "provider_issuer_url": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Provider Issuer Url",
+            "type": "string"
+          },
+          "provider_kind": {
+            "enum": [
+              "entra",
+              "duo",
+              "generic"
+            ],
+            "title": "Provider Kind",
+            "type": "string"
+          },
+          "recovery_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recovery Code"
+          },
+          "setup_test_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Setup Test Id"
+          }
+        },
+        "required": [
+          "admin_email",
+          "admin_display_name",
+          "provider_id",
+          "provider_kind",
+          "provider_display_name",
+          "provider_issuer_url",
+          "provider_client_id",
+          "provider_client_secret"
+        ],
+        "title": "InitialSetupRequest",
+        "type": "object"
+      },
+      "InitialSetupResponse": {
+        "properties": {
+          "organization_name": {
+            "title": "Organization Name",
+            "type": "string"
+          },
+          "provider_id": {
+            "title": "Provider Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "organization_name",
+          "provider_id"
+        ],
+        "title": "InitialSetupResponse",
+        "type": "object"
+      },
+      "InitialSetupStatusResponse": {
+        "properties": {
+          "available": {
+            "title": "Available",
+            "type": "boolean"
+          },
+          "recovery": {
+            "default": false,
+            "title": "Recovery",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "available"
+        ],
+        "title": "InitialSetupStatusResponse",
+        "type": "object"
+      },
+      "InitialSetupTestRequest": {
+        "properties": {
+          "admin_display_name": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Admin Display Name",
+            "type": "string"
+          },
+          "admin_email": {
+            "maxLength": 320,
+            "minLength": 3,
+            "title": "Admin Email",
+            "type": "string"
+          },
+          "admin_issuer": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Admin Issuer"
+          },
+          "provider_client_id": {
+            "maxLength": 300,
+            "minLength": 1,
+            "title": "Provider Client Id",
+            "type": "string"
+          },
+          "provider_client_secret": {
+            "format": "password",
+            "title": "Provider Client Secret",
+            "type": "string",
+            "writeOnly": true
+          },
+          "provider_display_name": {
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Provider Display Name",
+            "type": "string"
+          },
+          "provider_id": {
+            "maxLength": 80,
+            "minLength": 1,
+            "pattern": "^[a-z0-9-]+$",
+            "title": "Provider Id",
+            "type": "string"
+          },
+          "provider_issuer_url": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Provider Issuer Url",
+            "type": "string"
+          },
+          "provider_kind": {
+            "enum": [
+              "entra",
+              "duo",
+              "generic"
+            ],
+            "title": "Provider Kind",
+            "type": "string"
+          },
+          "recovery_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recovery Code"
+          }
+        },
+        "required": [
+          "admin_email",
+          "admin_display_name",
+          "provider_id",
+          "provider_kind",
+          "provider_display_name",
+          "provider_issuer_url",
+          "provider_client_id",
+          "provider_client_secret"
+        ],
+        "title": "InitialSetupTestRequest",
+        "type": "object"
+      },
+      "InitialSetupTestResponse": {
+        "properties": {
+          "login_url": {
+            "title": "Login Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "login_url"
+        ],
+        "title": "InitialSetupTestResponse",
         "type": "object"
       },
       "ManagerResponse": {
@@ -4548,6 +4948,29 @@
             "title": "Display Name",
             "type": "string"
           },
+          "error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Code"
+          },
+          "last_sync_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Sync At"
+          },
           "object_count": {
             "title": "Object Count",
             "type": "integer"
@@ -4568,10 +4991,31 @@
             "title": "Provider Version",
             "type": "string"
           },
+          "resources_seen": {
+            "default": 0,
+            "title": "Resources Seen",
+            "type": "integer"
+          },
           "rule_count": {
             "default": 0,
             "title": "Rule Count",
             "type": "integer"
+          },
+          "sync_complete": {
+            "default": false,
+            "title": "Sync Complete",
+            "type": "boolean"
+          },
+          "sync_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sync Status"
           },
           "writable": {
             "title": "Writable",
@@ -4923,6 +5367,16 @@
             "title": "Email",
             "type": "string"
           },
+          "environment": {
+            "enum": [
+              "development",
+              "test",
+              "staging",
+              "production"
+            ],
+            "title": "Environment",
+            "type": "string"
+          },
           "groups": {
             "items": {
               "$ref": "#/components/schemas/ActiveGroupResponse"
@@ -4968,6 +5422,7 @@
           }
         },
         "required": [
+          "environment",
           "authentication_mode",
           "user_id",
           "email",
@@ -4975,6 +5430,184 @@
           "groups"
         ],
         "title": "SessionResponse",
+        "type": "object"
+      },
+      "SmtpSettingsRequest": {
+        "properties": {
+          "authentication_required": {
+            "default": false,
+            "title": "Authentication Required",
+            "type": "boolean"
+          },
+          "custom_ca_certificate": {
+            "anyOf": [
+              {
+                "maxLength": 100000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Custom Ca Certificate"
+          },
+          "encryption": {
+            "enum": [
+              "NONE",
+              "STARTTLS",
+              "SSL_TLS"
+            ],
+            "title": "Encryption",
+            "type": "string"
+          },
+          "expected_revision": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Expected Revision",
+            "type": "integer"
+          },
+          "from_address": {
+            "maxLength": 320,
+            "minLength": 3,
+            "title": "From Address",
+            "type": "string"
+          },
+          "host": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Host",
+            "type": "string"
+          },
+          "password": {
+            "anyOf": [
+              {
+                "format": "password",
+                "type": "string",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Password"
+          },
+          "port": {
+            "maximum": 65535.0,
+            "minimum": 1.0,
+            "title": "Port",
+            "type": "integer"
+          },
+          "username": {
+            "anyOf": [
+              {
+                "maxLength": 320,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Username"
+          }
+        },
+        "required": [
+          "host",
+          "port",
+          "from_address",
+          "encryption"
+        ],
+        "title": "SmtpSettingsRequest",
+        "type": "object"
+      },
+      "SmtpSettingsResponse": {
+        "properties": {
+          "authentication_required": {
+            "default": false,
+            "title": "Authentication Required",
+            "type": "boolean"
+          },
+          "configured": {
+            "default": false,
+            "title": "Configured",
+            "type": "boolean"
+          },
+          "custom_ca_configured": {
+            "default": false,
+            "title": "Custom Ca Configured",
+            "type": "boolean"
+          },
+          "encryption": {
+            "default": "STARTTLS",
+            "enum": [
+              "NONE",
+              "STARTTLS",
+              "SSL_TLS"
+            ],
+            "title": "Encryption",
+            "type": "string"
+          },
+          "from_address": {
+            "default": "",
+            "title": "From Address",
+            "type": "string"
+          },
+          "host": {
+            "default": "",
+            "title": "Host",
+            "type": "string"
+          },
+          "id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Id"
+          },
+          "password_configured": {
+            "default": false,
+            "title": "Password Configured",
+            "type": "boolean"
+          },
+          "port": {
+            "default": 587,
+            "title": "Port",
+            "type": "integer"
+          },
+          "revision": {
+            "default": 0,
+            "title": "Revision",
+            "type": "integer"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          },
+          "username": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Username"
+          }
+        },
+        "title": "SmtpSettingsResponse",
         "type": "object"
       },
       "SynchronizationDiscrepancyResponse": {
@@ -5107,30 +5740,52 @@
       "UserCreateRequest": {
         "properties": {
           "display_name": {
+            "maxLength": 200,
+            "minLength": 1,
             "title": "Display Name",
             "type": "string"
           },
           "email": {
+            "maxLength": 320,
+            "minLength": 3,
             "title": "Email",
             "type": "string"
           },
           "identity_issuer": {
-            "title": "Identity Issuer",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Identity Issuer"
           },
           "identity_subject": {
-            "title": "Identity Subject",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Identity Subject"
           },
           "role": {
-            "default": "viewer",
+            "default": "user",
+            "enum": [
+              "user",
+              "approver",
+              "firewall_operator",
+              "admin"
+            ],
             "title": "Role",
             "type": "string"
           }
         },
         "required": [
-          "identity_issuer",
-          "identity_subject",
           "display_name",
           "email"
         ],
@@ -5145,11 +5800,9 @@
           },
           "role": {
             "enum": [
-              "viewer",
-              "editor",
+              "user",
               "approver",
-              "group_admin",
-              "firewall_admin",
+              "firewall_operator",
               "admin"
             ],
             "title": "Role",
@@ -8860,6 +9513,294 @@
         ]
       }
     },
+    "/api/v1/admin/smtp": {
+      "get": {
+        "operationId": "get_smtp_settings_api_v1_admin_smtp_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Dev-User",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dev-User"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "fm_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Fm Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SmtpSettingsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Smtp Settings",
+        "tags": [
+          "administration"
+        ]
+      },
+      "put": {
+        "operationId": "update_smtp_settings_api_v1_admin_smtp_put",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Dev-User",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dev-User"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "fm_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Fm Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SmtpSettingsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SmtpSettingsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Update Smtp Settings",
+        "tags": [
+          "administration"
+        ]
+      }
+    },
     "/api/v1/admin/users": {
       "post": {
         "operationId": "create_user_api_v1_admin_users_post",
@@ -10431,6 +11372,108 @@
         ]
       }
     },
+    "/api/v1/auth/contact": {
+      "get": {
+        "description": "Expose only the deployment-configured administrator contact address.",
+        "operationId": "administrator_contact_api_v1_auth_contact_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdministratorContactResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          }
+        },
+        "summary": "Administrator Contact",
+        "tags": [
+          "authentication"
+        ]
+      }
+    },
     "/api/v1/auth/logout": {
       "post": {
         "operationId": "oidc_logout_api_v1_auth_logout_post",
@@ -10836,6 +11879,690 @@
           }
         },
         "summary": "Oidc Proxy Start",
+        "tags": [
+          "authentication"
+        ]
+      }
+    },
+    "/api/v1/auth/setup": {
+      "post": {
+        "operationId": "initial_setup_api_v1_auth_setup_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InitialSetupRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InitialSetupResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          }
+        },
+        "summary": "Initial Setup",
+        "tags": [
+          "authentication"
+        ]
+      }
+    },
+    "/api/v1/auth/setup/status": {
+      "get": {
+        "operationId": "initial_setup_status_api_v1_auth_setup_status_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "recovery_code",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Recovery Code"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InitialSetupStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          }
+        },
+        "summary": "Initial Setup Status",
+        "tags": [
+          "authentication"
+        ]
+      }
+    },
+    "/api/v1/auth/setup/test": {
+      "post": {
+        "operationId": "test_initial_setup_api_v1_auth_setup_test_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InitialSetupTestRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InitialSetupTestResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          }
+        },
+        "summary": "Test Initial Setup",
+        "tags": [
+          "authentication"
+        ]
+      }
+    },
+    "/api/v1/auth/setup/test/callback": {
+      "get": {
+        "operationId": "setup_test_callback_api_v1_auth_setup_test_callback_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "code",
+            "required": true,
+            "schema": {
+              "title": "Code",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "state",
+            "required": true,
+            "schema": {
+              "title": "State",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          }
+        },
+        "summary": "Setup Test Callback",
+        "tags": [
+          "authentication"
+        ]
+      }
+    },
+    "/api/v1/auth/setup/test/draft/{draft_id}": {
+      "get": {
+        "operationId": "setup_test_draft_api_v1_auth_setup_test_draft__draft_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "draft_id",
+            "required": true,
+            "schema": {
+              "title": "Draft Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Setup Test Draft Api V1 Auth Setup Test Draft  Draft Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          }
+        },
+        "summary": "Setup Test Draft",
+        "tags": [
+          "authentication"
+        ]
+      }
+    },
+    "/api/v1/auth/setup/test/login": {
+      "get": {
+        "operationId": "setup_test_login_api_v1_auth_setup_test_login_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "draft_id",
+            "required": true,
+            "schema": {
+              "title": "Draft Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          }
+        },
+        "summary": "Setup Test Login",
         "tags": [
           "authentication"
         ]
@@ -12282,6 +14009,166 @@
         ]
       }
     },
+    "/api/v1/changesets/{change_set_id}/dismiss-rejection": {
+      "post": {
+        "operationId": "dismiss_rejection_notice_api_v1_changesets__change_set_id__dismiss_rejection_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "change_set_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Change Set Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Dev-User",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dev-User"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "fm_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Fm Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChangeSetNotificationDismissRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChangeSetResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Dismiss Rejection Notice",
+        "tags": [
+          "change-sets"
+        ]
+      }
+    },
     "/api/v1/changesets/{change_set_id}/execute": {
       "post": {
         "operationId": "execute_change_set_api_v1_changesets__change_set_id__execute_post",
@@ -13575,6 +15462,166 @@
           }
         ],
         "summary": "Refresh Change Set",
+        "tags": [
+          "change-sets"
+        ]
+      }
+    },
+    "/api/v1/changesets/{change_set_id}/reject": {
+      "post": {
+        "operationId": "reject_change_set_api_v1_changesets__change_set_id__reject_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "change_set_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Change Set Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Dev-User",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dev-User"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "fm_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Fm Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChangeSetRejectionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChangeSetResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Reject Change Set",
         "tags": [
           "change-sets"
         ]

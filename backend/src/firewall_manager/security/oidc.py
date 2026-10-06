@@ -19,7 +19,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives.asymmetric.padding import PKCS1v15
 from cryptography.hazmat.primitives.hashes import SHA256
 from fastapi import Response
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from firewall_manager.application.errors import NotAuthenticatedError, ProviderConfigurationError
@@ -267,6 +267,29 @@ class OidcService:
             if identity is not None
             else None
         )
+        if user is None and identity is None:
+            user = self.session.scalar(
+                select(User).where(
+                    User.organization_id == organization_id,
+                    User.identity_issuer == str(provider.issuer_url),
+                    User.identity_subject == subject,
+                    User.is_active.is_(True),
+                )
+            )
+            if user is not None:
+                self.session.add(
+                    ExternalIdentity(
+                        organization_id=organization_id,
+                        user_id=user.id,
+                        provider_id=provider.id,
+                        issuer=str(provider.issuer_url),
+                        subject=subject,
+                        email_claim=claims.get(provider.email_claim),
+                        display_name_claim=claims.get(provider.display_name_claim),
+                    )
+                )
+            else:
+                user = self._bind_pending_user(provider, organization_id, subject, claims)
         if user is None:
             self._authentication_event(
                 "login_failure",
@@ -312,6 +335,41 @@ class OidcService:
             f"{STATE_COOKIE_PREFIX}{provider.id}", path=f"/api/v1/auth/{provider.id}"
         )
         return False
+
+    def _bind_pending_user(
+        self,
+        provider: OidcProviderConfig,
+        organization_id: UUID,
+        subject: str,
+        claims: dict[str, Any],
+    ) -> User | None:
+        email_value = claims.get(provider.email_claim)
+        if not isinstance(email_value, str) or not email_value.strip():
+            return None
+        pending_user = self.session.scalar(
+            select(User).where(
+                User.organization_id == organization_id,
+                User.identity_subject.like("pending:%"),
+                func.lower(User.email) == email_value.strip().casefold(),
+                User.is_active.is_(True),
+            )
+        )
+        if pending_user is None:
+            return None
+        pending_user.identity_issuer = str(provider.issuer_url)
+        pending_user.identity_subject = subject
+        self.session.add(
+            ExternalIdentity(
+                organization_id=organization_id,
+                user_id=pending_user.id,
+                provider_id=provider.id,
+                issuer=str(provider.issuer_url),
+                subject=subject,
+                email_claim=email_value.strip(),
+                display_name_claim=claims.get(provider.display_name_claim),
+            )
+        )
+        return pending_user
 
     def logout(self, token: str | None, response: Response) -> None:
         if token:
@@ -475,11 +533,21 @@ class OidcService:
                 details={"reason": "production OIDC requires HTTPS issuer"}
             )
         discovery = f"{issuer}/.well-known/openid-configuration"
-        async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
-            result = await client.get(discovery)
+        try:
+            async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
+                result = await client.get(discovery)
+        except httpx.HTTPError as exc:
+            raise ProviderConfigurationError(
+                details={"reason": "OIDC discovery endpoint could not be reached"}
+            ) from exc
         if result.status_code >= 400:
             raise ProviderConfigurationError(details={"reason": "OIDC discovery failed"})
-        metadata = result.json()
+        try:
+            metadata = result.json()
+        except ValueError as exc:
+            raise ProviderConfigurationError(
+                details={"reason": "OIDC discovery returned invalid JSON"}
+            ) from exc
         if metadata.get("issuer", "").rstrip("/") != issuer:
             raise ProviderConfigurationError(details={"reason": "OIDC issuer mismatch"})
         for key in ("authorization_endpoint", "token_endpoint", "jwks_uri"):
@@ -488,6 +556,74 @@ class OidcService:
                     details={"reason": "OIDC metadata endpoint invalid"}
                 )
         return metadata
+
+    async def discover(self, provider: OidcProviderConfig) -> dict[str, str]:
+        """Validate provider discovery without persisting provider or secret data."""
+        metadata = await self._metadata(provider)
+        return {
+            "issuer": str(metadata["issuer"]),
+            "authorization_endpoint": str(metadata["authorization_endpoint"]),
+        }
+
+    async def begin_ephemeral_test(
+        self, provider: OidcProviderConfig, response: Response, callback_uri: str, draft_id: str
+    ) -> str:
+        metadata = await self._metadata(provider)
+        nonce = _b64(secrets.token_bytes(32))
+        state_payload = json.dumps({"nonce": nonce, "draft_id": draft_id}, separators=(",", ":"))
+        signed = _sign(_b64(state_payload.encode()), self.settings)
+        response.set_cookie(
+            "fm_setup_test",
+            signed,
+            httponly=True,
+            secure=self._secure(),
+            samesite="lax",
+            max_age=600,
+            path="/api/v1/auth",
+        )
+        params = {
+            "response_type": "code",
+            "client_id": provider.client_id,
+            "redirect_uri": callback_uri,
+            "scope": " ".join(provider.scopes),
+            "state": signed,
+            "nonce": nonce,
+        }
+        return f"{metadata['authorization_endpoint']}?{httpx.QueryParams(params)}"
+
+    async def complete_ephemeral_test(
+        self,
+        provider: OidcProviderConfig,
+        code: str,
+        state: str,
+        state_cookie: str | None,
+        callback_uri: str,
+    ) -> dict[str, Any]:
+        if not state_cookie or not hmac.compare_digest(state_cookie, state):
+            raise NotAuthenticatedError
+        raw = _verify(state, self.settings)
+        if raw is None:
+            raise NotAuthenticatedError
+        payload = json.loads(_unb64(raw))
+        metadata = await self._metadata(provider)
+        async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
+            token_response = await client.post(
+                metadata["token_endpoint"],
+                data={
+                    "grant_type": "authorization_code",
+                    "code": code,
+                    "redirect_uri": callback_uri,
+                    "client_id": provider.client_id,
+                    "client_secret": provider.client_secret.get_secret_value(),
+                },
+            )
+        if token_response.status_code >= 400:
+            raise NotAuthenticatedError
+        token = token_response.json()
+        claims = await self._validate_id_token(
+            str(token.get("id_token", "")), metadata, provider, payload["nonce"]
+        )
+        return {"draft_id": str(payload["draft_id"]), "claims": claims}
 
     async def _validate_id_token(
         self, token: str, metadata: dict[str, Any], provider: OidcProviderConfig, nonce: str

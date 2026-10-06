@@ -14,7 +14,6 @@ from firewall_manager.persistence.models import (
     AccessRule,
     AuditEvent,
     ChangeSet,
-    DirectUserPolicyGrant,
     FirewallManager,
     FirewallObject,
     Group,
@@ -210,7 +209,6 @@ def test_objects_and_zones_retain_authorizable_normalized_structure() -> None:
 def test_delegated_grants_are_durable_and_explicitly_context_scoped() -> None:
     for model in (
         PolicyDelegation,
-        DirectUserPolicyGrant,
         ObjectUseGrant,
         ZoneGrant,
         IpRangeGrant,
@@ -223,7 +221,6 @@ def test_delegated_grants_are_durable_and_explicitly_context_scoped() -> None:
     assert "direction" in ZoneGrant.__table__.c
     assert {"network", "ip_version"} <= set(IpRangeGrant.__table__.c.keys())
     assert "object_type" in ObjectCreateGrant.__table__.c
-    assert "user_id" in DirectUserPolicyGrant.__table__.c
 
 
 @pytest.mark.parametrize(
@@ -265,24 +262,21 @@ def test_identity_and_audit_models_preserve_security_context() -> None:
 
 def test_authorization_seed_upsert_matches_natural_key_after_admin_recreates_grant() -> None:
     organization_id = UUID("10000000-0000-0000-0000-000000000001")
-    user_id = UUID("30000000-0000-0000-0000-000000000001")
     group_id = UUID("20000000-0000-0000-0000-000000000002")
     policy_id = UUID("50000000-0000-0000-0000-000000000001")
     recreated_id = UUID("80000000-0000-0000-0000-000000000001")
-    existing = DirectUserPolicyGrant(
+    existing = PolicyDelegation(
         id=recreated_id,
         organization_id=organization_id,
-        user_id=user_id,
         group_id=group_id,
         policy_id=policy_id,
         capabilities=["view"],
         is_active=False,
         revision=4,
     )
-    seeded = DirectUserPolicyGrant(
+    seeded = PolicyDelegation(
         id=UUID("80000000-0000-0000-0000-000000000002"),
         organization_id=organization_id,
-        user_id=user_id,
         group_id=group_id,
         policy_id=policy_id,
         capabilities=["reorder_rule"],

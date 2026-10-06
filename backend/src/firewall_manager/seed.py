@@ -13,7 +13,6 @@ from firewall_manager.persistence.models import (
     Base,
     ChangeSet,
     ChangeSetOperation,
-    DirectUserPolicyGrant,
     FirewallManager,
     FirewallObject,
     Group,
@@ -106,7 +105,7 @@ def seed() -> None:
                 identity_subject="alice",
                 email="viewer@example.test",
                 display_name="Alice — Finance + Engineering",
-                role="viewer",
+                role="user",
                 is_active=True,
             ),
             User(
@@ -116,7 +115,7 @@ def seed() -> None:
                 identity_subject="auditor",
                 email="auditor@example.test",
                 display_name="Dev Auditor",
-                role="viewer",
+                role="user",
                 is_active=True,
             ),
             User(
@@ -126,7 +125,7 @@ def seed() -> None:
                 identity_subject="bob",
                 email="editor@example.test",
                 display_name="Bob — Finance only",
-                role="editor",
+                role="user",
                 is_active=True,
             ),
             User(
@@ -146,7 +145,7 @@ def seed() -> None:
                 identity_subject="other-viewer",
                 email="other-viewer@example.test",
                 display_name="Other Viewer",
-                role="viewer",
+                role="user",
                 is_active=True,
             ),
             User(
@@ -166,7 +165,7 @@ def seed() -> None:
                 identity_subject="firewall-admin",
                 email="firewall-admin@example.test",
                 display_name="Firewall Admin",
-                role="firewall_admin",
+                role="firewall_operator",
                 is_active=True,
             ),
             User(
@@ -176,7 +175,7 @@ def seed() -> None:
                 identity_subject="group-admin",
                 email="group-admin@example.test",
                 display_name="Group Admin",
-                role="group_admin",
+                role="user",
                 is_active=True,
             ),
             User(
@@ -186,7 +185,7 @@ def seed() -> None:
                 identity_subject="carol",
                 email="carol@example.test",
                 display_name="Carol — Engineering only",
-                role="editor",
+                role="user",
                 is_active=True,
             ),
             User(
@@ -196,7 +195,7 @@ def seed() -> None:
                 identity_subject="viewer",
                 email="read-only@example.test",
                 display_name="Viewer",
-                role="viewer",
+                role="user",
                 is_active=True,
             ),
             User(
@@ -206,7 +205,7 @@ def seed() -> None:
                 identity_subject="disabled",
                 email="disabled@example.test",
                 display_name="Disabled User",
-                role="viewer",
+                role="user",
                 is_active=False,
             ),
             User(
@@ -216,7 +215,7 @@ def seed() -> None:
                 identity_subject="no-groups",
                 email="no-groups@example.test",
                 display_name="No Groups",
-                role="viewer",
+                role="user",
                 is_active=True,
             ),
             GroupMembership(
@@ -343,7 +342,6 @@ def _seed_id(name: str) -> UUID:
 
 _AUTHORIZATION_NATURAL_KEYS: dict[type[Base], tuple[str, ...]] = {
     PolicyDelegation: ("group_id", "policy_id"),
-    DirectUserPolicyGrant: ("user_id", "group_id", "policy_id"),
     ObjectUseGrant: ("group_id", "policy_id", "object_id", "permission"),
     ZoneGrant: ("group_id", "policy_id", "zone_id", "direction"),
     IpRangeGrant: ("group_id", "policy_id", "network"),
@@ -475,14 +473,6 @@ def seed_authorization_scenarios(session: Session) -> None:
                 policy_id=policy.id,
                 capabilities=["view"],
             ),
-            DirectUserPolicyGrant(
-                id=_seed_id(f"alice-engineering-direct-{policy.id}"),
-                organization_id=IDS["org"],
-                user_id=IDS["viewer"],
-                group_id=IDS["group_engineering"],
-                policy_id=policy.id,
-                capabilities=["reorder_rule"],
-            ),
             ObjectUseGrant(
                 id=_seed_id(f"finance-object-{policy.id}"),
                 organization_id=IDS["org"],
@@ -492,28 +482,12 @@ def seed_authorization_scenarios(session: Session) -> None:
                 permission="use",
             ),
             ObjectUseGrant(
-                id=_seed_id(f"finance-object-read-{policy.id}"),
-                organization_id=IDS["org"],
-                group_id=IDS["group_finance"],
-                policy_id=policy.id,
-                object_id=finance_object.id,
-                permission="read",
-            ),
-            ObjectUseGrant(
                 id=_seed_id(f"datacenter-shared-object-{policy.id}"),
                 organization_id=IDS["org"],
                 group_id=IDS["group_datacenter"],
                 policy_id=policy.id,
                 object_id=shared_object.id,
                 permission="use",
-            ),
-            ObjectUseGrant(
-                id=_seed_id(f"engineering-object-read-{policy.id}"),
-                organization_id=IDS["org"],
-                group_id=IDS["group_engineering"],
-                policy_id=policy.id,
-                object_id=engineering_object.id,
-                permission="read",
             ),
             ObjectUseGrant(
                 id=_seed_id(f"engineering-object-{policy.id}"),

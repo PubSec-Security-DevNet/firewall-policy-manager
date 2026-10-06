@@ -33,6 +33,8 @@ from firewall_manager.security.oidc import COOKIE_NAME
 from firewall_manager.security.redaction import SecretRedactionFilter
 from firewall_manager.worker.tasks import execute_change_set, synchronize_provider_connection
 
+logger = logging.getLogger(__name__)
+
 HEALTH_PROBE_PATHS = frozenset(
     {
         "/api/v1/health/live",
@@ -125,7 +127,7 @@ def create_app() -> FastAPI:  # noqa: PLR0915 -- composition root owns all proce
                 # Development UI polling and multiple local tabs should not exhaust the
                 # production-sized default while the development identity remains bounded.
                 request_limit = max(request_limit, 5_000)
-            started = rate_window_started.get(client, now)
+            started = rate_window_started.setdefault(client, now)
             if now - started >= settings.api_rate_limit_window_seconds:
                 rate_window_started[client] = now
                 rate_counts[client] = 0
@@ -218,15 +220,26 @@ def create_app() -> FastAPI:  # noqa: PLR0915 -- composition root owns all proce
         return response
 
     @application.exception_handler(RequestValidationError)
-    async def validation_error(request: Request, _exc: RequestValidationError) -> JSONResponse:
+    async def validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
         correlation = getattr(request.state, "correlation_id", str(uuid4()))
+        fields = sorted(
+            {
+                str(item["loc"][-1])
+                for item in exc.errors()
+                if item.get("loc") and item["loc"][-1] != "body"
+            }
+        )
+        logger.warning(
+            "Request validation failed",
+            extra={"correlation_id": correlation, "path": request.url.path, "fields": fields},
+        )
         return JSONResponse(
             status_code=422,
             content={
                 "error": {
                     "code": "INVALID_REQUEST",
                     "message": "The request parameters are invalid.",
-                    "details": {},
+                    "details": {"fields": fields},
                     "correlation_id": correlation,
                 }
             },

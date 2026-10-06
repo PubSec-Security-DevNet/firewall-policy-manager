@@ -77,6 +77,56 @@ application environment with `BOOTSTRAP_ORGANIZATION_NAME`, `BOOTSTRAP_ADMIN_EMA
 only for that command. It refuses to run once any application User exists. Remove the variables
 after success; there is no public bootstrap route, password, or default credential.
 
+## Existing deployment recovery
+
+If an existing organization has no OIDC providers, the login page intentionally remains in the
+no-provider state. It does not expose the first-run wizard, because treating every provider-less
+database as new would allow an unauthenticated visitor to claim an existing deployment.
+
+An operator with shell access can authorize a one-time recovery window:
+
+```sh
+python -m firewall_manager.recovery_setup
+```
+
+The command automatically targets the sole organization. If the database contains more than one,
+discover and select the target explicitly:
+
+```sh
+python -m firewall_manager.recovery_setup --list-organizations
+python -m firewall_manager.recovery_setup --organization-name "Organization Name"
+```
+
+The command prints a short-lived URL containing a one-time recovery code. The recovery form accepts
+a new administrator display name, email, OIDC issuer/subject, and provider credentials. Successful
+completion creates a pending admin User keyed by the supplied email and adds the OIDC provider with
+its client secret encrypted in SecretStore. On the first successful login, the provider's stable
+identity is automatically bound to that email and the external identity mapping is created. The
+organization and existing data are preserved. The
+recovery code is stored only as a hash, expires after 30 minutes by default, and is consumed after
+successful setup. Do not send the URL through an untrusted channel.
+
+For a Docker Compose deployment, run the command in the backend container after applying the latest
+migration:
+
+```sh
+docker compose exec backend alembic upgrade head
+docker compose exec backend python -m firewall_manager.recovery_setup
+```
+
+If provider records must be removed before recovery, use the guarded removal command. It preserves
+the organization, Users, and application data, but deletes all OIDC providers for the selected
+organization, their encrypted client secrets, and their external-identity mappings:
+
+```sh
+python -m firewall_manager.remove_oidc_providers --list-organizations
+python -m firewall_manager.remove_oidc_providers \
+  --organization-name "Organization Name" --confirm
+```
+
+This command is destructive and requires `--confirm`. Run it only from the trusted application
+environment, then use `recovery_setup` to configure a replacement provider and administrator.
+
 ## Platform Admin proxy sessions
 
 Platform Admins may proxy as an active non-Platform-Admin User from the Users directory. A reason

@@ -45,11 +45,11 @@ import {
   IconHistory,
   IconHome,
   IconLockAccess,
+  IconLogout,
+  IconMail,
   IconPackages,
   IconPlugConnected,
   IconRocket,
-  IconSearch,
-  IconServerCog,
   IconShieldCheck,
   IconShieldLock,
   IconUsersGroup,
@@ -80,7 +80,42 @@ export type AppRoute =
   | 'groups'
   | 'grants'
   | 'identity-providers'
+  | 'smtp'
   | 'audit';
+
+export function FirewallPolicyWordmark() {
+  return (
+    <div className="fm-wordmark" aria-label="Firewall Policy Manager">
+      <svg className="fm-wordmark-shield" viewBox="0 0 24 24" role="img" aria-hidden="true">
+        <defs>
+          <linearGradient id="fm-wordmark-shield-gradient" x1="0" x2="1" y1="0" y2="0">
+            <stop offset="0" stopColor="#dc3545" />
+            <stop offset="0.36" stopColor="#ff5f35" />
+            <stop offset="0.5" stopColor="#fff0b3" />
+            <stop offset="0.64" stopColor="#ff5f35" />
+            <stop offset="1" stopColor="#ffd166" />
+          </linearGradient>
+        </defs>
+        <path
+          d="M12 3.5 19 7v5c0 4.6-3.1 7.5-7 9-3.9-1.5-7-4.4-7-9V7l7-3.5Z"
+          fill="none"
+          stroke="url(#fm-wordmark-shield-gradient)"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          strokeWidth="1.8"
+        />
+      </svg>
+      <div className="fm-wordmark-copy">
+        <div className="fm-wordmark-main">
+          <span className="fm-wordmark-flame">FIREWALL</span>
+        </div>
+        <div className="fm-wordmark-detail">
+          <span>POLICY MANAGER</span>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 interface NavigationItem {
   value: AppRoute;
@@ -106,25 +141,26 @@ const baseNavigation: NavigationSection[] = [
 ];
 const adminNavigation: NavigationSection[] = [
   {
-    label: 'Access & delegation',
+    label: 'Access management',
     items: [
       { value: 'users', label: 'Users', icon: IconUsersGroup },
       { value: 'groups', label: 'Groups', icon: IconBuildingCommunity },
       { value: 'grants', label: 'Access grants', icon: IconShieldLock },
       { value: 'identity-providers', label: 'Identity providers', icon: IconCloudLock },
+      { value: 'smtp', label: 'SMTP notifications', icon: IconMail },
     ],
   },
   {
     label: 'Infrastructure',
     items: [
-      { value: 'providers', label: 'Provider connections', icon: IconPlugConnected },
+      { value: 'providers', label: 'Providers', icon: IconPlugConnected },
       { value: 'sync', label: 'Sync & drift', icon: IconArrowsShuffle },
     ],
   },
   {
     label: 'Operations',
     items: [
-      { value: 'changesets-admin', label: 'All ChangeSets', icon: IconFileDiff },
+      { value: 'changesets-admin', label: 'All Changesets', icon: IconFileDiff },
       { value: 'deployments', label: 'Deployments', icon: IconRocket },
       { value: 'audit', label: 'Audit', icon: IconHistory },
     ],
@@ -145,7 +181,9 @@ export function AppLayout({
   workingPolicy,
   route,
   onRouteChange,
+  onLogout,
   approvalCount = 0,
+  rejectedChangeSetCount = 0,
 }: {
   children: ReactNode;
   headerActions?: ReactNode;
@@ -154,10 +192,13 @@ export function AppLayout({
   workingPolicy?: string;
   route?: AppRoute;
   onRouteChange?: (route: AppRoute) => void;
+  onLogout?: () => void;
   approvalCount?: number;
+  rejectedChangeSetCount?: number;
 }) {
   const [opened, { toggle, close }] = useDisclosure(false);
-  const canApprove = ['approver', 'firewall_admin', 'admin'].includes(session?.role ?? '');
+  const canApprove = ['approver', 'firewall_operator', 'admin'].includes(session?.role ?? '');
+  const notificationCount = approvalCount + rejectedChangeSetCount;
   const navigation =
     session?.role === 'admin'
       ? [...baseNavigation, ...adminNavigation, ...approvalNavigation]
@@ -168,12 +209,12 @@ export function AppLayout({
     <Stack h="100%" gap={0}>
       <div className="fm-working-context">
         <Text className="fm-working-context-label">Working Group</Text>
-        <Text className="fm-working-context-value">{workingGroup ?? 'Select a Group'}</Text>
+        <Text className="fm-working-context-value">{workingGroup ?? 'No group selected'}</Text>
         <Text className="fm-working-context-label" mt={7}>
           Access Policy
         </Text>
         <Text className="fm-working-context-policy">
-          {workingPolicy ?? 'Select an Access Policy'}
+          {workingPolicy ?? 'No access policy selected'}
         </Text>
       </div>
       <ScrollArea flex={1} type="auto" offsetScrollbars>
@@ -210,21 +251,6 @@ export function AppLayout({
           ))}
         </div>
       </ScrollArea>
-      <div className="fm-nav-footer">
-        <Group gap="xs" wrap="nowrap">
-          <ThemeIcon color="teal" variant="light" size="sm">
-            <IconServerCog size={14} />
-          </ThemeIcon>
-          <div>
-            <Text size="xs" fw={650}>
-              Control plane healthy
-            </Text>
-            <Text size="10px" c="dimmed">
-              API available
-            </Text>
-          </div>
-        </Group>
-      </div>
     </Stack>
   );
   return (
@@ -248,54 +274,59 @@ export function AppLayout({
               aria-label="Toggle navigation"
             />
             <Group className="fm-topbar-brand" gap="sm" wrap="nowrap">
-              <div className="fm-brand-mark" aria-hidden="true">
-                <IconShieldLock size={21} stroke={2.2} />
-              </div>
-              <div>
-                <Text fw={700} size="sm" lh={1.15}>
-                  Firewall Manager
-                </Text>
-                <Text size="10px" c="dimmed" tt="uppercase" fw={700} lts=".08em">
-                  Security control plane
-                </Text>
-              </div>
+              <FirewallPolicyWordmark />
             </Group>
           </Group>
           <Group gap="sm" wrap="nowrap">
-            <Tooltip label="Global search is not yet available">
-              <Button variant="subtle" color="gray" px={8} aria-label="Search">
-                <IconSearch size={18} />
-              </Button>
-            </Tooltip>
+            {session?.environment === 'development' && (
+              <span className="fm-dev-mode-badge">DEVELOPMENT MODE ENABLED</span>
+            )}
             <Tooltip
               label={
-                approvalCount ? `${approvalCount} approval(s) pending` : 'No pending approvals'
+                notificationCount ? `${notificationCount} notification(s)` : 'No notifications'
               }
             >
               <Button
                 variant="subtle"
                 color="gray"
                 px={8}
-                aria-label={approvalCount ? `${approvalCount} pending approvals` : 'Notifications'}
-                onClick={() => onRouteChange?.('approvals')}
+                aria-label={
+                  notificationCount ? `${notificationCount} notifications` : 'Notifications'
+                }
+                onClick={() => onRouteChange?.(approvalCount > 0 ? 'approvals' : 'changes')}
               >
                 <IconBell size={18} />
-                {approvalCount > 0 && (
+                {notificationCount > 0 && (
                   <Badge size="xs" color="red" circle>
-                    {approvalCount > 99 ? '99+' : approvalCount}
+                    {notificationCount > 99 ? '99+' : notificationCount}
                   </Badge>
                 )}
               </Button>
             </Tooltip>
             {session && (
-              <div className="fm-session-identity">
-                <Text size="xs" fw={650} ta="right">
-                  {session.email}
-                </Text>
-                <Text size="10px" c="dimmed" ta="right" tt="uppercase">
-                  {session.role}
-                </Text>
-              </div>
+              <Menu position="bottom-end" withArrow shadow="md">
+                <Menu.Target>
+                  <button
+                    type="button"
+                    className="fm-session-menu-trigger"
+                    aria-label="Account menu"
+                  >
+                    <div className="fm-session-identity">
+                      <Text size="xs" fw={650} ta="right">
+                        {session.email}
+                      </Text>
+                      <Text size="10px" c="dimmed" ta="right" tt="uppercase">
+                        {session.role}
+                      </Text>
+                    </div>
+                  </button>
+                </Menu.Target>
+                <Menu.Dropdown>
+                  <Menu.Item leftSection={<IconLogout size={16} />} onClick={onLogout}>
+                    Log out
+                  </Menu.Item>
+                </Menu.Dropdown>
+              </Menu>
             )}
             {headerActions}
           </Group>
@@ -480,6 +511,11 @@ const statusColors: Record<string, string> = {
   PROVIDER: 'gray',
   SHARED: 'violet',
   FAILED: 'red',
+  VALIDATION_FAILED: 'red',
+  PARTIALLY_SUCCEEDED: 'yellow',
+  CONFLICT: 'orange',
+  RECONCILIATION_REQUIRED: 'orange',
+  REJECTED: 'red',
   ERROR: 'red',
   DRIFTED: 'orange',
   DISABLED: 'gray',
@@ -581,8 +617,8 @@ export function MetricCard({
 }) {
   return (
     <AppCard className="fm-card fm-metric">
-      <Group justify="space-between" align="start">
-        <div>
+      <Group justify="space-between" align="start" wrap="nowrap">
+        <div className="fm-metric-copy">
           <Text size="xs" c="dimmed" tt="uppercase" fw={700} lts=".05em">
             {label}
           </Text>

@@ -68,6 +68,54 @@ make reset CONFIRM=local  # remove this project's stack, volumes, and locally bu
 See [docs/SBOM.md](docs/SBOM.md) for the complete local Syft and
 Dependency-Track workflow.
 
+## Organizations and access recovery
+
+The data model is organization-scoped: users, groups, policies, firewall managers, provider
+connections, OIDC providers, SMTP settings, secrets, and audit evidence belong to an organization.
+The initial setup wizard creates the first organization. The current application does not yet
+provide a UI for creating additional organizations or selecting an organization after login; the
+multi-organization model is currently used for tenant isolation and delegated authorization.
+
+The local Compose seed creates two demonstration organizations, `Example Organization` and
+`Isolated Organization`, for isolation testing. In development, choose the seeded `Other Viewer`
+identity (`other-viewer@example.test`) from the development-user selector to access the isolated
+organization. These are seed fixtures, not organizations created through the product UI.
+
+If an existing organization has lost all OIDC providers, run the recovery command inside the
+trusted application environment after applying migrations:
+
+```sh
+docker compose exec backend alembic upgrade head
+docker compose exec backend python -m firewall_manager.recovery_setup
+```
+
+With exactly one organization, the command targets it automatically. With multiple organizations,
+list them and select the intended target:
+
+```sh
+docker compose exec backend python -m firewall_manager.recovery_setup --list-organizations
+docker compose exec backend python -m firewall_manager.recovery_setup --organization-name "Organization Name"
+```
+
+If provider records themselves are preventing recovery, remove all OIDC providers for the target
+organization first. This is deliberately guarded because it removes provider configuration,
+encrypted OIDC client secrets, and their external-identity mappings while preserving users and
+application data:
+
+```sh
+docker compose exec backend python -m firewall_manager.remove_oidc_providers --list-organizations
+docker compose exec backend python -m firewall_manager.remove_oidc_providers \
+  --organization-name "Organization Name" --confirm
+```
+
+The command prints a short-lived, one-time recovery URL. Opening it shows a recovery setup form
+that creates a replacement administrator email enrollment and OIDC provider without deleting the
+existing organization or its data. The first successful login binds the provider identity to that
+email automatically. Recovery is operator-authorized and is unavailable to ordinary visitors;
+the URL is consumed after successful setup or expires after its configured window (30 minutes by
+default). A genuinely empty database uses the normal initial setup wizard and does not require a
+recovery URL.
+
 Build and smoke commands automatically remove stopped containers, unused networks, and dangling
 or obsolete tagged images labeled for the `firewall-manager-local` Compose project. Routine
 cleanup never removes database/Redis volumes, current images, running containers, or resources

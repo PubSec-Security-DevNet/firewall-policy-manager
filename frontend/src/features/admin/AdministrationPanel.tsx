@@ -5,6 +5,7 @@ import {
   IconKey,
   IconLink,
   IconPlus,
+  IconShieldCheck,
   IconShieldLock,
   IconUserCheck,
   IconUserPlus,
@@ -50,6 +51,7 @@ import {
 } from '../../ui';
 import { Tabs } from '../../ui/tabs';
 import { authorizationExpectedRevision, providerResourcesForPolicy } from './authorizationRevision';
+import { AdaptivePagination, useAdaptivePageSize } from '../shared/AdaptivePagination';
 
 type AdministrationView = 'users' | 'groups' | 'grants';
 type Row = Record<string, unknown>;
@@ -92,7 +94,8 @@ export function AdministrationPanel({ view }: { view: AdministrationView }) {
       void updateAdministrativeEnabled(resource, String(row.id), !enabled, Number(row.revision))
         .then(refresh)
         .then(() => {
-          if (resource === 'users') window.dispatchEvent(new Event(developmentIdentitiesChangedEvent));
+          if (resource === 'users')
+            window.dispatchEvent(new Event(developmentIdentitiesChangedEvent));
         })
         .catch((error: unknown) => setState(toError(error)));
     },
@@ -155,10 +158,12 @@ function GroupsPage({
   onApprovalToggle: (row: Row) => void;
 }) {
   const [query, setQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState<'enabled' | 'disabled' | 'all'>('enabled');
+  const [approvalFilter, setApprovalFilter] = useState<'all' | 'required' | 'not_required'>('all');
   const [createOpened, setCreateOpened] = useState(false);
   const [selectedGroup, setSelectedGroup] = useState<Row | null>(null);
   const active = snapshot.groups.filter((row) => Boolean(row.enabled)).length;
-  const groupRows = snapshot.groups.map((group) => ({
+  const groupRows: Row[] = snapshot.groups.map((group) => ({
     ...group,
     member_names: snapshot.memberships
       .filter((membership) => String(membership.group_id) === String(group.id))
@@ -167,7 +172,15 @@ function GroupsPage({
       (membership) => String(membership.group_id) === String(group.id),
     ).length,
   }));
-  const filtered = filterRows(groupRows, query, ['name', 'provider_slug', 'member_names']);
+  const statusFiltered = groupRows.filter((row) =>
+    statusFilter === 'all' ? true : Boolean(row.enabled) === (statusFilter === 'enabled'),
+  );
+  const approvalFiltered = statusFiltered.filter((row) =>
+    approvalFilter === 'all'
+      ? true
+      : Boolean(row.approval_required) === (approvalFilter === 'required'),
+  );
+  const filtered = filterRows(approvalFiltered, query, ['name', 'provider_slug', 'member_names']);
   const delegatedGroups = new Set(snapshot.policy_delegations.map((row) => String(row.group_id)));
   return (
     <Stack gap="lg">
@@ -185,7 +198,7 @@ function GroupsPage({
           icon={<IconUsers size={19} />}
         />
         <MetricCard
-          label="Delegated groups"
+          label="Groups with policy grants"
           value={delegatedGroups.size}
           detail="With policy access"
           icon={<IconShieldLock size={19} />}
@@ -200,7 +213,9 @@ function GroupsPage({
               <AppStatusBadge
                 value="COUNT"
                 label={
-                  query ? `${filtered.length} of ${groupRows.length}` : `${groupRows.length} groups`
+                  query || statusFilter !== 'all' || approvalFilter !== 'all'
+                    ? `${filtered.length} of ${groupRows.length}`
+                    : `${groupRows.length} groups`
                 }
               />
               <Button leftSection={<IconPlus size={16} />} onClick={() => setCreateOpened(true)}>
@@ -216,6 +231,28 @@ function GroupsPage({
               value={query}
               onChange={(event) => setQuery(event.currentTarget.value)}
             />
+            <Select
+              aria-label="Filter groups by status"
+              value={statusFilter}
+              onChange={(value) => setStatusFilter((value as typeof statusFilter) ?? 'enabled')}
+              allowDeselect={false}
+              data={[
+                { value: 'enabled', label: 'Enabled' },
+                { value: 'disabled', label: 'Disabled' },
+                { value: 'all', label: 'All status' },
+              ]}
+            />
+            <Select
+              aria-label="Filter groups by approval"
+              value={approvalFilter}
+              onChange={(value) => setApprovalFilter((value as typeof approvalFilter) ?? 'all')}
+              allowDeselect={false}
+              data={[
+                { value: 'all', label: 'All approval states' },
+                { value: 'required', label: 'Approval required' },
+                { value: 'not_required', label: 'Approval not required' },
+              ]}
+            />
           </div>
           <AdminTable
             label="Group directory"
@@ -224,22 +261,29 @@ function GroupsPage({
             labels={labels}
             tone="groups"
             actions={(row) => (
-              <Group gap="xs" wrap="nowrap">
+              <Group className="fm-group-row-actions" gap="xs" wrap="nowrap">
                 <ActionButton
                   intent={row.approval_required ? 'quiet-success' : 'secondary'}
+                  leftSection={<IconShieldCheck size={14} />}
+                  aria-label={row.approval_required ? 'Allow direct execution' : 'Require approval'}
+                  title={row.approval_required ? 'Allow direct execution' : 'Require approval'}
                   onClick={() => onApprovalToggle(row)}
                 >
-                  {row.approval_required ? 'Approval required' : 'Allow direct execution'}
+                  Approval
                 </ActionButton>
                 <ActionButton
                   intent="secondary"
                   leftSection={<IconUserPlus size={14} />}
+                  aria-label="Manage members"
+                  title="Manage members"
                   onClick={() => setSelectedGroup(row)}
                 >
-                  Manage members
+                  Members
                 </ActionButton>
                 <ActionButton
                   intent={row.enabled ? 'quiet-danger' : 'quiet-success'}
+                  aria-label={row.enabled ? 'Disable group' : 'Enable group'}
+                  title={row.enabled ? 'Disable group' : 'Enable group'}
                   onClick={() => onToggle(row)}
                 >
                   {row.enabled ? 'Disable' : 'Enable'}
@@ -290,11 +334,19 @@ function UsersPage({
   onToggle: (row: Row) => void;
 }) {
   const [query, setQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState<'enabled' | 'disabled' | 'all'>('enabled');
+  const [roleFilter, setRoleFilter] = useState('all');
+  const [page, setPage] = useState(1);
+  const pageSize = useAdaptivePageSize();
   const [createOpened, setCreateOpened] = useState(false);
   const [selectedUser, setSelectedUser] = useState<Row | null>(null);
   const [roleUser, setRoleUser] = useState<Row | null>(null);
+  const [proxyUser, setProxyUser] = useState<Row | null>(null);
+  const [proxyReason, setProxyReason] = useState('');
+  const [proxySaving, setProxySaving] = useState(false);
+  const [proxyFeedback, setProxyFeedback] = useState<Feedback | null>(null);
   const active = snapshot.users.filter((row) => Boolean(row.enabled)).length;
-  const userRows = snapshot.users.map((user) => ({
+  const userRows: Row[] = snapshot.users.map((user) => ({
     ...user,
     group_names: snapshot.memberships
       .filter((membership) => String(membership.user_id) === String(user.id))
@@ -303,18 +355,49 @@ function UsersPage({
       (membership) => String(membership.user_id) === String(user.id),
     ).length,
   }));
-  const filtered = filterRows(userRows, query, ['display_name', 'email', 'role', 'group_names']);
+  const statusFiltered = userRows.filter((row) =>
+    statusFilter === 'all' ? true : Boolean(row.enabled) === (statusFilter === 'enabled'),
+  );
+  const roleFiltered = statusFiltered.filter(
+    (row) => roleFilter === 'all' || String(row.role) === roleFilter,
+  );
+  const filtered = filterRows(roleFiltered, query, [
+    'display_name',
+    'email',
+    'role',
+    'group_names',
+  ]);
+  const pagedUsers = filtered.slice((page - 1) * pageSize, page * pageSize);
+  useEffect(() => {
+    setPage(1);
+  }, [query, statusFilter, roleFilter]);
+  useEffect(() => {
+    const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
+    setPage((current) => Math.min(current, pageCount));
+  }, [filtered.length, pageSize]);
   const usersWithGroups = new Set(snapshot.memberships.map((row) => String(row.user_id))).size;
-  const proxyAsUser = async (row: Row) => {
-    const reason = window.prompt(
-      `Enter a reason for proxying as ${String(row.display_name)}. This will be recorded in the audit log.`,
-    );
-    if (!reason?.trim()) return;
+  const closeProxyDialog = () => {
+    if (proxySaving) return;
+    setProxyUser(null);
+    setProxyReason('');
+    setProxyFeedback(null);
+  };
+  const proxyAsUser = (row: Row) => {
+    setProxyUser(row);
+    setProxyReason('');
+    setProxyFeedback(null);
+  };
+  const submitProxy = async () => {
+    if (!proxyUser || !proxyReason.trim()) return;
+    setProxySaving(true);
+    setProxyFeedback(null);
     try {
-      await startProxySession(String(row.id), reason.trim());
+      await startProxySession(String(proxyUser.id), proxyReason.trim());
       window.location.reload();
     } catch (error) {
-      window.alert(errorMessage(error));
+      setProxyFeedback({ kind: 'error', message: errorMessage(error) });
+    } finally {
+      setProxySaving(false);
     }
   };
   return (
@@ -348,7 +431,9 @@ function UsersPage({
               <AppStatusBadge
                 value="COUNT"
                 label={
-                  query ? `${filtered.length} of ${userRows.length}` : `${userRows.length} users`
+                  query || statusFilter !== 'all' || roleFilter !== 'all'
+                    ? `${filtered.length} of ${roleFiltered.length}`
+                    : `${userRows.length} users`
                 }
               />
               <Button leftSection={<IconPlus size={16} />} onClick={() => setCreateOpened(true)}>
@@ -364,10 +449,38 @@ function UsersPage({
               value={query}
               onChange={(event) => setQuery(event.currentTarget.value)}
             />
+            <Select
+              aria-label="Filter users by status"
+              value={statusFilter}
+              onChange={(value) => {
+                if (value === 'enabled' || value === 'disabled' || value === 'all') {
+                  setStatusFilter(value);
+                }
+              }}
+              allowDeselect={false}
+              data={[
+                { value: 'enabled', label: 'Enabled users' },
+                { value: 'all', label: 'All users' },
+                { value: 'disabled', label: 'Disabled users' },
+              ]}
+            />
+            <Select
+              aria-label="Filter users by role"
+              value={roleFilter}
+              onChange={(value) => setRoleFilter(value ?? 'all')}
+              allowDeselect={false}
+              data={[
+                { value: 'all', label: 'All roles' },
+                ...roleOptions.map((option) => ({
+                  value: option.value,
+                  label: option.label,
+                })),
+              ]}
+            />
           </div>
           <AdminTable
             label="User directory"
-            rows={filtered}
+            rows={pagedUsers}
             fields={['display_name', 'email', 'role', 'group_count', 'enabled']}
             labels={labels}
             tone="users"
@@ -376,24 +489,32 @@ function UsersPage({
                 <ActionButton
                   intent="secondary"
                   leftSection={<IconUserCheck size={14} />}
-                  onClick={() => { void proxyAsUser(row); }}
+                  aria-label="Proxy as user"
+                  title="Proxy as user"
+                  onClick={() => {
+                    void proxyAsUser(row);
+                  }}
                   disabled={row.role === 'admin' || !row.enabled}
                 >
-                  Proxy as user
+                  Proxy
                 </ActionButton>
                 <ActionButton
                   intent="secondary"
                   leftSection={<IconBuildingCommunity size={14} />}
+                  aria-label="Manage groups"
+                  title="Manage groups"
                   onClick={() => setSelectedUser(row)}
                 >
-                  Manage Groups
+                  Groups
                 </ActionButton>
                 <ActionButton
                   intent="secondary"
                   leftSection={<IconEdit size={14} />}
+                  aria-label="Change role"
+                  title="Change role"
                   onClick={() => setRoleUser(row)}
                 >
-                  Change role
+                  Role
                 </ActionButton>
                 <ActionButton
                   intent={row.enabled ? 'quiet-danger' : 'quiet-success'}
@@ -403,6 +524,12 @@ function UsersPage({
                 </ActionButton>
               </Group>
             )}
+          />
+          <AdaptivePagination
+            page={page}
+            pageSize={pageSize}
+            total={filtered.length}
+            onPageChange={setPage}
           />
         </AppSection>
       </Card>
@@ -437,6 +564,63 @@ function UsersPage({
         onSaved={onSaved}
         onClose={() => setRoleUser(null)}
       />
+      <Dialog
+        opened={proxyUser !== null}
+        onClose={closeProxyDialog}
+        title="Proxy as user"
+        closeButtonProps={{ 'aria-label': 'Close' }}
+        classNames={{
+          content: 'fm-management-modal',
+          header: 'fm-management-modal-header',
+          body: 'fm-management-modal-body',
+        }}
+        centered
+      >
+        <form
+          onSubmit={(event: React.FormEvent<HTMLFormElement>) => {
+            event.preventDefault();
+            void submitProxy();
+          }}
+        >
+          <Stack gap="md">
+            <div className="fm-role-subject">
+              <ThemeIcon variant="light" color="blue" size="lg">
+                <IconUserCheck size={19} />
+              </ThemeIcon>
+              <div>
+                <Text fw={700}>{primitiveString(proxyUser?.display_name) || 'User'}</Text>
+                <Text size="xs" c="dimmed">
+                  {primitiveString(proxyUser?.email)}
+                </Text>
+              </div>
+              <AppStatusBadge value="PROXY" label="Proxy session" />
+            </div>
+            <TextInput
+              required
+              label="Reason for proxying"
+              description="This reason will be recorded in the audit log."
+              placeholder="Investigating a reported access issue"
+              value={proxyReason}
+              onChange={(event) => setProxyReason(event.currentTarget.value)}
+              autoFocus
+            />
+            <FeedbackMessage feedback={proxyFeedback} />
+            <Group justify="flex-end" gap="sm">
+              <Button
+                type="button"
+                variant="subtle"
+                onClick={closeProxyDialog}
+                disabled={proxySaving}
+              >
+                Cancel
+              </Button>
+              <Button type="submit" loading={proxySaving} disabled={!proxyReason.trim()}>
+                Start proxy session
+              </Button>
+            </Group>
+          </Stack>
+        </form>
+      </Dialog>
     </Stack>
   );
 }
@@ -455,39 +639,52 @@ function AccessGrantsPage({
   const [editor, setEditor] = useState<GrantEditor | null>(null);
   const [grantQuery, setGrantQuery] = useState('');
   const [grantSort, setGrantSort] = useState<string | null>('ascending');
-  const policyGrants =
-    snapshot.policy_delegations.length + snapshot.direct_user_policy_grants.length;
+  const [grantGroup, setGrantGroup] = useState<string | null>(null);
+  const [grantPolicy, setGrantPolicy] = useState<string | null>(null);
+  const scopeRows = (rows: Row[]) =>
+    rows.filter(
+      (row) =>
+        (!grantGroup || String(row.group_id) === grantGroup) &&
+        (!grantPolicy || String(row.policy_id) === grantPolicy),
+    );
+  const policyGrantRows = scopeRows(snapshot.policy_delegations);
   const objectTypes = new Map(
     snapshot.objects.map((object) => [String(object.id), primitiveString(object.object_type)]),
   );
   const objectUseRows = (types: string[]) =>
-    snapshot.object_use_grants.filter((grant) =>
-      types.includes(objectTypes.get(String(grant.object_id)) ?? ''),
-    );
+    scopeRows(snapshot.object_use_grants)
+      .filter((grant) => types.includes(objectTypes.get(String(grant.object_id)) ?? ''))
+      .map((grant) => ({
+        ...grant,
+        object_type: objectTypes.get(String(grant.object_id)) ?? 'UNKNOWN',
+      }));
   const networkObjectGrants = objectUseRows(['NETWORK', 'NETWORK_GROUP']);
   const portObjectGrants = objectUseRows(['PORT_SERVICE', 'PORT_SERVICE_GROUP']);
   const urlObjectGrants = objectUseRows(['URL', 'URL_GROUP']);
-  const applicationObjectGrants = objectUseRows(['APPLICATION', 'APPLICATION_FILTER']);
-  const boundaryGrants = snapshot.zone_grants.length + snapshot.ip_range_grants.length;
-  const creationAndMappings =
-    snapshot.object_create_grants.length + snapshot.category_mappings.length;
+  const visibleObjectGrants = [...networkObjectGrants, ...portObjectGrants, ...urlObjectGrants];
+  const visibleObjectCreateGrants = scopeRows(snapshot.object_create_grants).filter(
+    (grant) => !['APPLICATION', 'APPLICATION_FILTER'].includes(primitiveString(grant.object_type)),
+  );
+  const boundaryGrants =
+    scopeRows(snapshot.zone_grants).length + scopeRows(snapshot.ip_range_grants).length;
+  const creationGrants = visibleObjectCreateGrants.length;
   return (
     <Stack gap="lg">
       <Alert color="blue" title="Immediate authorization changes">
         Grant updates apply on the next server-authorized request. They never enable real-provider
-        writes or bypass ChangeSet controls.
+        writes or bypass Changeset controls.
       </Alert>
       <SimpleGrid cols={{ base: 1, sm: 2, lg: 4 }}>
         <MetricCard
           label="Policy assignments"
-          value={policyGrants}
-          detail="Group and direct User access"
+          value={policyGrantRows.length}
+          detail="Group policy access"
           icon={<IconShieldLock size={19} />}
         />
         <MetricCard
           label="Object permissions"
-          value={snapshot.object_use_grants.length}
-          detail="Network, port, URL, and application access"
+          value={visibleObjectGrants.length}
+          detail="Network, port, and URL access"
           icon={<IconKey size={19} />}
         />
         <MetricCard
@@ -497,9 +694,9 @@ function AccessGrantsPage({
           icon={<IconLink size={19} />}
         />
         <MetricCard
-          label="Creation & mappings"
-          value={creationAndMappings}
-          detail="Creation rights and ownership mappings"
+          label="Creation rights"
+          value={creationGrants}
+          detail="Objects this Group may create"
           icon={<IconLink size={19} />}
         />
       </SimpleGrid>
@@ -516,6 +713,38 @@ function AccessGrantsPage({
               onChange={(event) => setGrantQuery(event.currentTarget.value)}
             />
             <Select
+              aria-label="Filter grants by group"
+              placeholder="All groups"
+              value={grantGroup}
+              onChange={setGrantGroup}
+              clearable
+              searchable
+              data={[
+                ...snapshot.groups
+                  .map((group) => ({
+                    value: String(group.id),
+                    label: String(group.name ?? group.id),
+                  }))
+                  .sort((left, right) => left.label.localeCompare(right.label)),
+              ]}
+            />
+            <Select
+              aria-label="Filter grants by access policy"
+              placeholder="All policies"
+              value={grantPolicy}
+              onChange={setGrantPolicy}
+              clearable
+              searchable
+              data={[
+                ...snapshot.policies
+                  .map((policy) => ({
+                    value: String(policy.id),
+                    label: String(policy.name ?? policy.id),
+                  }))
+                  .sort((left, right) => left.label.localeCompare(right.label)),
+              ]}
+            />
+            <Select
               aria-label="Sort access grants"
               value={grantSort}
               onChange={setGrantSort}
@@ -530,52 +759,37 @@ function AccessGrantsPage({
             <Tabs.List>
               <Tabs.Tab value="policy">Policy access</Tabs.Tab>
               <Tabs.Tab value="resources">Resource access</Tabs.Tab>
-              <Tabs.Tab value="mappings">Category mappings</Tabs.Tab>
             </Tabs.List>
             <Tabs.Panel value="policy" pt="lg">
               <GrantTableSection
-                title="Group policy delegations"
-                rows={snapshot.policy_delegations}
+                title="Group policy grants"
+                rows={policyGrantRows}
                 fields={['group_id', 'policy_id', 'capabilities']}
                 resource="policy-delegations"
                 labels={labels}
                 query={grantQuery}
                 sort={grantSort}
-                addLabel="Add group delegation"
+                addLabel="Add group policy grant"
                 onAdd={() => setEditor({ kind: 'policy-delegations' })}
-                onRevoke={onRevoke}
-                onEdit={(kind, row) => setEditor({ kind, row })}
-              />
-              <GrantTableSection
-                title="Direct User policy grants"
-                rows={snapshot.direct_user_policy_grants}
-                fields={['user_id', 'group_id', 'policy_id', 'capabilities']}
-                resource="direct-user-policy-grants"
-                labels={labels}
-                query={grantQuery}
-                sort={grantSort}
-                addLabel="Add User policy grant"
-                onAdd={() => setEditor({ kind: 'direct-user-policy-grants' })}
                 onRevoke={onRevoke}
                 onEdit={(kind, row) => setEditor({ kind, row })}
               />
             </Tabs.Panel>
             <Tabs.Panel value="resources" pt="lg">
-              <Tabs defaultValue="network-objects" className="fm-resource-grant-tabs">
+              <Tabs defaultValue="ip-ranges" className="fm-resource-grant-tabs">
                 <Tabs.List>
+                  <Tabs.Tab value="ip-ranges">IP ranges</Tabs.Tab>
+                  <Tabs.Tab value="security-zones">Zones</Tabs.Tab>
                   <Tabs.Tab value="network-objects">Networks</Tabs.Tab>
                   <Tabs.Tab value="port-objects">Ports</Tabs.Tab>
                   <Tabs.Tab value="url-objects">URLs</Tabs.Tab>
-                  <Tabs.Tab value="application-objects">Applications</Tabs.Tab>
-                  <Tabs.Tab value="security-zones">Zones</Tabs.Tab>
-                  <Tabs.Tab value="ip-ranges">IP ranges</Tabs.Tab>
-                  <Tabs.Tab value="object-creation">Creation</Tabs.Tab>
+                  <Tabs.Tab value="object-creation">Object creation</Tabs.Tab>
                 </Tabs.List>
                 <Tabs.Panel value="network-objects" pt="lg">
                   <GrantTableSection
                     title="Network objects"
                     rows={networkObjectGrants}
-                    fields={['group_id', 'policy_id', 'object_id', 'permission']}
+                    fields={['group_id', 'policy_id', 'object_id', 'object_type']}
                     resource="object-use-grants"
                     labels={labels}
                     query={grantQuery}
@@ -595,7 +809,7 @@ function AccessGrantsPage({
                   <GrantTableSection
                     title="Port objects"
                     rows={portObjectGrants}
-                    fields={['group_id', 'policy_id', 'object_id', 'permission']}
+                    fields={['group_id', 'policy_id', 'object_id', 'object_type']}
                     resource="object-use-grants"
                     labels={labels}
                     query={grantQuery}
@@ -615,32 +829,14 @@ function AccessGrantsPage({
                   <GrantTableSection
                     title="URL objects"
                     rows={urlObjectGrants}
-                    fields={['group_id', 'policy_id', 'object_id', 'permission']}
+                    fields={['group_id', 'policy_id', 'object_id', 'object_type']}
                     resource="object-use-grants"
                     labels={labels}
                     query={grantQuery}
                     sort={grantSort}
                     addLabel="Add URL object access"
-                    onAdd={() => setEditor({ kind: 'object-use-grants', objectTypes: ['URL'] })}
-                    onRevoke={onRevoke}
-                    onEdit={(kind, row) => setEditor({ kind, row })}
-                  />
-                </Tabs.Panel>
-                <Tabs.Panel value="application-objects" pt="lg">
-                  <GrantTableSection
-                    title="Application objects"
-                    rows={applicationObjectGrants}
-                    fields={['group_id', 'policy_id', 'object_id', 'permission']}
-                    resource="object-use-grants"
-                    labels={labels}
-                    query={grantQuery}
-                    sort={grantSort}
-                    addLabel="Add application object access"
                     onAdd={() =>
-                      setEditor({
-                        kind: 'object-use-grants',
-                        objectTypes: ['APPLICATION', 'APPLICATION_FILTER'],
-                      })
+                      setEditor({ kind: 'object-use-grants', objectTypes: ['URL', 'URL_GROUP'] })
                     }
                     onRevoke={onRevoke}
                     onEdit={(kind, row) => setEditor({ kind, row })}
@@ -649,7 +845,7 @@ function AccessGrantsPage({
                 <Tabs.Panel value="security-zones" pt="lg">
                   <GrantTableSection
                     title="Security zones"
-                    rows={snapshot.zone_grants}
+                    rows={scopeRows(snapshot.zone_grants)}
                     fields={['group_id', 'policy_id', 'zone_id', 'direction']}
                     resource="zone-grants"
                     labels={labels}
@@ -664,7 +860,7 @@ function AccessGrantsPage({
                 <Tabs.Panel value="ip-ranges" pt="lg">
                   <GrantTableSection
                     title="IP ranges"
-                    rows={snapshot.ip_range_grants}
+                    rows={scopeRows(snapshot.ip_range_grants)}
                     fields={['group_id', 'policy_id', 'network']}
                     resource="ip-range-grants"
                     labels={labels}
@@ -679,7 +875,7 @@ function AccessGrantsPage({
                 <Tabs.Panel value="object-creation" pt="lg">
                   <GrantTableSection
                     title="Object creation"
-                    rows={snapshot.object_create_grants}
+                    rows={visibleObjectCreateGrants}
                     fields={['group_id', 'policy_id', 'object_type']}
                     resource="object-create-grants"
                     labels={labels}
@@ -692,27 +888,6 @@ function AccessGrantsPage({
                   />
                 </Tabs.Panel>
               </Tabs>
-            </Tabs.Panel>
-            <Tabs.Panel value="mappings" pt="lg">
-              <GrantTableSection
-                title="Provider category mappings"
-                rows={snapshot.category_mappings}
-                fields={[
-                  'group_id',
-                  'policy_id',
-                  'category_id',
-                  'expected_category_name',
-                  'sync_state',
-                ]}
-                resource="category-mappings"
-                labels={labels}
-                query={grantQuery}
-                sort={grantSort}
-                addLabel="Add category mapping"
-                onAdd={() => setEditor({ kind: 'category-mappings' })}
-                onRevoke={onRevoke}
-                onEdit={(kind, row) => setEditor({ kind, row })}
-              />
             </Tabs.Panel>
           </Tabs>
         </AppSection>
@@ -762,9 +937,7 @@ function CreateIdentityForm({
   const isUser = resource === 'users';
   const [primary, setPrimary] = useState('');
   const [secondary, setSecondary] = useState('');
-  const [identityIssuer, setIdentityIssuer] = useState('urn:firewall-manager:development');
-  const [identitySubject, setIdentitySubject] = useState('');
-  const [role, setRole] = useState<string | null>('viewer');
+  const [role, setRole] = useState<string | null>('user');
   const [approvalRequired, setApprovalRequired] = useState(false);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   const [saving, setSaving] = useState(false);
@@ -775,9 +948,7 @@ function CreateIdentityForm({
       ? {
           display_name: primary.trim(),
           email: secondary.trim(),
-          identity_issuer: identityIssuer.trim(),
-          identity_subject: (identitySubject.trim() || secondary.trim()),
-          role: role ?? 'viewer',
+          role: role ?? 'user',
         }
       : {
           name: primary.trim(),
@@ -808,7 +979,7 @@ function CreateIdentityForm({
         <Text size="sm" c="dimmed">
           {isUser
             ? 'Register a control-plane identity. Group membership and resource access are assigned separately.'
-            : 'Create a stable ownership boundary for provider naming and policy delegation.'}
+            : 'Create a stable ownership boundary for provider naming and policy grants.'}
         </Text>
         <TextInput
           required
@@ -831,39 +1002,26 @@ function CreateIdentityForm({
           onChange={(event) => setSecondary(event.currentTarget.value)}
         />
         {isUser && (
-          <>
-            <TextInput
-              required
-              label="External identity issuer"
-              placeholder="https://login.microsoftonline.com/<tenant>/v2.0"
-              value={identityIssuer}
-              onChange={(event) => setIdentityIssuer(event.currentTarget.value)}
-            />
-            <TextInput
-              label="External subject (sub)"
-              placeholder="Provider subject claim"
-              value={identitySubject}
-              onChange={(event) => setIdentitySubject(event.currentTarget.value)}
-            />
-            <Text size="xs" c="dimmed">
-              The issuer and subject are the stable OIDC identity mapping. Email is only a display attribute.
-            </Text>
-          </>
+          <Text size="xs" c="dimmed">
+            The OIDC identity is linked automatically when this email address signs in for the first
+            time.
+          </Text>
         )}
         {isUser && (
           <Select
             label="Application role"
-            description="Resource access is still controlled by memberships and grants."
+            description="Select a role to see its platform capabilities. Group memberships and policy grants control access."
             value={role}
             onChange={setRole}
             data={roleOptions}
             allowDeselect={false}
           />
         )}
+        {isUser && <RoleDescription role={role} />}
         {!isUser && (
           <Checkbox
-            label="Require ChangeSet approval"
-            description="Group members must have a separate approver approve each validated ChangeSet before execution."
+            label="Require Changeset approval"
+            description="Group members must have a separate approver approve each validated Changeset before execution."
             checked={approvalRequired}
             onChange={(event) => setApprovalRequired(event.currentTarget.checked)}
           />
@@ -887,7 +1045,7 @@ function RoleManager({
   onClose: () => void;
 }) {
   const [role, setRole] = useState<string | null>(() =>
-    user ? primitiveString(user.role) : 'viewer',
+    user ? primitiveString(user.role) : 'user',
   );
   const [saving, setSaving] = useState(false);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
@@ -944,16 +1102,13 @@ function RoleManager({
           </div>
           <Select
             label="Application role"
-            description="The role controls platform-level actions. Group memberships and access grants remain separate."
+            description="Select a role to see its platform capabilities. Group memberships and policy grants control access."
             value={role}
             onChange={setRole}
             data={roleOptions}
             allowDeselect={false}
           />
-          <Alert color="blue">
-            Platform administrators can manage identities, grants, and provider connections.
-            Firewall and Group administrators have narrower operational authority.
-          </Alert>
+          <RoleDescription role={role} />
           <FeedbackMessage feedback={feedback} />
           <Button
             type="submit"
@@ -1093,7 +1248,7 @@ function MembershipManager({
     >
       <Stack gap="md">
         <div className="fm-membership-subject">
-          <ThemeIcon variant="light" color="gray" size="lg">
+          <ThemeIcon variant="light" color="blue" size="lg">
             {initials(subjectName)}
           </ThemeIcon>
           <div className="fm-membership-identity">
@@ -1104,7 +1259,7 @@ function MembershipManager({
             <Text size="xs" c="dimmed">
               {mode === 'user'
                 ? 'Groups define the ownership contexts this User can work through.'
-                : 'Members can select this Group when working with delegated policies.'}
+                : 'Members can select this Group when working with policy grants.'}
             </Text>
           </div>
           <div className="fm-membership-subject-status">
@@ -1198,13 +1353,11 @@ function MembershipManager({
 }
 
 const grantKinds = [
-  ['policy-delegations', 'Group policy delegation'],
-  ['direct-user-policy-grants', 'Direct User policy grant'],
+  ['policy-delegations', 'Group policy grant'],
   ['object-use-grants', 'Object access'],
   ['zone-grants', 'Security zone'],
   ['ip-range-grants', 'IP range'],
   ['object-create-grants', 'Object creation'],
-  ['category-mappings', 'Provider category mapping'],
 ] as const;
 
 const capabilityOptions = [
@@ -1229,7 +1382,6 @@ function GrantForm({
   onCompleted: () => void;
 }) {
   const [kind, setKind] = useState<string>(initial.kind);
-  const [userId, setUserId] = useState<string | null>(nullableString(initial.row?.user_id));
   const [groupId, setGroupId] = useState<string | null>(nullableString(initial.row?.group_id));
   const [policyId, setPolicyId] = useState<string | null>(nullableString(initial.row?.policy_id));
   const [resourceId, setResourceId] = useState<string | null>(
@@ -1250,19 +1402,23 @@ function GrantForm({
           initial.objectTypes?.includes(primitiveString(resource.object_type)),
         )
       : resources;
-    return options(filteredResources, 'name');
+    return filteredResources
+      .filter((resource) => resource.enabled !== false)
+      .map((resource) => ({
+        value: String(resource.id),
+        label:
+          kind === 'object-use-grants'
+            ? `${String(resource.name ?? resource.id)} (${objectTypeLabel(primitiveString(resource.object_type))})`
+            : String(resource.name ?? resource.id),
+      }));
   }, [snapshot, kind, policyId, initial.objectTypes]);
-  const resourceRequired = ['object-use-grants', 'zone-grants', 'category-mappings'].includes(kind);
-  const directUser = kind === 'direct-user-policy-grants';
-  const capabilityGrant = kind === 'policy-delegations' || directUser;
+  const resourceRequired = ['object-use-grants', 'zone-grants'].includes(kind);
+  const capabilityGrant = kind === 'policy-delegations';
   const editing = Boolean(initial.row);
   const mutableGrant = grantIsMutable(kind);
-  const valueRequired = ['ip-range-grants', 'object-create-grants', 'category-mappings'].includes(
-    kind,
-  );
+  const valueRequired = ['ip-range-grants', 'object-create-grants'].includes(kind);
   const canSubmit =
     Boolean(groupId && policyId) &&
-    (!directUser || Boolean(userId)) &&
     (!resourceRequired || Boolean(resourceId)) &&
     (!valueRequired || Boolean(value.trim())) &&
     (!capabilityGrant || capabilities.length > 0);
@@ -1277,23 +1433,18 @@ function GrantForm({
   const submit = async () => {
     if (!canSubmit) return;
     const payload: Row = { group_id: groupId, policy_id: policyId };
-    if (directUser) payload.user_id = userId;
     if (capabilityGrant) {
       payload.capabilities = capabilities;
       payload.is_active = true;
     } else if (kind === 'object-use-grants') {
       payload.object_id = resourceId;
-      payload.permission = value || 'use';
+      payload.permission = 'use';
     } else if (kind === 'zone-grants') {
+      if (editing) payload.id = initial.row?.id;
       payload.zone_id = resourceId;
       payload.direction = value || 'BOTH';
     } else if (kind === 'ip-range-grants') payload.network = value.trim();
     else if (kind === 'object-create-grants') payload.object_type = value;
-    else if (kind === 'category-mappings') {
-      payload.category_id = resourceId;
-      payload.expected_category_name = value.trim();
-      payload.sync_state = 'PENDING';
-    }
     const expectedRevision = authorizationExpectedRevision(snapshot, kind, payload);
     if (expectedRevision !== undefined) payload.expected_revision = expectedRevision;
     setSaving(true);
@@ -1315,13 +1466,10 @@ function GrantForm({
         void submit();
       }}
     >
-      <Group justify="space-between" align="start" mb="md">
-        <Text size="sm" c="dimmed" maw={620}>
-          Select a subject, policy boundary, and the exact permission to grant. Existing records
-          retain their logical scope while their permission details are updated.
-        </Text>
-        <AppStatusBadge value="ACTIVE" label="Server enforced" />
-      </Group>
+      <Text size="sm" c="dimmed" maw={620} mb="md">
+        Select a subject and policy boundary. Existing records retain their logical scope while
+        their grant details are updated.
+      </Text>
       <div className="fm-form-section">
         <Text className="fm-form-section-label">1 · Grant type</Text>
         <Select
@@ -1329,7 +1477,6 @@ function GrantForm({
           value={kind}
           onChange={(selected) => {
             setKind(selected ?? 'policy-delegations');
-            setUserId(null);
             resetDependentFields();
           }}
           data={grantKinds.map(([itemValue, label]) => ({ value: itemValue, label }))}
@@ -1339,18 +1486,7 @@ function GrantForm({
       </div>
       <div className="fm-form-section">
         <Text className="fm-form-section-label">2 · Subject and scope</Text>
-        <SimpleGrid cols={{ base: 1, md: directUser ? 3 : 2 }}>
-          {directUser && (
-            <Select
-              searchable
-              label="User"
-              placeholder="Choose a user"
-              value={userId}
-              onChange={setUserId}
-              data={options(snapshot.users, 'display_name')}
-              disabled={editing}
-            />
-          )}
+        <SimpleGrid cols={{ base: 1, md: 2 }}>
           <Select
             searchable
             label="Group context"
@@ -1395,20 +1531,6 @@ function GrantForm({
             value={resourceId}
             onChange={setResourceId}
             data={resourceOptions}
-            disabled={editing && kind !== 'category-mappings'}
-          />
-        )}
-        {kind === 'object-use-grants' && (
-          <Select
-            label="Object permission"
-            description="Read permits inspection only. Use permits referencing the object in policy rules and ChangeSets; Read does not imply Use."
-            value={value || 'use'}
-            onChange={(selected) => setValue(selected ?? 'use')}
-            data={[
-              { value: 'read', label: 'Read only' },
-              { value: 'use', label: 'Use in policy rules' },
-            ]}
-            allowDeselect={false}
             disabled={editing}
           />
         )}
@@ -1423,7 +1545,7 @@ function GrantForm({
               { value: 'DESTINATION', label: 'Destination only' },
             ]}
             allowDeselect={false}
-            disabled={editing}
+            disabled={editing && kind !== 'zone-grants'}
           />
         )}
         {kind === 'ip-range-grants' && (
@@ -1439,26 +1561,16 @@ function GrantForm({
         {kind === 'object-create-grants' && (
           <Select
             label="Object type"
+            description="Each grant includes the corresponding object group type. Network includes network groups, Port includes port groups, and URL includes URL groups."
             placeholder="Choose an object type"
             value={value || null}
             onChange={(selected) => setValue(selected ?? '')}
             data={[
               { value: 'NETWORK', label: 'Network' },
-              { value: 'PORT_SERVICE', label: 'Port service' },
+              { value: 'PORT_SERVICE', label: 'Port' },
               { value: 'URL', label: 'URL' },
-              { value: 'APPLICATION', label: 'Application' },
-              { value: 'APPLICATION_FILTER', label: 'Application filter' },
             ]}
             disabled={editing}
-          />
-        )}
-        {kind === 'category-mappings' && (
-          <TextInput
-            label="Expected provider category name"
-            description="Must match the provider-side ownership category exactly."
-            placeholder="FINANCE__RULES"
-            value={value}
-            onChange={(event) => setValue(event.currentTarget.value)}
           />
         )}
         {kind === 'object-use-grants' && !policyId && (
@@ -1510,8 +1622,10 @@ function GrantTableSection({
   onRevoke: (resource: string, row: Row) => void;
   onEdit: (resource: string, row: Row) => void;
 }) {
+  const [page, setPage] = useState(1);
+  const pageSize = useAdaptivePageSize();
   const normalizedQuery = query.trim().toLowerCase();
-  const visibleRows = [...rows]
+  const filteredRows = [...rows]
     .filter((row) =>
       normalizedQuery
         ? fields.some((field) => grantSearchValue(row[field], labels).includes(normalizedQuery))
@@ -1523,6 +1637,12 @@ function GrantTableSection({
       const direction = sort === 'descending' ? -1 : 1;
       return leftValue.localeCompare(rightValue, undefined, { sensitivity: 'base' }) * direction;
     });
+  useEffect(() => {
+    setPage(1);
+  }, [query, sort, rows.length]);
+  const pageCount = Math.max(1, Math.ceil(filteredRows.length / pageSize));
+  const currentPage = Math.min(page, pageCount);
+  const visibleRows = filteredRows.slice((currentPage - 1) * pageSize, currentPage * pageSize);
   return (
     <div className="fm-grant-section">
       <AppSection
@@ -1533,7 +1653,7 @@ function GrantTableSection({
               value="COUNT"
               label={
                 normalizedQuery
-                  ? `${visibleRows.length} of ${rows.length}`
+                  ? `${filteredRows.length} of ${rows.length}`
                   : `${rows.length} ${rows.length === 1 ? 'record' : 'records'}`
               }
             />
@@ -1565,6 +1685,12 @@ function GrantTableSection({
           )}
         />
       </AppSection>
+      <AdaptivePagination
+        page={currentPage}
+        pageSize={pageSize}
+        total={filteredRows.length}
+        onPageChange={setPage}
+      />
     </div>
   );
 }
@@ -1634,13 +1760,49 @@ function FeedbackMessage({ feedback }: { feedback: Feedback | null }) {
 }
 
 const roleOptions = [
-  { value: 'viewer', label: 'Viewer' },
-  { value: 'editor', label: 'Editor' },
+  { value: 'user', label: 'User' },
   { value: 'approver', label: 'Approver' },
-  { value: 'group_admin', label: 'Group administrator' },
-  { value: 'firewall_admin', label: 'Firewall administrator' },
+  { value: 'firewall_operator', label: 'Firewall operator' },
   { value: 'admin', label: 'Platform administrator' },
 ];
+
+const roleDescriptions: Record<string, { title: string; description: string }> = {
+  user: {
+    title: 'User capabilities',
+    description:
+      'Can sign in and view the assigned workspace. Can create or modify rules and objects only when Group membership and policy grants allow it. Cannot manage users, grants, providers, or approvals.',
+  },
+  approver: {
+    title: 'Approver capabilities',
+    description:
+      'Can review, approve, and reject Changesets. Group membership and policy grants still control rule and object access. Cannot manage users, grants, or provider connections.',
+  },
+  firewall_operator: {
+    title: 'Firewall operator capabilities',
+    description:
+      'Has broad firewall operational authority, including inventory, reconciliation, deployment, and Changeset approval or rejection. Cannot manage users, access grants, or provider connections.',
+  },
+  admin: {
+    title: 'Platform administrator capabilities',
+    description:
+      'Full platform authority, including users, Groups, access grants, provider connections, firewall operations, deployments, and Changesets.',
+  },
+};
+
+function RoleDescription({ role }: { role: string | null }) {
+  const selected = role ? roleDescriptions[role] : undefined;
+  if (!selected) return null;
+  return (
+    <div className="fm-role-capability">
+      <Text fw={700} size="sm">
+        {selected.title}
+      </Text>
+      <Text size="sm" c="dimmed">
+        {selected.description}
+      </Text>
+    </div>
+  );
+}
 
 function roleLabel(value: string) {
   return roleOptions.find((option) => option.value === value)?.label ?? value;
@@ -1660,7 +1822,7 @@ const fieldLabels: Record<string, string> = {
   sync_state: 'Sync state',
   member_count: 'Members',
   group_count: 'Groups',
-  approval_required: 'ChangeSet approval',
+  approval_required: 'Changeset approval',
 };
 
 function formatValue(field: string, value: unknown, labels: Record<string, string>): ReactNode {
@@ -1676,9 +1838,27 @@ function formatValue(field: string, value: unknown, labels: Record<string, strin
     return (
       <AppStatusBadge
         value={value ? 'REQUIRED' : 'READY'}
-        label={value ? 'Required' : 'Optional'}
+        label={value ? 'Required' : 'Not required'}
       />
     );
+  }
+  if (field === 'direction') {
+    const direction = primitiveString(value, 'UNKNOWN');
+    const directionLabels: Record<string, string> = {
+      SOURCE: 'Source only',
+      DESTINATION: 'Destination only',
+      BOTH: 'Source and destination',
+    };
+    return (
+      <AppStatusBadge
+        value={`DIRECTION_${direction}`}
+        label={directionLabels[direction] ?? humanize(direction)}
+      />
+    );
+  }
+  if (field === 'object_type') {
+    const objectType = primitiveString(value, 'UNKNOWN');
+    return <AppStatusBadge value="OBJECT_TYPE" label={objectTypeLabel(objectType)} />;
   }
   if (field === 'status' || field === 'sync_state') {
     return <AppStatusBadge value={primitiveString(value, 'UNKNOWN')} />;
@@ -1745,7 +1925,6 @@ function nullableString(value: unknown): string | null {
 function initialResourceId(kind: string, row?: Row): string | null {
   if (kind === 'object-use-grants') return nullableString(row?.object_id);
   if (kind === 'zone-grants') return nullableString(row?.zone_id);
-  if (kind === 'category-mappings') return nullableString(row?.category_id);
   return null;
 }
 
@@ -1754,18 +1933,17 @@ function initialGrantValue(kind: string, row?: Row) {
   if (kind === 'zone-grants') return primitiveString(row?.direction, 'BOTH');
   if (kind === 'ip-range-grants') return primitiveString(row?.network);
   if (kind === 'object-create-grants') return primitiveString(row?.object_type);
-  if (kind === 'category-mappings') return primitiveString(row?.expected_category_name);
   return '';
 }
 
 function resourceLabel(kind: string) {
   if (kind === 'object-use-grants') return 'Firewall object';
   if (kind === 'zone-grants') return 'Security zone';
-  return 'Provider category';
+  return 'Provider resource';
 }
 
 function grantIsMutable(kind: string) {
-  return ['policy-delegations', 'direct-user-policy-grants', 'category-mappings'].includes(kind);
+  return ['policy-delegations', 'zone-grants'].includes(kind);
 }
 
 function grantAddTitle(editor: GrantEditor | null) {
@@ -1773,14 +1951,11 @@ function grantAddTitle(editor: GrantEditor | null) {
   if (editor.objectTypes?.includes('NETWORK')) return 'Add network object access';
   if (editor.objectTypes?.includes('PORT_SERVICE')) return 'Add port object access';
   if (editor.objectTypes?.includes('URL')) return 'Add URL object access';
-  if (editor.objectTypes?.includes('APPLICATION')) return 'Add application object access';
   const titles: Record<string, string> = {
-    'policy-delegations': 'Add group policy delegation',
-    'direct-user-policy-grants': 'Add User policy grant',
+    'policy-delegations': 'Add group policy grant',
     'zone-grants': 'Add security zone access',
     'ip-range-grants': 'Add authorized IP range',
     'object-create-grants': 'Add object creation right',
-    'category-mappings': 'Add category mapping',
   };
   return titles[editor.kind] ?? 'Add access grant';
 }
@@ -1843,6 +2018,20 @@ function resourceLabels(snapshot: AdministrationSnapshot) {
 function humanize(value: string) {
   if (/^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(value)) return 'Internal resource';
   return value.replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function objectTypeLabel(value: string) {
+  const labels: Record<string, string> = {
+    NETWORK: 'Network',
+    NETWORK_GROUP: 'Network group',
+    PORT_SERVICE: 'Port',
+    PORT_SERVICE_GROUP: 'Port group',
+    URL: 'URL',
+    URL_GROUP: 'URL group',
+    APPLICATION: 'Application',
+    APPLICATION_FILTER: 'Application filter',
+  };
+  return labels[value] ?? humanize(value);
 }
 
 function initials(value: string) {

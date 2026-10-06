@@ -240,27 +240,31 @@ class SqlChangeSetRepository:
         return [self._change_set_dict(row) for row in rows]
 
     def list_pending_approvals(self, principal: Principal) -> list[dict[str, object]]:
-        rows = list(
-            self._session.scalars(
-                select(ChangeSet)
-                .join(Group, Group.id == ChangeSet.acting_group_id)
-                .join(
-                    GroupMembership,
-                    (GroupMembership.group_id == Group.id)
-                    & (GroupMembership.organization_id == Group.organization_id),
-                )
-                .where(
-                    ChangeSet.organization_id == principal.organization_id,
-                    ChangeSet.state == ChangeSetState.READY.value,
-                    ChangeSet.principal_id != principal.user_id,
-                    Group.approval_required.is_(True),
-                    Group.is_active.is_(True),
-                    GroupMembership.user_id == principal.user_id,
-                    GroupMembership.status == "ACTIVE",
-                )
-                .order_by(ChangeSet.updated_at.asc(), ChangeSet.id),
+        query = (
+            select(ChangeSet)
+            .join(Group, Group.id == ChangeSet.acting_group_id)
+            .where(
+                ChangeSet.organization_id == principal.organization_id,
+                ChangeSet.state == ChangeSetState.READY.value,
+                Group.approval_required.is_(True),
+                Group.is_active.is_(True),
             )
         )
+        if principal.role in {"admin", "firewall_operator"}:
+            # Organization-wide approvers can see approval work even when they are
+            # not members of the submitting Group, including their own submissions.
+            pass
+        else:
+            query = query.join(
+                GroupMembership,
+                (GroupMembership.group_id == Group.id)
+                & (GroupMembership.organization_id == Group.organization_id),
+            ).where(
+                ChangeSet.principal_id != principal.user_id,
+                GroupMembership.user_id == principal.user_id,
+                GroupMembership.status == "ACTIVE",
+            )
+        rows = list(self._session.scalars(query.order_by(ChangeSet.updated_at.asc(), ChangeSet.id)))
         return [self._change_set_dict(row) for row in rows]
 
     def list_all_change_sets(self, principal: Principal) -> list[dict[str, object]]:
@@ -504,7 +508,7 @@ class SqlChangeSetRepository:
                         GroupMembership.status == "ACTIVE",
                         User.organization_id == principal.organization_id,
                         User.is_active.is_(True),
-                        User.role.in_(("approver", "firewall_admin", "admin")),
+                        User.role.in_(("approver", "firewall_operator", "admin")),
                         User.id != principal.user_id,
                     )
                 ).all()
@@ -884,7 +888,14 @@ class SqlChangeSetRepository:
             row is None
             or row.state
             not in (
-                {ChangeSetState.APPROVED.value}
+                {
+                    ChangeSetState.APPROVED.value,
+                    *(
+                        {ChangeSetState.READY.value}
+                        if row.approved_revision is not None and row.approval_invalidated_at is None
+                        else set()
+                    ),
+                }
                 if bool(self._change_set_dict(row).get("approval_required"))
                 else {ChangeSetState.READY.value, ChangeSetState.APPROVED.value}
             )
@@ -905,17 +916,19 @@ class SqlChangeSetRepository:
         row = self._owned_row(principal, group_id, change_set_id)
         if row is None or row.state != ChangeSetState.READY.value:
             raise InvalidChangeSetStateError
-        member = self._session.scalar(
-            select(GroupMembership).where(
-                GroupMembership.organization_id == principal.organization_id,
-                GroupMembership.group_id == group_id,
-                GroupMembership.user_id == principal.user_id,
-                GroupMembership.status == "ACTIVE",
+        global_approver = principal.role in {"admin", "firewall_operator"}
+        if not global_approver:
+            member = self._session.scalar(
+                select(GroupMembership).where(
+                    GroupMembership.organization_id == principal.organization_id,
+                    GroupMembership.group_id == group_id,
+                    GroupMembership.user_id == principal.user_id,
+                    GroupMembership.status == "ACTIVE",
+                )
             )
-        )
-        if member is None:
-            raise ResourceOutOfScopeError
-        if row.principal_id == principal.user_id:
+            if member is None:
+                raise ResourceOutOfScopeError
+        if row.principal_id == principal.user_id and not global_approver:
             raise InvalidChangeSetStateError(details={"code": "SEPARATION_OF_DUTY"})
         row.state = ChangeSetState.APPROVED.value
         row.approved_at = datetime.now(UTC)
@@ -923,6 +936,49 @@ class SqlChangeSetRepository:
         row.approved_revision = row.revision
         row.revision += 1
         row.validated_revision = row.revision
+        self._session.flush()
+        return self._change_set_dict(row)
+
+    def reject_change_set(
+        self, principal: Principal, group_id: UUID, change_set_id: UUID, reason: str
+    ) -> dict[str, object]:
+        if not reason.strip():
+            raise InvalidInputError(details={"field": "reason"})
+        row = self._owned_row(principal, group_id, change_set_id)
+        if row is None or row.state != ChangeSetState.READY.value:
+            raise InvalidChangeSetStateError
+        global_approver = principal.role in {"admin", "firewall_operator"}
+        if not global_approver:
+            member = self._session.scalar(
+                select(GroupMembership).where(
+                    GroupMembership.organization_id == principal.organization_id,
+                    GroupMembership.group_id == group_id,
+                    GroupMembership.user_id == principal.user_id,
+                    GroupMembership.status == "ACTIVE",
+                )
+            )
+            if member is None:
+                raise ResourceOutOfScopeError
+            if row.principal_id == principal.user_id:
+                raise InvalidChangeSetStateError(details={"code": "SEPARATION_OF_DUTY"})
+        row.state = ChangeSetState.REJECTED.value
+        row.rejected_at = datetime.now(UTC)
+        row.rejected_by_user_id = principal.user_id
+        row.rejection_reason = reason.strip()
+        row.revision += 1
+        row.validated_revision = None
+        self._session.flush()
+        return self._change_set_dict(row)
+
+    def dismiss_rejection_notice(
+        self, principal: Principal, group_id: UUID, change_set_id: UUID
+    ) -> dict[str, object]:
+        row = self._owned_row(principal, group_id, change_set_id)
+        if row is None or row.principal_id != principal.user_id:
+            raise ResourceOutOfScopeError
+        if row.state != ChangeSetState.REJECTED.value:
+            raise InvalidChangeSetStateError
+        row.rejection_notice_dismissed_at = datetime.now(UTC)
         self._session.flush()
         return self._change_set_dict(row)
 
@@ -1158,6 +1214,25 @@ class SqlChangeSetRepository:
                 AccessRule.management_state != "MISSING",
             )
         ).one()
+        # A provider sync can leave older local category rows with the same
+        # provider category name while the authoritative group mapping points
+        # at the newest row. Include those legacy rows when calculating the
+        # ordering boundary so existing rules do not make new submissions
+        # appear out of scope.
+        if bounds[0] is None or bounds[1] is None:
+            matching_category_ids = select(RuleCategory.id).where(
+                RuleCategory.policy_id == policy_id,
+                RuleCategory.organization_id == organization_id,
+                RuleCategory.name == category.name,
+            )
+            bounds = self._session.execute(
+                select(func.min(AccessRule.position), func.max(AccessRule.position)).where(
+                    AccessRule.policy_id == policy_id,
+                    AccessRule.category_id.in_(matching_category_ids),
+                    AccessRule.organization_id == organization_id,
+                    AccessRule.management_state != "MISSING",
+                )
+            ).one()
         if bounds[0] is None or bounds[1] is None:
             return None
         return int(bounds[0]), int(bounds[1])
@@ -1335,6 +1410,13 @@ class SqlChangeSetRepository:
                 "APPLICATION": "Application",
                 "APPLICATION_FILTER": "ApplicationFilter",
             }.get(row.object_type, "Network")
+            if row.object_type == "PORT_SERVICE" and row.normalized_value:
+                protocol = str(row.normalized_value).split("/", 1)[0].lower()
+                provider_type = {
+                    "icmp": "ICMPv4Object",
+                    "ipv6-icmp": "ICMPv6Object",
+                    "other": "AnyProtocolPortObject",
+                }.get(protocol, provider_type)
             if row.object_type == "NETWORK" and row.normalized_value:
                 if row.normalized_value.count("-") == 1:
                     provider_type = "Range"
@@ -1411,7 +1493,7 @@ class SqlChangeSetRepository:
                     )
                     self._session.add(row)
                     self._session.flush()
-                    for permission in ("read", "use"):
+                    for permission in ("use",):
                         self._session.add(
                             ObjectUseGrant(
                                 organization_id=principal.organization_id,
@@ -1461,8 +1543,15 @@ class SqlChangeSetRepository:
                 )
                 self._session.add(category)
                 self._session.flush()
-                self._session.add(
-                    GroupPolicyCategoryMapping(
+                mapping = self._session.scalar(
+                    select(GroupPolicyCategoryMapping).where(
+                        GroupPolicyCategoryMapping.organization_id == principal.organization_id,
+                        GroupPolicyCategoryMapping.group_id == group_id,
+                        GroupPolicyCategoryMapping.policy_id == policy.id,
+                    )
+                )
+                if mapping is None:
+                    mapping = GroupPolicyCategoryMapping(
                         organization_id=principal.organization_id,
                         group_id=group_id,
                         policy_id=policy.id,
@@ -1471,7 +1560,12 @@ class SqlChangeSetRepository:
                         sync_state="SYNCED",
                         revision=1,
                     )
-                )
+                    self._session.add(mapping)
+                else:
+                    mapping.category_id = category.id
+                    mapping.expected_category_name = str(resolution["provider_name"])
+                    mapping.sync_state = "SYNCED"
+                    mapping.revision += 1
             elif kind == "CREATE_RULE":
                 category = None
                 category_id = payload.get("category_id") or resolution.get("category_id")
@@ -1537,8 +1631,17 @@ class SqlChangeSetRepository:
                 rule.file_policy_id = self._native_resource_id_from_payload(
                     FilePolicy, payload.get("file_policy_id"), principal.organization_id
                 )
+                # The submitted position is the anchor position for BEFORE/AFTER
+                # placement. The provider returns the resource's final position;
+                # persist that value so an append-after operation is not later
+                # reported as drift (for example, anchor 3 becomes new position 4).
+                provider_position = provider_resource.get("position")
                 rule.position = int(
-                    str(payload.get("position", provider_resource.get("position", 0)))
+                    str(
+                        provider_position
+                        if provider_position is not None
+                        else payload.get("position", 0)
+                    )
                 )
                 self._session.flush()
                 self._replace_rule_references(rule, payload, principal.organization_id)
@@ -1953,6 +2056,16 @@ class SqlChangeSetRepository:
                 User.organization_id == row.organization_id,
             )
         )
+        rejected_by = (
+            self._session.scalar(
+                select(User).where(
+                    User.id == row.rejected_by_user_id,
+                    User.organization_id == row.organization_id,
+                )
+            )
+            if row.rejected_by_user_id
+            else None
+        )
         group = self._session.get(Group, row.acting_group_id) if row.acting_group_id else None
         return {
             "id": row.id,
@@ -1961,6 +2074,7 @@ class SqlChangeSetRepository:
             "creator_display_name": creator.display_name if creator else None,
             "creator_email": creator.email if creator else None,
             "active_group_id": row.acting_group_id,
+            "active_group_name": group.name if group else None,
             "approval_required": bool(group.approval_required) if group else False,
             "access_policy_id": row.access_policy_id,
             "target_policy_ids": row.target_policy_ids,
@@ -1975,6 +2089,12 @@ class SqlChangeSetRepository:
             "approved_by_user_id": row.approved_by_user_id,
             "approved_revision": row.approved_revision,
             "approval_invalidated_at": row.approval_invalidated_at,
+            "rejected_at": row.rejected_at,
+            "rejected_by_user_id": row.rejected_by_user_id,
+            "rejected_by_display_name": rejected_by.display_name if rejected_by else None,
+            "rejected_by_email": rejected_by.email if rejected_by else None,
+            "rejection_reason": row.rejection_reason,
+            "rejection_notice_dismissed_at": row.rejection_notice_dismissed_at,
             "execution_owner": row.execution_owner,
             "execution_lease_until": row.execution_lease_until,
             "execution_heartbeat_at": row.execution_heartbeat_at,

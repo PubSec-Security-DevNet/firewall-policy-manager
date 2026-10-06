@@ -75,7 +75,10 @@ describe('operations pages', () => {
     );
     expect(await screen.findByText('Corporate FMC')).toBeVisible();
     expect(screen.getByText('Corporate Access')).toBeVisible();
-    expect(screen.getByText(/Review provider state/)).toBeVisible();
+    const detailsButton = screen.getByRole('button', { name: 'View details' });
+    expect(detailsButton).toBeVisible();
+    await userEvent.click(detailsButton);
+    expect(await screen.findByText('What this means')).toBeInTheDocument();
   });
 
   it('filters human-readable append-oriented audit evidence accessibly', async () => {
@@ -92,7 +95,6 @@ describe('operations pages', () => {
             categories: [],
             memberships: [],
             policy_delegations: [],
-            direct_user_policy_grants: [],
             object_use_grants: [],
             zone_grants: [],
             ip_range_grants: [],

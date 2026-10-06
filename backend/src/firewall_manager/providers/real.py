@@ -61,6 +61,8 @@ from firewall_manager.providers.transactions import (
     real_transaction_operation_id,
 )
 
+_SENSITIVE_METADATA_PARTS = ("secret", "password", "token", "authorization", "private_key")
+
 SCC_ENDPOINTS: Mapping[str, str] = {
     "us": "https://api.us.security.cisco.com/firewall",
     "eu": "https://api.eu.security.cisco.com/firewall",
@@ -86,6 +88,9 @@ _OBJECT_ENDPOINTS: tuple[tuple[str, FirewallObjectType], ...] = (
     ("ranges", FirewallObjectType.NETWORK),
     ("networkgroups", FirewallObjectType.NETWORK_GROUP),
     ("protocolportobjects", FirewallObjectType.PORT_SERVICE),
+    ("icmpv4objects", FirewallObjectType.PORT_SERVICE),
+    ("icmpv6objects", FirewallObjectType.PORT_SERVICE),
+    ("anyprotocolportobjects", FirewallObjectType.PORT_SERVICE),
     ("portobjectgroups", FirewallObjectType.PORT_SERVICE_GROUP),
     ("urls", FirewallObjectType.URL),
     ("urlgroups", FirewallObjectType.URL_GROUP),
@@ -116,6 +121,116 @@ _SYSTEM_APPLICATION_FILTER_CRITERIA = {
     "applicationcategories": "category",
     "applicationtags": "tag",
 }
+
+# The application stores readable ICMP names in normalized values.  FMC's
+# object API uses numeric ICMP types and the field is named ``code`` (not
+# ``icmpCode``).  Keep this translation at the provider boundary so the UI
+# and the internal object model can remain readable and provider-neutral.
+_ICMP_TYPE_NUMBERS = {
+    "ECHO_REPLY": "0",
+    "DESTINATION_UNREACHABLE": "3",
+    "SOURCE_QUENCH": "4",
+    "REDIRECT_MESSAGE": "5",
+    "ALTERNATE_HOST_ADDRESS": "6",
+    "ECHO_REQUEST": "8",
+    "ROUTER_ADVERTISEMENT": "9",
+    "ROUTER_SOLICITATION": "10",
+    "TIME_EXCEEDED": "11",
+    "PARAMETER_PROBLEM": "12",
+    "TIMESTAMP": "13",
+    "TIMESTAMP_REPLY": "14",
+    "INFO_REQUEST": "15",
+    "INFO_REPLY": "16",
+    "ADDR_MASK_REQUEST": "17",
+    "ADDR_MASK_REPLY": "18",
+    "TRACEROUTE": "30",
+    "PACKET_TOO_BIG": "2",
+    "MULTICAST_LISTENER_QUERY": "130",
+    "MULTICAST_LISTENER_REPORT": "131",
+    "MULTICAST_LISTENER_DONE": "132",
+    "NEIGHBOUR_SOLICITATION": "135",
+    "NEIGHBOUR_ADVERTISEMENT": "136",
+}
+_ICMP_CODE_NUMBERS = {
+    "NET_UNREACHABLE": 0,
+    "HOST_UNREACHABLE": 1,
+    "PROTOCOL_UNREACHABLE": 2,
+    "PORT_UNREACHABLE": 3,
+    "FRAGMENTATION_NEEDED": 4,
+    "SOURCE_ROUTE_FAILED": 5,
+    "DEST_NETWORK_UNKNOWN": 6,
+    "DEST_HOST_UNKNOWN": 7,
+    "COMM_ADMINISTRATIVELY_PROHIBITED": 13,
+    "TTL_EXPIRED_TRANSIT": 11,
+    "BAD_LENGTH": 1,
+    "NO_ROUTE_DEST": 0,
+    "COMMUNICATION_PROHIBITED": 1,
+    "BEYOND_SCOPE_SRC_ADDR": 2,
+    "ADDRESS_UNREACHABLE": 3,
+    "SOURCE_ADDRESS_FAILED": 5,
+    "REJECT_ROUTE": 6,
+    "HOP_LIMIT_EXCEEDED": 0,
+    "FRAGMENT_REASSEMBLY_TIME_EXCEEDED": 1,
+}
+
+
+def _icmp_type_name(value: object) -> str:
+    raw = str(value or "ANY").upper()
+    if raw.casefold() == "ANY" or raw == "ANY":
+        return "ANY"
+    reverse = {number: name for name, number in _ICMP_TYPE_NUMBERS.items()}
+    return reverse.get(raw, raw)
+
+
+def _icmp_code_name(value: object, *, ipv6: bool) -> str:
+    if value is None or str(value).upper() == "ANY":
+        return "ANY"
+    raw = str(value)
+    names = (
+        {
+            0: "NO_ROUTE_DEST",
+            1: "COMMUNICATION_PROHIBITED",
+            2: "BEYOND_SCOPE_SRC_ADDR",
+            3: "ADDRESS_UNREACHABLE",
+            4: "PORT_UNREACHABLE",
+            5: "SOURCE_ADDRESS_FAILED",
+            6: "REJECT_ROUTE",
+        }
+        if ipv6
+        else {
+            0: "NET_UNREACHABLE",
+            1: "HOST_UNREACHABLE",
+            2: "PROTOCOL_UNREACHABLE",
+            3: "PORT_UNREACHABLE",
+            4: "FRAGMENTATION_NEEDED",
+            5: "SOURCE_ROUTE_FAILED",
+            6: "DEST_NETWORK_UNKNOWN",
+            7: "DEST_HOST_UNKNOWN",
+            11: "TTL_EXPIRED_TRANSIT",
+            13: "COMM_ADMINISTRATIVELY_PROHIBITED",
+        }
+    )
+    return names.get(int(raw), raw) if raw.isdigit() else raw.upper()
+
+
+def _icmp_code_number(value: str, *, ipv6: bool) -> int:
+    raw = value.upper()
+    if ipv6:
+        numbers = {
+            "NO_ROUTE_DEST": 0,
+            "COMMUNICATION_PROHIBITED": 1,
+            "BEYOND_SCOPE_SRC_ADDR": 2,
+            "ADDRESS_UNREACHABLE": 3,
+            "PORT_UNREACHABLE": 4,
+            "SOURCE_ADDRESS_FAILED": 5,
+            "REJECT_ROUTE": 6,
+            "HOP_LIMIT_EXCEEDED": 0,
+            "FRAGMENT_REASSEMBLY_TIME_EXCEEDED": 1,
+        }
+        return numbers[raw] if raw in numbers else int(value)
+    if raw in _ICMP_CODE_NUMBERS:
+        return _ICMP_CODE_NUMBERS[raw]
+    return int(value)
 
 
 class _ProviderMutationConflictError(Exception):
@@ -249,7 +364,37 @@ def _version(payload: Mapping[str, Any]) -> str | None:
 
 
 def _metadata(payload: Mapping[str, Any]) -> dict[str, str]:
-    result = {"type": str(payload.get("type", "unknown"))}
+    result = {
+        "type": str(payload.get("type", "unknown")),
+        "provider_native_id": str(payload.get("id") or payload.get("uuid") or ""),
+    }
+    access_policy = payload.get("accessPolicy")
+    if isinstance(access_policy, dict):
+        if access_policy.get("id") or access_policy.get("uuid"):
+            result["access_policy_id"] = str(access_policy.get("id") or access_policy.get("uuid"))
+        if access_policy.get("name"):
+            result["access_policy_name"] = str(access_policy["name"])
+    application_attributes: dict[str, object] = {}
+    attribute_aliases = {
+        "type": ("applicationType", "applicationTypes", "appTypes", "type"),
+        "risk": ("risk",),
+        "productivity": ("productivity", "appProductivity", "businessRelevance"),
+        "category": (
+            "category",
+            "categories",
+            "appCategories",
+            "applicationCategories",
+            "applicationCategory",
+        ),
+        "tags": ("tags", "applicationTags", "appTags"),
+        "applicationProtocol": ("applicationProtocol",),
+        "protocol": ("protocol",),
+    }
+    for normalized_key, keys in attribute_aliases.items():
+        for key in keys:
+            if payload.get(key) is not None:
+                application_attributes[normalized_key] = payload[key]
+                break
     metadata = payload.get("metadata")
     if isinstance(metadata, dict):
         typed_metadata = cast("dict[str, Any]", metadata)
@@ -258,6 +403,20 @@ def _metadata(payload: Mapping[str, Any]) -> dict[str, str]:
             typed_read_only = cast("dict[str, Any]", read_only)
             if typed_read_only.get("state") is not None:
                 result["provider_read_only"] = str(bool(typed_read_only["state"])).lower()
+    if application_attributes:
+        result["application_attributes"] = json.dumps(
+            application_attributes, separators=(",", ":"), default=str
+        )
+    if str(payload.get("type", "")).casefold() == "application":
+        result["application_payload"] = json.dumps(
+            {
+                key: value
+                for key, value in payload.items()
+                if not any(part in key.casefold() for part in _SENSITIVE_METADATA_PARTS)
+            },
+            separators=(",", ":"),
+            default=str,
+        )
     return result
 
 
@@ -342,7 +501,7 @@ class CiscoReadOnlyProvider:
         warning = await self._pending_change_warning(domain_id, policy_id)
         return warning or {"pending_change_count": 0, "scope_known": True, "changes": []}
 
-    async def start_deployment(
+    async def start_deployment(  # noqa: PLR0912 -- provider response compatibility branches
         self, domain_id: str, policy_ids: list[str], device_ids: list[str]
     ) -> dict[str, object]:
         # Deployment is intentionally gated by the connector's explicit write_enabled flag in
@@ -407,7 +566,9 @@ class CiscoReadOnlyProvider:
                 if isinstance(item, dict) and item.get("id")
             }
             provider_device_ids = [
-                device_id for device_id in dict.fromkeys(device_ids) if device_id in known_device_ids
+                device_id
+                for device_id in dict.fromkeys(device_ids)
+                if device_id in known_device_ids
             ]
             if not provider_device_ids:
                 raise ProviderContractError(
@@ -776,6 +937,10 @@ class CiscoReadOnlyProvider:
             extra_params=page_params,
         )
         if endpoint in _SYSTEM_APPLICATION_FILTER_ENDPOINTS:
+            # FMC/SCC expose these as catalog endpoints. Their individual
+            # catalog-item URLs do not expose memberships (and commonly
+            # return 400), so membership is resolved from application records
+            # by the UI using the normalized provider attributes.
             items = [self._system_filter_item(item, endpoint) for item in items]
         if native_next is not None:
             next_cursor = f"{endpoint_index}:{native_next}"
@@ -784,7 +949,7 @@ class CiscoReadOnlyProvider:
         else:
             next_cursor = None
         return ProviderPage(
-            tuple(self._object(item, domain_native_id, object_type) for item in items),
+            tuple(self._object(item, domain_native_id, object_type, endpoint) for item in items),
             next_cursor,
         )
 
@@ -836,10 +1001,17 @@ class CiscoReadOnlyProvider:
                     raise ProviderContractError
                 typed_payload = cast("dict[str, object]", payload)
                 category_name = typed_payload.get("category_provider_name")
-                if category_name and not typed_payload.get("category_native_id"):
+                if category_name:
                     native_category = resolved_categories.get(str(category_name))
                     if native_category:
-                        typed_payload = {**typed_payload, "category_native_id": native_category}
+                        # The category operation is authoritative. A retry may
+                        # carry a stale category ID from a previous policy-sync
+                        # observation, so always use the ID resolved for this
+                        # transaction's target policy.
+                        typed_payload = {
+                            **typed_payload,
+                            "category_native_id": native_category,
+                        }
                 kind = ChangeOperationKind(str(operation["kind"]))
                 if kind is ChangeOperationKind.MOVE_RULE and typed_payload.get(
                     "category_native_id"
@@ -985,9 +1157,17 @@ class CiscoReadOnlyProvider:
                     ),
                     payload.get("expected_category_version"),
                 )
-                if _name(current, "") != self._required(payload, "provider_name"):
-                    raise _ProviderMutationConflictError("PROVIDER_CATEGORY_MAPPING_CONFLICT")
-                return self._provider_resource(current), False
+                if not self._category_belongs_to_policy(current, policy_id) or _name(
+                    current, ""
+                ) != self._required(payload, "provider_name"):
+                    # FMC can return a category from another access policy when
+                    # querying a policy's category endpoint. Never reuse that
+                    # foreign category for a rule in the requested policy.
+                    category_id = None
+                else:
+                    return self._provider_resource(current), False
+            if category_id:
+                raise _ProviderMutationConflictError("PROVIDER_CATEGORY_MAPPING_CONFLICT")
             categories = await self._get_with_params(
                 self._config_path(domain_id, f"policy/accesspolicies/{policy_id}/categories"),
                 {"offset": 0, "limit": 1000, "expanded": True},
@@ -1003,13 +1183,19 @@ class CiscoReadOnlyProvider:
             typed_paging = cast("dict[str, object]", paging) if isinstance(paging, dict) else {}
             if int(str(typed_paging.get("count", len(typed_items)))) > len(typed_items):
                 raise _ProviderMutationConflictError("CATEGORY_STATE_INCOMPLETE")
-            if any(
-                isinstance(item, dict)
-                and _name(cast("Mapping[str, Any]", item), "")
-                == self._required(payload, "provider_name")
-                for item in typed_items
-            ):
-                raise _ProviderMutationConflictError("PROVIDER_CATEGORY_NAME_CONFLICT")
+            existing_category = next(
+                (
+                    cast("Mapping[str, Any]", item)
+                    for item in typed_items
+                    if isinstance(item, dict)
+                    and self._category_belongs_to_policy(cast("Mapping[str, Any]", item), policy_id)
+                    and _name(cast("Mapping[str, Any]", item), "")
+                    == self._required(payload, "provider_name")
+                ),
+                None,
+            )
+            if existing_category is not None:
+                return self._provider_resource(existing_category), False
             access_rules = await self._get_with_params(
                 self._config_path(domain_id, f"policy/accesspolicies/{policy_id}/accessrules"),
                 {"offset": 0, "limit": 1000, "expanded": True},
@@ -1033,6 +1219,8 @@ class CiscoReadOnlyProvider:
             for rule in typed_rules_list:
                 if not isinstance(rule, dict):
                     raise _ProviderMutationConflictError("RULE_STATE_UNKNOWN")
+                if not self._category_belongs_to_policy(cast("Mapping[str, Any]", rule), policy_id):
+                    continue
                 metadata = rule.get("metadata")
                 if not isinstance(metadata, dict):
                     continue
@@ -1044,6 +1232,8 @@ class CiscoReadOnlyProvider:
             default_categories: list[tuple[int, str]] = []
             for item in typed_items:
                 if not isinstance(item, dict) or not item.get("name"):
+                    continue
+                if not self._category_belongs_to_policy(cast("Mapping[str, Any]", item), policy_id):
                     continue
                 metadata = item.get("metadata")
                 if not isinstance(metadata, dict):
@@ -1554,7 +1744,7 @@ class CiscoReadOnlyProvider:
         return str(value)
 
     @staticmethod
-    def _rule_payload(
+    def _rule_payload(  # noqa: PLR0912 -- provider payload compatibility branches
         payload: dict[str, object], *, include_empty: bool = False
     ) -> dict[str, object]:
         body: dict[str, object] = {
@@ -1568,7 +1758,10 @@ class CiscoReadOnlyProvider:
         body["logEnd"] = logging_mode == "END"
         category = payload.get("category_native_id")
         if category:
-            body["category"] = {"id": str(category), "type": "Category"}
+            category_reference: dict[str, object] = {"id": str(category), "type": "Category"}
+            if payload.get("expected_category_name"):
+                category_reference["name"] = str(payload["expected_category_name"])
+            body["category"] = category_reference
         intrusion_policy = payload.get("intrusion_policy_native_id")
         if intrusion_policy:
             body["ipsPolicy"] = {"id": str(intrusion_policy), "type": "IntrusionPolicy"}
@@ -1599,9 +1792,12 @@ class CiscoReadOnlyProvider:
         if isinstance(application_values, list) and (application_values or include_empty):
             application_objects: list[dict[str, object]] = []
             application_filters: list[dict[str, object]] = []
+            inline_application_filters: list[dict[str, object]] = []
             for value in cast("list[object]", application_values):
                 reference = CiscoReadOnlyProvider._application_reference_payload(value)
-                if reference.get("type") == "ApplicationFilter":
+                if reference.get("type") == "ApplicationFilterCondition":
+                    inline_application_filters.append(reference)
+                elif reference.get("type") == "ApplicationFilter":
                     application_filters.append(reference)
                 else:
                     application_objects.append(reference)
@@ -1611,6 +1807,8 @@ class CiscoReadOnlyProvider:
                 "applications": application_objects,
                 "applicationFilters": application_filters,
             }
+            if inline_application_filters:
+                body["applications"]["inlineApplicationFilters"] = inline_application_filters
         return body
 
     @staticmethod
@@ -1634,17 +1832,22 @@ class CiscoReadOnlyProvider:
                     "tag": "tags",
                 }.get(str(criterion["criterion"]))
                 if key:
+                    item_type = {
+                        "applicationTypes": "ApplicationType",
+                        "risks": "ApplicationRisk",
+                        "productivities": "ApplicationProductivity",
+                        "categories": "ApplicationCategory",
+                        "tags": "ApplicationTag",
+                    }[key]
                     return {
-                        "appConditions": [
+                        "type": "ApplicationFilterCondition",
+                        key: [
                             {
-                                key: [
-                                    {
-                                        "id": str(criterion.get("id", "")),
-                                        "name": str(criterion.get("name", "")),
-                                    }
-                                ]
+                                "id": str(criterion.get("id", "")),
+                                "name": str(criterion.get("name", "")),
+                                "type": item_type,
                             }
-                        ]
+                        ],
                     }
         return reference
 
@@ -1677,12 +1880,38 @@ class CiscoReadOnlyProvider:
                 "objects": [_provider_reference_payload(item) for item in member_references],
             }
         if object_type is FirewallObjectType.PORT_SERVICE:
-            protocol, port = value.split("/", maxsplit=1)
-            return "protocolportobjects", {
-                "type": "ProtocolPortObject",
+            protocol, *parts = value.split("/")
+            if protocol in {"tcp", "udp"}:
+                return "protocolportobjects", {
+                    "type": "ProtocolPortObject",
+                    "name": name,
+                    "protocol": protocol.upper(),
+                    "port": parts[0],
+                }
+            if protocol in {"icmp", "ipv6-icmp"}:
+                icmp_type = parts[0].upper()
+                icmp_code = parts[1].upper()
+                provider_payload: dict[str, object] = {
+                    "type": "ICMPV4Object" if protocol == "icmp" else "ICMPV6Object",
+                    "name": name,
+                    "icmpType": (
+                        "Any"
+                        if icmp_type == "ANY"
+                        else _ICMP_TYPE_NUMBERS.get(icmp_type, icmp_type)
+                    ),
+                }
+                if icmp_code != "ANY":
+                    provider_payload["code"] = _icmp_code_number(
+                        icmp_code, ipv6=protocol == "ipv6-icmp"
+                    )
+                return (
+                    "icmpv4objects" if protocol == "icmp" else "icmpv6objects",
+                    provider_payload,
+                )
+            return "anyprotocolportobjects", {
+                "type": "AnyProtocolPortObject",
                 "name": name,
-                "protocol": protocol.upper(),
-                "port": port,
+                "protocol": parts[0],
             }
         if object_type is FirewallObjectType.PORT_SERVICE_GROUP:
             return "portobjectgroups", {
@@ -2072,7 +2301,7 @@ class CiscoReadOnlyProvider:
             raise ProviderContractError
         return endpoint, offset
 
-    def _rule(self, item: Mapping[str, Any], policy_id: str) -> DiscoveredRule:  # noqa: PLR0912 -- provider payload compatibility branches
+    def _rule(self, item: Mapping[str, Any], policy_id: str) -> DiscoveredRule:  # noqa: PLR0912, PLR0915 -- provider payload compatibility branches
         object_references: list[DiscoveredObjectReference] = []
         for field, element in (
             ("sourceNetworks", RuleObjectElement.SOURCE_NETWORK),
@@ -2088,8 +2317,14 @@ class CiscoReadOnlyProvider:
                 if reference.get("id") or reference.get("uuid")
             )
         application_container = item.get("applications")
-        if isinstance(application_container, dict):
-            filter_references = application_container.get("applicationFilters", [])
+        application_containers = [item]
+        if isinstance(application_container, Mapping):
+            application_containers.append(application_container)
+
+        for container in application_containers:
+            filter_references = container.get("applicationFilters", [])
+            if isinstance(filter_references, Mapping):
+                filter_references = _objects(filter_references)
             if isinstance(filter_references, list):
                 object_references.extend(
                     DiscoveredObjectReference(_native_id(reference), RuleObjectElement.APPLICATION)
@@ -2097,6 +2332,44 @@ class CiscoReadOnlyProvider:
                     if isinstance(reference, Mapping)
                     and (reference.get("id") or reference.get("uuid"))
                 )
+            # FMC may return built-in category/risk/type/tag filters as
+            # inline conditions instead of references to the filter catalog.
+            # Normalize those conditions to the same stable IDs used by the
+            # application-filter sync so rule editing can select them.
+            inline_filters = container.get("inlineApplicationFilters", [])
+            if isinstance(inline_filters, Mapping):
+                inline_filters = [inline_filters]
+            if isinstance(inline_filters, list):
+                inline_criteria = {
+                    "applicationTypes": "type",
+                    "types": "type",
+                    "applicationRisks": "risk",
+                    "risks": "risk",
+                    "applicationProductivities": "productivity",
+                    "productivities": "productivity",
+                    "applicationCategories": "category",
+                    "categories": "category",
+                    "applicationTags": "tag",
+                    "tags": "tag",
+                }
+                for condition in inline_filters:
+                    if not isinstance(condition, Mapping):
+                        continue
+                    for field, criterion in inline_criteria.items():
+                        values = condition.get(field, [])
+                        if not isinstance(values, list):
+                            continue
+                        for value in values:
+                            if not isinstance(value, Mapping):
+                                continue
+                            native_id = value.get("id") or value.get("uuid")
+                            if native_id:
+                                object_references.append(
+                                    DiscoveredObjectReference(
+                                        f"system-filter:{criterion}:{native_id}",
+                                        RuleObjectElement.APPLICATION,
+                                    )
+                                )
         zone_references: list[DiscoveredZoneReference] = []
         for field, element in (
             ("sourceZones", ZoneElement.SOURCE),
@@ -2184,8 +2457,20 @@ class CiscoReadOnlyProvider:
             return name is not None and str(name) == category_name
         return isinstance(category, str) and category == category_name
 
+    @staticmethod
+    def _category_belongs_to_policy(item: Mapping[str, Any], policy_id: str) -> bool:
+        """Reject FMC category responses whose embedded policy differs from the request."""
+        metadata = item.get("metadata")
+        if not isinstance(metadata, dict):
+            return True
+        access_policy = cast("Mapping[str, Any]", metadata).get("accessPolicy")
+        if not isinstance(access_policy, dict):
+            return True
+        owner_id = access_policy.get("id") or access_policy.get("uuid")
+        return owner_id is None or str(owner_id) == policy_id
+
     @classmethod
-    def _rule_create_matches(  # noqa: PLR0911 -- exact provider duplicate matching
+    def _rule_create_matches(  # noqa: PLR0911, PLR0912 -- exact provider duplicate matching
         cls, item: Mapping[str, Any], payload: dict[str, object]
     ) -> bool:
         """Recognize an exact prior create after a duplicate worker delivery."""
@@ -2218,6 +2503,45 @@ class CiscoReadOnlyProvider:
             requested = payload.get(source)
             if not isinstance(requested, list):
                 continue
+            if source == "application_object_native_ids":
+                requested_ids: set[str] = set()
+                for value in cast("list[object]", requested):
+                    reference = cls._application_reference_payload(value)
+                    if reference.get("type") == "ApplicationFilterCondition":
+                        for criterion, values in reference.items():
+                            if criterion == "type" or not isinstance(values, list):
+                                continue
+                            requested_ids.update(
+                                _provider_reference_id(item)
+                                for item in cast("list[object]", values)
+                            )
+                    elif _provider_reference_has_id(reference):
+                        requested_ids.add(_provider_reference_id(reference))
+                container = item.get(target)
+                existing_ids: set[str] = set()
+                if isinstance(container, dict):
+                    typed_container = cast("dict[str, object]", container)
+                    for key in ("applications", "inlineApplicationFilters"):
+                        values = typed_container.get(key, [])
+                        if not isinstance(values, list):
+                            continue
+                        for value in cast("list[object]", values):
+                            if not isinstance(value, dict):
+                                continue
+                            if key == "applications" and _provider_reference_has_id(value):
+                                existing_ids.add(_provider_reference_id(value))
+                            elif key == "inlineApplicationFilters":
+                                for nested in value.values():
+                                    if not isinstance(nested, list):
+                                        continue
+                                    existing_ids.update(
+                                        _provider_reference_id(entry)
+                                        for entry in cast("list[object]", nested)
+                                        if _provider_reference_has_id(entry)
+                                    )
+                if existing_ids != requested_ids:
+                    return False
+                continue
             requested_ids = {
                 _provider_reference_id(value) for value in cast("list[object]", requested)
             }
@@ -2241,7 +2565,10 @@ class CiscoReadOnlyProvider:
 
     @staticmethod
     def _object(
-        item: Mapping[str, Any], domain_id: str, object_type: FirewallObjectType
+        item: Mapping[str, Any],
+        domain_id: str,
+        object_type: FirewallObjectType,
+        endpoint: str | None = None,
     ) -> DiscoveredObject:
         native_id = _native_id(item)
         referenced_ids: list[str] = []
@@ -2257,11 +2584,24 @@ class CiscoReadOnlyProvider:
         if object_type is FirewallObjectType.PORT_SERVICE:
             protocol = item.get("protocol")
             port = item.get("port")
-            value = (
-                f"{str(protocol).lower()}/{port}"
-                if protocol is not None and port is not None
-                else None
-            )
+            if endpoint == "icmpv4objects":
+                value = (
+                    f"icmp/{_icmp_type_name(item.get('icmpType'))}/"
+                    f"{_icmp_code_name(item.get('code'), ipv6=False)}"
+                )
+            elif endpoint == "icmpv6objects":
+                value = (
+                    f"ipv6-icmp/{_icmp_type_name(item.get('icmpType'))}/"
+                    f"{_icmp_code_name(item.get('code'), ipv6=True)}"
+                )
+            elif endpoint == "anyprotocolportobjects":
+                value = f"other/{protocol or item.get('protocolNumber', '')}"
+            else:
+                value = (
+                    f"{str(protocol).lower()}/{port}"
+                    if protocol is not None and port is not None
+                    else None
+                )
         elif object_type is FirewallObjectType.URL:
             value = item.get("url", value)
         return DiscoveredObject(
@@ -2282,6 +2622,27 @@ class CiscoReadOnlyProvider:
         """Normalize a Cisco system criterion as a read-only selectable filter."""
         native_id = _native_id(item)
         criterion = _SYSTEM_APPLICATION_FILTER_CRITERIA[endpoint]
+        applications = item.get("applications", [])
+        application_refs = (
+            [
+                {
+                    "id": _reference_native_id(application),
+                    "name": _name(application, _reference_native_id(application) or ""),
+                }
+                for application in applications
+                if isinstance(application, dict) and _reference_native_id(application) is not None
+            ]
+            if isinstance(applications, list)
+            else []
+        )
+        metadata = item.get("metadata")
+        matches: object = item.get("matches", [])
+        if (not isinstance(matches, list) or not matches) and isinstance(metadata, dict):
+            matches = metadata.get("matches", [])
+        if isinstance(matches, list):
+            application_refs.extend(
+                {"id": str(match), "name": str(match)} for match in matches if match is not None
+            )
         return {
             **item,
             "id": f"system-filter:{criterion}:{native_id}",
@@ -2291,6 +2652,12 @@ class CiscoReadOnlyProvider:
                     "criterion": criterion,
                     "id": native_id,
                     "name": _name(item, native_id),
+                    "count": (
+                        metadata.get("count")
+                        if isinstance(metadata, dict) and metadata.get("count") is not None
+                        else None
+                    ),
+                    "applications": application_refs,
                 },
                 separators=(",", ":"),
             ),

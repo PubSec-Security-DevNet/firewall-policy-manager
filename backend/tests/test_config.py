@@ -2,6 +2,7 @@
 
 import base64
 import os
+from datetime import UTC, datetime
 
 import pytest
 from pydantic import ValidationError
@@ -20,6 +21,7 @@ from firewall_manager.providers.capabilities import (
     load_capabilities,
     verify_capability_evidence,
 )
+from firewall_manager.worker.tasks import subtract_calendar_months
 
 
 def _production_values() -> dict[str, object]:
@@ -40,6 +42,19 @@ def _production_values() -> dict[str, object]:
 def test_development_auth_cannot_be_enabled_in_production() -> None:
     with pytest.raises(ValidationError, match="permitted only"):
         Settings.model_validate({**_production_values(), "dev_auth_enabled": True})
+
+
+def test_audit_retention_defaults_to_six_months_and_rejects_unsafe_values() -> None:
+    settings = Settings.model_validate(_production_values())
+    assert settings.audit_retention_months == 6
+    with pytest.raises(ValidationError):
+        Settings.model_validate({**_production_values(), "audit_retention_months": 0})
+
+
+def test_audit_retention_subtracts_calendar_months() -> None:
+    assert subtract_calendar_months(datetime(2026, 8, 31, tzinfo=UTC), 6) == datetime(
+        2026, 2, 28, tzinfo=UTC
+    )
 
 
 def test_production_requires_a_valid_external_secret_store_key() -> None:

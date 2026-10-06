@@ -123,10 +123,18 @@ class InventoryService:
             principal.organization_id, manager_id, policy_id, resource_type, state, connection_id
         )
 
-    def accept_provider_state(self, principal: Principal, drift_id: UUID) -> dict[str, object]:
-        require_action(principal, Action.MANAGE_PROVIDERS)
+    def accept_provider_state(
+        self, principal: Principal, drift_id: UUID, active_group_id: UUID | None = None
+    ) -> dict[str, object]:
+        provider_admin = principal.role in {"admin", "firewall_operator"}
+        if active_group_id is None and provider_admin:
+            require_action(principal, Action.MANAGE_PROVIDERS)
         result = self._repository.accept_provider_state(
-            principal.organization_id, drift_id, principal.audit_user_id
+            principal.organization_id,
+            drift_id,
+            principal.audit_user_id,
+            active_group_id,
+            scope_to_membership=not provider_admin,
         )
         if result is None:
             raise ResourceOutOfScopeError

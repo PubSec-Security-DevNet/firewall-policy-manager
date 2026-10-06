@@ -32,7 +32,9 @@ class Settings(BaseSettings):
     vault_token: SecretStr | None = None
     vault_secret_path: str = "secret/data/firewall-manager"  # noqa: S105
     scheduler_interval_seconds: int = Field(default=30, ge=5, le=3600)
+    audit_retention_months: int = Field(default=6, ge=1, le=120)
     app_public_url: str = "http://localhost:5173"
+    administrator_email: str | None = None
     oidc_providers: str = "[]"
     auth_session_idle_minutes: int = Field(default=60, ge=5, le=1440)
     auth_session_absolute_hours: int = Field(default=12, ge=1, le=168)

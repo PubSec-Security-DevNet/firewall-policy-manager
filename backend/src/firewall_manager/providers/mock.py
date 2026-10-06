@@ -385,7 +385,15 @@ class DeterministicMockProvider:
                 f"{prefix}-application-filter-fp-1",
                 domain_native_id=domain,
                 object_type=FirewallObjectType.APPLICATION_FILTER,
-                normalized_value="category=business",
+                normalized_value=json.dumps(
+                    {
+                        "criterion": "category",
+                        "id": "business",
+                        "name": "business",
+                        "applications": [{"id": application_object, "name": "Web browsing"}],
+                    },
+                    separators=(",", ":"),
+                ),
             ),
             *[
                 DiscoveredObject(
@@ -396,7 +404,12 @@ class DeterministicMockProvider:
                     domain_native_id=domain,
                     object_type=FirewallObjectType.APPLICATION_FILTER,
                     normalized_value=json.dumps(
-                        {"criterion": kind, "id": value, "name": value},
+                        {
+                            "criterion": kind,
+                            "id": value,
+                            "name": value,
+                            "applications": [{"id": application_object, "name": "Web browsing"}],
+                        },
                         separators=(",", ":"),
                     ),
                     sharing_mode="shared_use",

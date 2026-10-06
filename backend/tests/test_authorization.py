@@ -18,10 +18,10 @@ def principal(role: str) -> Principal:
     )
 
 
-def test_viewer_can_read_but_cannot_modify() -> None:
-    require_action(principal("viewer"), Action.READ)
+def test_user_can_read_but_cannot_modify() -> None:
+    require_action(principal("user"), Action.READ)
     with pytest.raises(ResourceOutOfScopeError):
-        require_action(principal("viewer"), Action.MODIFY)
+        require_action(principal("user"), Action.MODIFY)
 
 
 def test_unknown_role_is_denied_by_default() -> None:
@@ -30,7 +30,7 @@ def test_unknown_role_is_denied_by_default() -> None:
 
 
 def test_delegated_context_selects_exactly_one_group_and_policy() -> None:
-    user = principal("editor")
+    user = principal("user")
     policy_id = UUID("50000000-0000-0000-0000-000000000001")
     finance = DelegatedPolicyContext(user, UUID("20000000-0000-0000-0000-000000000001"), policy_id)
     engineering = DelegatedPolicyContext(

@@ -397,7 +397,7 @@ function ConnectionCard({
   onChanged: () => Promise<ProviderConnection[]>;
 }) {
   const [message, setMessage] = useState('');
-  const [busy, setBusy] = useState(false);
+  const [busyAction, setBusyAction] = useState<string | null>(null);
   const [replacement, setReplacement] = useState('');
   const [replacementUsername, setReplacementUsername] = useState(
     connection.credential_username ?? '',
@@ -411,13 +411,16 @@ function ConnectionCard({
   const [newApplicationsSyncInterval, setNewApplicationsSyncInterval] = useState(
     String(connection.applications_sync_interval_minutes),
   );
+  const [newDeploymentInterval, setNewDeploymentInterval] = useState(
+    String(connection.deployment_interval_minutes ?? 15),
+  );
   const [newDeploymentScheduleEnabled, setNewDeploymentScheduleEnabled] = useState(
     connection.deployment_schedule_enabled,
   );
   const [editing, setEditing] = useState(false);
 
-  const run = (operation: () => Promise<unknown>, success: string) => {
-    setBusy(true);
+  const run = (operation: () => Promise<unknown>, success: string, action = 'row') => {
+    setBusyAction(action);
     setMessage('');
     void operation()
       .then(() => {
@@ -425,7 +428,7 @@ function ConnectionCard({
         void onChanged();
       })
       .catch((error: unknown) => setMessage(errorMessage(error)))
-      .finally(() => setBusy(false));
+      .finally(() => setBusyAction(null));
   };
   const rotate = () => {
     const values =
@@ -439,29 +442,53 @@ function ConnectionCard({
     run(
       () => rotateProviderCredential(connection, values),
       'Credential replaced; retest before enabling.',
+      'credential',
     );
     setReplacement('');
     setReplacementCa('');
   };
   const saveConfiguration = () => {
-    const values = {
-      display_name: newName,
-      sync_interval_minutes: Number(newSyncInterval),
-      applications_sync_interval_minutes: Number(newApplicationsSyncInterval),
-      deployment_schedule_enabled: newDeploymentScheduleEnabled,
-      ...(connection.provider_type === 'fmc'
-        ? { base_endpoint: newEndpoint, tls_mode: newTlsMode }
-        : { region: newRegion }),
-    };
+    const values: Record<string, unknown> = {};
+    if (newName !== connection.display_name) values.display_name = newName;
+    if (Number(newSyncInterval) !== connection.sync_interval_minutes) {
+      values.sync_interval_minutes = Number(newSyncInterval);
+    }
+    if (Number(newApplicationsSyncInterval) !== connection.applications_sync_interval_minutes) {
+      values.applications_sync_interval_minutes = Number(newApplicationsSyncInterval);
+    }
+    if (newDeploymentScheduleEnabled !== connection.deployment_schedule_enabled) {
+      values.deployment_schedule_enabled = newDeploymentScheduleEnabled;
+    }
+    const currentDeploymentInterval = connection.deployment_interval_minutes ?? 15;
+    if (Number(newDeploymentInterval) !== currentDeploymentInterval) {
+      const deploymentInterval = Number(newDeploymentInterval);
+      if (
+        !Number.isInteger(deploymentInterval) ||
+        deploymentInterval < 5 ||
+        deploymentInterval > 10080
+      ) {
+        setMessage('Deployment interval must be a whole number between 5 and 10,080 minutes.');
+        return;
+      }
+      values.deployment_interval_minutes = deploymentInterval;
+    }
+    if (connection.provider_type === 'fmc') {
+      if (newEndpoint !== connection.base_endpoint) values.base_endpoint = newEndpoint;
+      if (newTlsMode !== connection.tls_mode) values.tls_mode = newTlsMode;
+    } else if (newRegion !== connection.region) {
+      values.region = newRegion;
+    }
     run(
       () => updateProviderConnection(connection, values),
       'Connection updated; retest if needed.',
+      'settings',
     );
   };
   const configurationChanged =
     newName !== connection.display_name ||
     Number(newSyncInterval) !== connection.sync_interval_minutes ||
     Number(newApplicationsSyncInterval) !== connection.applications_sync_interval_minutes ||
+    Number(newDeploymentInterval) !== (connection.deployment_interval_minutes ?? 15) ||
     newDeploymentScheduleEnabled !== connection.deployment_schedule_enabled ||
     (connection.provider_type === 'fmc'
       ? newEndpoint !== connection.base_endpoint || newTlsMode !== connection.tls_mode
@@ -472,22 +499,27 @@ function ConnectionCard({
     const confirmation =
       `Enable production configuration writes for ${connection.display_name} (${connection.provider_type.toUpperCase()})? ` +
       (connection.compatibility_warning ? `${connection.compatibility_warning} ` : '') +
-      'All writes still require a reviewed ChangeSet and backend authorization. This does not deploy changes.';
+      'All writes still require a reviewed Changeset and backend authorization. This does not deploy changes.';
     if (!connection.write_enabled && !window.confirm(confirmation)) return;
     run(
       () => setProviderConnectionWriteGate(connection, !connection.write_enabled),
       connection.write_enabled
         ? 'Provider writes disabled.'
         : 'Production provider writes enabled.',
+      'writes',
     );
   };
   const retire = () => {
     if (!window.confirm('Retire this connection? Historical inventory and audit records remain.'))
       return;
-    run(() => setProviderConnectionLifecycle(connection, 'RETIRED'), 'Connection retired.');
+    run(
+      () => setProviderConnectionLifecycle(connection, 'RETIRED'),
+      'Connection retired.',
+      'retire',
+    );
   };
   const sync = async (mode: 'FULL' | 'NON_APPLICATIONS' = 'FULL') => {
-    setBusy(true);
+    setBusyAction(`sync-${mode.toLowerCase()}`);
     setMessage('Sync queued. Waiting for the worker to start…');
     try {
       await requestProviderSync(connection.id, mode);
@@ -521,12 +553,13 @@ function ConnectionCard({
           : 'Sync could not be queued.',
       );
     } finally {
-      setBusy(false);
+      setBusyAction(null);
     }
   };
   const forceDeploy = async () => {
-    if (!window.confirm(`Deploy all pending staged changes for ${connection.display_name} now?`)) return;
-    setBusy(true);
+    if (!window.confirm(`Deploy all pending staged changes for ${connection.display_name} now?`))
+      return;
+    setBusyAction('deploy');
     setMessage('Deployment batch queued. Waiting for the worker…');
     try {
       const result = await forceProviderDeployment(connection.id);
@@ -540,7 +573,9 @@ function ConnectionCard({
         const current = deployments.find((item) => item.id === result.id);
         const state = current?.state ?? 'READY';
         setMessage(`Deployment ${state.toLowerCase().replaceAll('_', ' ')}…`);
-        if (['DEPLOYED', 'FAILED', 'PARTIAL', 'UNKNOWN', 'RECONCILIATION_REQUIRED'].includes(state)) {
+        if (
+          ['DEPLOYED', 'FAILED', 'PARTIAL', 'UNKNOWN', 'RECONCILIATION_REQUIRED'].includes(state)
+        ) {
           setMessage(
             state === 'DEPLOYED'
               ? 'Deployment completed successfully.'
@@ -553,7 +588,7 @@ function ConnectionCard({
     } catch (error: unknown) {
       setMessage(errorMessage(error));
     } finally {
-      setBusy(false);
+      setBusyAction(null);
       void onChanged();
     }
   };
@@ -573,23 +608,27 @@ function ConnectionCard({
               </Text>
             </Group>
             <Text size="xs" c="dimmed">
-              {connection.provider_version ?? 'Version not discovered'} · Real provider
+              {connection.provider_version ?? 'Version not discovered'}
             </Text>
           </div>
         </Group>
         <Group gap="xs" className="fm-provider-statuses">
-          <AppStatusBadge value={connection.lifecycle} />
-          <AppStatusBadge value={connection.connection_status} />
-          <AppStatusBadge
-            value={connection.sync_status ?? 'NEVER_SYNCED'}
-            label={connection.sync_status ? humanize(connection.sync_status) : 'Never synced'}
-          />
+          {connection.lifecycle !== 'ACTIVE' && <AppStatusBadge value={connection.lifecycle} />}
+          {connection.connection_status !== 'CONNECTED' && (
+            <AppStatusBadge value={connection.connection_status} />
+          )}
+          {connection.sync_status !== 'COMPLETED' && (
+            <AppStatusBadge
+              value={connection.sync_status ?? 'NEVER_SYNCED'}
+              label={connection.sync_status ? humanize(connection.sync_status) : 'Never synced'}
+            />
+          )}
           {connection.compatibility_warning && (
             <AppStatusBadge value="WARNING" label="Version untested" />
           )}
           <AppStatusBadge
             value={connection.write_enabled ? 'WRITE_ENABLED' : 'READ_ONLY'}
-            label={connection.write_enabled ? 'Production writes enabled' : 'Read only'}
+            label={connection.write_enabled ? 'Writable' : 'Read only'}
           />
         </Group>
       </div>
@@ -617,7 +656,11 @@ function ConnectionCard({
         />
         <ProviderFact
           label="Deployment schedule"
-          value={connection.deployment_schedule_enabled ? 'Every 15 minutes' : 'Disabled'}
+          value={
+            connection.deployment_schedule_enabled
+              ? `Every ${connection.deployment_interval_minutes ?? 15} minutes`
+              : 'Disabled'
+          }
         />
       </div>
       {(connection.last_error_message || connection.last_error_code) && (
@@ -646,20 +689,48 @@ function ConnectionCard({
           <ActionButton
             intent="secondary"
             leftSection={<IconActivityHeartbeat size={14} />}
-            loading={busy}
+            loading={busyAction === 'test'}
             onClick={() =>
-              run(() => testProviderConnection(connection.id), 'Connection test completed.')
+              run(() => testProviderConnection(connection.id), 'Connection test completed.', 'test')
             }
           >
             Test connection
           </ActionButton>
           <ActionButton
+            intent="secondary"
+            leftSection={<IconRefresh size={14} />}
+            disabled={connection.lifecycle !== 'ACTIVE'}
+            loading={busyAction === 'sync-full'}
+            onClick={() => {
+              void sync('FULL');
+            }}
+          >
+            Sync all
+          </ActionButton>
+          <ActionButton
+            intent="secondary"
+            leftSection={<IconRefresh size={14} />}
+            disabled={connection.lifecycle !== 'ACTIVE'}
+            loading={busyAction === 'sync-non_applications'}
+            onClick={() => void sync('NON_APPLICATIONS')}
+          >
+            Sync without applications
+          </ActionButton>
+          <ActionButton
+            intent="secondary"
+            disabled={connection.lifecycle !== 'ACTIVE' || !connection.write_enabled}
+            loading={busyAction === 'deploy'}
+            onClick={() => void forceDeploy()}
+          >
+            Deploy pending changes now
+          </ActionButton>
+          <ActionButton
             intent={connection.write_enabled ? 'quiet-danger' : 'secondary'}
             disabled={!connection.write_enabled && !canEnableWrites}
-            loading={busy}
+            loading={busyAction === 'writes'}
             onClick={toggleWrites}
           >
-            {connection.write_enabled ? 'Return to read-only' : 'Enable production writes'}
+            {connection.write_enabled ? 'Set read-only' : 'Enable writes'}
           </ActionButton>
           {connection.lifecycle === 'ACTIVE' ? (
             <ActionButton
@@ -687,34 +758,6 @@ function ConnectionCard({
               Enable
             </ActionButton>
           ) : null}
-          <ActionButton
-            intent="secondary"
-            leftSection={<IconRefresh size={14} />}
-            disabled={connection.lifecycle !== 'ACTIVE'}
-            loading={busy}
-            onClick={() => {
-              void sync('FULL');
-            }}
-          >
-            Sync all
-          </ActionButton>
-          <ActionButton
-            intent="secondary"
-            leftSection={<IconRefresh size={14} />}
-            disabled={connection.lifecycle !== 'ACTIVE'}
-            loading={busy}
-            onClick={() => void sync('NON_APPLICATIONS')}
-          >
-            Sync without applications
-          </ActionButton>
-          <ActionButton
-            intent="secondary"
-            disabled={connection.lifecycle !== 'ACTIVE' || !connection.write_enabled}
-            loading={busy}
-            onClick={() => void forceDeploy()}
-          >
-            Deploy pending changes now
-          </ActionButton>
         </Group>
         <Group gap="xs" wrap="wrap">
           {connection.lifecycle !== 'RETIRED' && (
@@ -787,16 +830,26 @@ function ConnectionCard({
               value={newSyncInterval}
               onChange={(event) => setNewSyncInterval(event.currentTarget.value)}
             />
-            <Button
-              variant="light"
-              mt="sm"
-              onClick={() => setNewDeploymentScheduleEnabled((value) => !value)}
-            >
-              Automatic deployment: {newDeploymentScheduleEnabled ? 'enabled' : 'disabled'}
-            </Button>
-            <Button mt="sm" disabled={!configurationChanged} onClick={saveConfiguration}>
-              Save configuration
-            </Button>
+            <TextInput
+              label="Deployment interval (minutes)"
+              description="How often pending provider changes are automatically deployed. Minimum 5 minutes."
+              type="number"
+              min={5}
+              max={10080}
+              value={newDeploymentInterval}
+              onChange={(event) => setNewDeploymentInterval(event.currentTarget.value)}
+            />
+            <Group mt="sm" gap="sm">
+              <Button
+                variant="light"
+                onClick={() => setNewDeploymentScheduleEnabled((value) => !value)}
+              >
+                Automatic deployment: {newDeploymentScheduleEnabled ? 'enabled' : 'disabled'}
+              </Button>
+              <Button disabled={!configurationChanged} onClick={saveConfiguration}>
+                Save configuration
+              </Button>
+            </Group>
           </div>
           <div className="fm-provider-settings-panel">
             <Text fw={700}>Credential rotation</Text>
@@ -896,11 +949,13 @@ function humanize(value: string) {
 }
 
 function errorMessage(error: unknown) {
-  return error instanceof ApiError
-    ? `${error.message} Reference: ${error.correlationId}`
-    : error instanceof Error
-      ? error.message
-      : 'Request failed.';
+  if (error instanceof ApiError) {
+    const fields = Array.isArray(error.details.fields)
+      ? error.details.fields.filter((field): field is string => typeof field === 'string')
+      : [];
+    return `${error.message}${fields.length ? ` (${fields.join(', ')})` : ''} Reference: ${error.correlationId}`;
+  }
+  return error instanceof Error ? error.message : 'Request failed.';
 }
 
 function toError(error: unknown): State {
