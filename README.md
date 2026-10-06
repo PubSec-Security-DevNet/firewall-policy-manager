@@ -219,6 +219,3 @@ when explicitly enabled in development/test.
 - Production configuration requires HTTPS public URLs, secure cookies, security headers, and the
   scheduled expired-session/token cleanup job. CI runs dependency audits, SAST, secret scanning,
   and HIGH/CRITICAL container image scans.
-
-See [docs/PROJECT_STATE.md](docs/PROJECT_STATE.md) in development worktrees for the current
-implementation snapshot and governing project guidance.

@@ -13,11 +13,12 @@
     "test": "vitest run",
     "e2e": "playwright test",
     "e2e:cdp": "node e2e/cdp-release-candidate.mjs",
-    "e2e:cdp:m9": "node e2e/milestone9-cdp.mjs",
-    "e2e:cdp:m9:full": "node e2e/milestone9-full-cdp.mjs",
-    "e2e:cdp:m9:all": "node e2e/milestone9-coverage-cdp.mjs",
-    "e2e:cdp:m9:functions": "node e2e/milestone9-functions-cdp.mjs",
-    "e2e:cdp:m9:fixture": "node e2e/milestone9-fixture-cdp.mjs",
+    "e2e:cdp:routes": "node e2e/cdp-route-smoke.mjs",
+    "e2e:cdp:app": "node e2e/cdp-application-sweep.mjs",
+    "e2e:cdp:coverage": "node e2e/cdp-coverage.mjs",
+    "e2e:cdp:functions": "node e2e/cdp-function-smoke.mjs",
+    "e2e:cdp:faults": "node e2e/cdp-fault-smoke.mjs",
+    "e2e:cdp:fixture": "node e2e/cdp-fixture-setup.mjs",
     "api:generate": "openapi-typescript ../openapi.json -o src/api/schema.d.ts"
   },
   "dependencies": {

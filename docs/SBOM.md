@@ -57,15 +57,12 @@ docker run -d \
   dependencytrack/bundled
 ```
 
-Open <http://localhost:8080>. The initial login is:
-
-```text
-Username: admin
-Password: admin
-```
-
-Change the password immediately after the first login. Dependency-Track may
-take several minutes to initialize vulnerability data during first startup.
+Open <http://localhost:8080> and complete the initial bootstrap sign-in using
+the credentials or setup flow provided by the Dependency-Track deployment.
+Change or replace any bootstrap credential immediately, and follow the
+[official Dependency-Track setup guidance](https://docs.dependencytrack.org/getting-started/)
+for the version being deployed. Dependency-Track may take several minutes to
+initialize vulnerability data during first startup.
 
 To stop it while preserving its data:
 
@@ -100,7 +97,7 @@ Open the newly created project and choose **Upload BOM** or **Upload
 CycloneDX BOM**. Select:
 
 ```text
-/Users/nick/Documents/GitHub/firewall-manager/artifacts/firewall-manager-sbom.json
+artifacts/firewall-manager-sbom.json
 ```
 
 After processing, the project displays components, versions, vulnerabilities,
@@ -144,7 +141,7 @@ and version in the production release checklist.
 ## Security notes
 
 - Do not expose the local Dependency-Track port to the public internet.
-- Replace the default password immediately.
+- Change or replace any bootstrap credential immediately.
 - Use persistent, backed-up storage for production.
 - Protect Dependency-Track with HTTPS, authentication, and restricted network
   access in production.
