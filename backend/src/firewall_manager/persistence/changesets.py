@@ -2117,14 +2117,15 @@ class SqlChangeSetRepository:
                     # FMC/SCC may return a successful create response without ordering
                     # metadata.  A missing provider position must never become NULL in the
                     # normalized inventory; use the next local position for append creates.
-                    max_position = self._session.scalar(
-                        select(func.max(AccessRule.position)).where(
-                            AccessRule.organization_id == principal.organization_id,
-                            AccessRule.policy_id == policy.id,
-                            AccessRule.category_id == rule.category_id,
-                            AccessRule.management_state != "MISSING",
+                    with self._session.no_autoflush:
+                        max_position = self._session.scalar(
+                            select(func.max(AccessRule.position)).where(
+                                AccessRule.organization_id == principal.organization_id,
+                                AccessRule.policy_id == policy.id,
+                                AccessRule.category_id == rule.category_id,
+                                AccessRule.management_state != "MISSING",
+                            )
                         )
-                    )
                     rule.position = int(max_position) + 1 if max_position is not None else 1
                 self._session.flush()
                 self._replace_rule_references(rule, payload, principal.organization_id)
