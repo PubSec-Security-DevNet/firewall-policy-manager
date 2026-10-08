@@ -1,3 +1,5 @@
+// Copyright 2026 Cisco Systems, Inc.
+// SPDX-License-Identifier: Apache-2.0
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
   IconBuildingCommunity,
@@ -49,6 +51,7 @@ import {
   AppThemeIcon as ThemeIcon,
   MetricCard,
 } from '../../ui';
+import { LegacyOwnershipPanel } from './LegacyOwnershipPanel';
 import { Tabs } from '../../ui/tabs';
 import { authorizationExpectedRevision, providerResourcesForPolicy } from './authorizationRevision';
 import { AdaptivePagination, useAdaptivePageSize } from '../shared/AdaptivePagination';
@@ -135,12 +138,15 @@ export function AdministrationPanel({ view }: { view: AdministrationView }) {
     );
   }
   return (
-    <AccessGrantsPage
-      snapshot={state.snapshot}
-      labels={labels}
-      onSaved={refresh}
-      onRevoke={revoke}
-    />
+    <Stack>
+      <LegacyOwnershipPanel />
+      <AccessGrantsPage
+        snapshot={state.snapshot}
+        labels={labels}
+        onSaved={refresh}
+        onRevoke={revoke}
+      />
+    </Stack>
   );
 }
 
@@ -937,6 +943,8 @@ function CreateIdentityForm({
   const isUser = resource === 'users';
   const [primary, setPrimary] = useState('');
   const [secondary, setSecondary] = useState('');
+  const [issuer, setIssuer] = useState('');
+  const [subject, setSubject] = useState('');
   const [role, setRole] = useState<string | null>('user');
   const [approvalRequired, setApprovalRequired] = useState(false);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
@@ -949,6 +957,8 @@ function CreateIdentityForm({
           display_name: primary.trim(),
           email: secondary.trim(),
           role: role ?? 'user',
+          identity_issuer: issuer.trim(),
+          identity_subject: subject.trim(),
         }
       : {
           name: primary.trim(),
@@ -1002,10 +1012,22 @@ function CreateIdentityForm({
           onChange={(event) => setSecondary(event.currentTarget.value)}
         />
         {isUser && (
-          <Text size="xs" c="dimmed">
-            The OIDC identity is linked automatically when this email address signs in for the first
-            time.
-          </Text>
+          <>
+            <TextInput
+              required
+              label="OIDC issuer"
+              value={issuer}
+              description="Exact issuer from the configured identity provider."
+              onChange={(event) => setIssuer(event.currentTarget.value)}
+            />
+            <TextInput
+              required
+              label="OIDC subject"
+              value={subject}
+              description="Stable sub claim for this application; email does not establish identity."
+              onChange={(event) => setSubject(event.currentTarget.value)}
+            />
+          </>
         )}
         {isUser && (
           <Select
@@ -1368,6 +1390,7 @@ const capabilityOptions = [
   { value: 'reorder_rule', label: 'Reorder rules' },
   { value: 'modify_object', label: 'Modify objects' },
   { value: 'delete_object', label: 'Delete objects' },
+  { value: 'approve', label: 'Approve ChangeSets' },
 ];
 
 function GrantForm({

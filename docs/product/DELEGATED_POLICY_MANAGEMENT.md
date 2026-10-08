@@ -1,16 +1,18 @@
-# Delegated Policy Management Product Requirements
+# Delegated policy management
 
-## Purpose and status
+## Purpose
 
 The product provides delegated firewall-policy administration for FMC and SCC. This document is
-the durable product contract for Group-scoped policy management across web, REST, MCP, workers,
-authorization, audit, persistence, and provider integrations.
+the security and behavior reference for Group-scoped policy management across the web application,
+REST API, workers, authorization, audit, persistence, and provider integrations. Available provider
+operations are determined by the tested capability profile for the selected provider and version.
 
-Milestone 3 implements the provider-neutral effective-delegation boundary, active-Group web flow,
-administration surface, Group-filtered reads, durable ChangeSet drafts, exhaustive operation
-preflight, centralized naming/equivalence, stale revision protection, deterministic mock-only
-transactions, and audit evidence. Production provider writes, deployment, and production
-authentication remain unimplemented.
+The model is intended for organizations that must delegate policy and rule management on shared
+firewall infrastructure when separate firewall or management instances are unavailable, do not fit
+the network design, or would add disproportionate licensing and operational overhead. It provides
+an explicitly governed alternative to central-ticket-only workflows or broad provider access. It
+does not replace separate infrastructure where regulatory, fault-domain, or network-isolation
+requirements demand a hard boundary.
 
 ## Authorization context
 
@@ -25,7 +27,7 @@ only grants scoped to that Group and Access Policy. It must never union grants f
 memberships or search memberships for a Group that would make an operation succeed.
 
 Changing the active Group causes policy, rule, object, zone, IP-range, ordering, and permission
-views to be re-evaluated. The UI will provide a prominent selector, but the selector is not an
+views to be re-evaluated. The UI provides a prominent selector, but the selector is not an
 authorization control; enforcement is server-side.
 
 ## Domain map
@@ -37,7 +39,7 @@ Organization
                                           |
                    +----------------------+
                    |
-                   +-- PolicyDelegation(Group/User, capabilities)        [future]
+                   +-- PolicyDelegation(Group, capabilities)
                    +-- GroupPolicyCategoryMapping -- Provider Category
                    +-- AccessRule(owner Group, creator/modifier User)
                    +-- FirewallObject(owner Group+Policy, creator/modifier User)
@@ -48,19 +50,19 @@ Organization
                    +-- ChangeSet(principal, acting Group, AccessPolicy)
 ```
 
-| Concept | Required behavior | Current state |
-|---|---|---|
-| User | Stable issuer+subject identity; enabled/revision state; zero or more memberships | Implemented |
-| Group | Primary boundary with immutable normalized provider slug and enabled/revision state | Implemented |
-| GroupMembership | Current eligibility only; never an automatic policy grant | Implemented |
-| Active Group context | Exactly one Group plus one Access Policy per delegated operation | Server-enforced and exposed in web UI |
-| PolicyDelegation | Explicit rule/object view/create/modify/delete/reorder capabilities | Implemented with mock-only provider mutation |
-| Rule ownership | Exactly one owning Group for delegated rules, separate from creator/modifier | Enforced by delegated read/preflight and mock-only ChangeSet execution |
-| Object ownership/use | Group+policy ownership is separate from explicit non-owned object USE | Implemented for Group-owned and provider-owned objects |
-| Zone grants | Explicit source/destination/both use | Implemented |
-| IP-range grants | Multiple canonical IPv4/IPv6 networks scoped to Group+policy | Implemented |
-| Object-create grants | Limited classes plus provider capability and equivalence gating | Authorization representation/preflight implemented |
-| Group/policy category mapping | Application-authoritative mapping to a provider category | Mock lookup/create/conflict/reconciliation implemented |
+| Concept | Enforced behavior |
+|---|---|
+| User | Stable issuer+subject identity, enabled/revision state, and zero or more memberships |
+| Group | Primary delegation boundary with an immutable normalized provider slug and enabled/revision state |
+| GroupMembership | Establishes current eligibility only; never grants policy access by itself |
+| Active Group context | Exactly one Group plus one Access Policy per delegated operation |
+| PolicyDelegation | Explicit rule/object view, create, modify, delete, and reorder capabilities |
+| Rule ownership | Exactly one owning Group, separate from the creating or modifying User |
+| Object ownership/use | Group+policy ownership is separate from explicit non-owned object use |
+| Zone grants | Explicit source, destination, or bidirectional use |
+| IP-range grants | Multiple canonical IPv4/IPv6 networks scoped to Group+policy |
+| Object-create grants | Limited object classes plus provider capability and equivalence checks |
+| Group/policy category mapping | Application-authoritative mapping to a provider category |
 
 ## Membership and policy delegation
 
@@ -69,10 +71,10 @@ Group; it grants no Access Policy or resource rights by itself. Policy delegatio
 each Group/User and Access Policy. Access to one policy never implies access to another policy on
 the same manager.
 
-Initial policy capabilities are `view`, `create_rule`, `modify_rule`, `delete_rule`,
+Policy capabilities are `view`, `create_rule`, `modify_rule`, `delete_rule`,
 `reorder_rule`, `modify_object`, and `delete_object`. Object delete is deliberately separate from
-object modify. Workflow capabilities later include `submit`, `approve`, and `deploy`, preserving
-the canonical distinction between read, use, modify, approval, and deployment.
+object modify. Submission, approval, and deployment are separate workflow actions, preserving the
+distinction between read, use, modify, approval, and deployment.
 
 Policy access is granted through Group delegation only. Delegated rule operations still require
 an active Group and Access Policy. There is no implicit personal Group or direct-user policy grant.
@@ -86,8 +88,7 @@ memberships never make a rule shared.
 Within an active Group and Access Policy, delegated users primarily see/manage that Group's rules.
 Administrative/global visibility requires separate permission. Ownership does not permit arbitrary
 placement: create/reorder is constrained to the Group's mapped provider category and ordering
-boundary. Cross-Group, administrator, protected, and provider-section moves are denied unless a
-future explicit administrative capability allows them.
+boundary. Cross-Group, administrator, protected, and provider-section moves are denied.
 
 Provider category names do not establish ownership. The authoritative mapping is:
 
@@ -96,10 +97,9 @@ Group + Access Policy -> GroupPolicyCategoryMapping -> Provider Rule Category
 ```
 
 The category uses the Group's stable provider-facing slug/prefix. Creating a delegated rule places
-it in that mapped category. Mock providers can ensure the category through the ChangeSet and
-provider-transaction path: an exact authoritative mapping is retained, an absent category is
-created and mapped, and an unmanaged same-name category is a conflict. Category names never adopt
-or transfer ownership.
+it in that mapped category. The provider transaction path retains an exact authoritative mapping;
+an absent category is created only when the active capability profile supports that operation, and
+an unmanaged same-name category is a conflict. Category names never adopt or transfer ownership.
 
 ## Synchronized provider resources
 
@@ -118,7 +118,7 @@ applications, and URLs can be authorized independently.
 Provider object existence does not grant use. Every referenced object requires server-side USE
 authorization in the current User + active Group + Access Policy context. USE never implies MODIFY.
 
-Delegated creation is initially limited to normalized classes:
+Delegated creation uses these normalized classes:
 
 - `NETWORK`;
 - `PORT_SERVICE`;
@@ -150,14 +150,13 @@ different active Group receives no mutation rights even when the User belongs to
 Ownership is also scoped to its Access Policy and cannot be carried into another policy merely
 because the same Group or User can access it.
 
-Direct User-owned firewall objects are not currently supported. Adding them requires an explicit
-product model and stable User slug; personal ownership must never become an implicit active-Group
-bypass.
+Direct User-owned firewall objects are unsupported. Personal ownership is never an implicit
+active-Group bypass.
 
 Objects discovered from FMC/SCC default to provider-owned/unmanaged behavior. They may be read
 when visible and used only through an explicit USE grant; delegated users cannot modify or delete
-them. A provider object named `FINANCE__...` remains provider-owned unless an administrator later
-performs a deliberate adoption workflow. Naming aids operators but is never authorization.
+them. A provider object named `FINANCE__...` remains provider-owned. Naming aids operators but is
+never authorization.
 
 For an application-owned object, the authoritative ownership record and expected provider prefix
 must agree. A provider rename produces conflict/drift while retaining the original owner; it never
@@ -190,7 +189,7 @@ Group-prefixed name; modification cannot silently replace or adopt another objec
 
 ## IP-range authorization
 
-Groups/Users may receive multiple allowed IPv4 and eventually IPv6 ranges scoped to the active
+Groups may receive multiple allowed IPv4 and IPv6 ranges scoped to the active
 Group and Access Policy. These ranges govern manual rule values and delegated network-object
 creation or modification. The complete requested address or network must be contained by an allowed network using
 proper IP arithmetic, never string-prefix comparison. Ranges from other memberships do not
@@ -207,23 +206,18 @@ Creation and modification independently authorize every applicable element:
 - applications/application filters;
 - URLs.
 
-The model remains extensible to future elements. A provider containing an element is not proof of
-authorization.
+A provider containing an element is not proof of authorization.
 
-## ChangeSets, cache, audit, and MCP
+## ChangeSets and audit
 
 Every delegated ChangeSet records its principal, acting Group, and Access Policy. That context is
 immutable for the ChangeSet: switching the UI Group does not transfer ownership, add permissions,
 permit cross-Group resources, or change execution grants. Validation and execution re-authorize
 using the stored context.
 
-Authorization cache keys, if later introduced, include principal, active Group, Access Policy, and relevant
-authorization/grant revision. No combined cross-Group entitlement cache is permitted.
-
 Privileged audit records include actor, acting Group, Access Policy, ChangeSet/operation/provider,
-action, decision, and outcome. Web and future MCP interfaces invoke the same services and
-authorization. MCP never merges memberships,
-selects a broader Group, or switches Groups to make a request succeed.
+action, decision, and outcome. Web and REST interfaces invoke the same application services and
+authorization checks.
 
 ## Security invariants
 
@@ -240,10 +234,10 @@ selects a broader Group, or switches Groups to make a request succeed.
 11. Rule ownership does not imply arbitrary reorder placement.
 12. A ChangeSet retains its acting Group context.
 13. Switching Groups never changes an existing rule or ChangeSet context.
-14. MCP and web use identical Group-context authorization.
+14. Web and REST use identical Group-context authorization.
 15. Object ownership is authoritative Group+policy state, not creator identity or provider name.
 16. Object mutation requires complete dependency analysis; delete requires no references.
 17. Provider rename drift never transfers ownership.
-18. Direct User-owned objects are unsupported until explicitly modeled.
+18. Direct User-owned objects are unsupported.
 19. Mock evidence never enables real-provider writes.
 20. Default deny.

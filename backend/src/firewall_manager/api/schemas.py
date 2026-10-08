@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Typed REST response schemas."""
 
 from datetime import datetime
@@ -78,6 +80,7 @@ class InitialSetupRequest(BaseModel):
 
 class InitialSetupTestRequest(BaseModel):
     recovery_code: str | None = None
+    organization_name: str | None = Field(default=None, min_length=1, max_length=200)
     admin_email: str = Field(min_length=3, max_length=320)
     admin_display_name: str = Field(min_length=1, max_length=200)
     admin_issuer: str | None = Field(default=None, max_length=500)
@@ -744,6 +747,13 @@ class DraftRuleRequest(BaseModel):
             raise ValueError("block rules may only use no logging or log at the beginning")
         if self.action == "MONITOR" and self.logging != "END":
             raise ValueError("monitor rules must log at the end")
+        if self.action in {"BLOCK", "TRUST", "MONITOR"} and any(
+            value is not None
+            for value in (self.intrusion_policy_id, self.file_policy_id, self.variable_set_id)
+        ):
+            raise ValueError(
+                "intrusion policy, file policy, and variable set are only valid for ALLOW rules"
+            )
         return self
 
 
@@ -901,6 +911,7 @@ class ChangeSetResponse(BaseModel):
     validation_results: list[dict[str, object]]
     execution_results: dict[str, object]
     failure_info: dict[str, object]
+    reconciliation_retry_available: bool = False
     audit_metadata: dict[str, object]
     created_at: datetime
     updated_at: datetime
@@ -965,3 +976,10 @@ class DeploymentResponse(BaseModel):
     revision: int
     created_at: datetime
     updated_at: datetime
+
+
+class LegacyOwnershipConfirmationRequest(BaseModel):
+    active_group_id: UUID
+    access_policy_id: UUID
+    resource_revision: int = Field(ge=1)
+    reason: str = Field(min_length=10, max_length=1000)

@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Restricted-secret encryption, isolation, tamper detection, and logging regressions."""
 
 import base64

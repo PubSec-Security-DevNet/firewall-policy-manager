@@ -1,3 +1,5 @@
+// Copyright 2026 Cisco Systems, Inc.
+// SPDX-License-Identifier: Apache-2.0
 import { useEffect, useState } from 'react';
 import { IconPlus } from '@tabler/icons-react';
 
@@ -19,6 +21,7 @@ import {
   AppLoadingState,
   AppSection,
   AppSelect,
+  AppStatusBadge,
   AppStack,
   AppText,
   AppTextInput,
@@ -182,8 +185,8 @@ function ProviderSetupGuidance({ kind, providerId }: { kind: string; providerId:
     kind === 'entra'
       ? 'In Entra, create an OpenID Connect web application registration. Use your tenant issuer (https://login.microsoftonline.com/<tenant-id>/v2.0), the client ID and secret, and request openid profile email scopes. Do not request offline_access or enable refresh tokens.'
       : kind === 'duo'
-        ? 'In Duo, choose Generic OIDC Relying Party with Authorization Code. Enable openid, email, and profile scopes. Do not enable offline_access or refresh tokens. Copy Issuer, Client ID, and Client Secret from Duo Metadata. Do not enter Duo Discovery, Token, JWKS, or UserInfo URLs here; Firewall Manager discovers them from the issuer.'
-        : 'Use a standards-compliant OIDC provider. Enter its issuer URL, client ID, and secret. Request openid profile email scopes; do not request offline_access or refresh tokens. Firewall Manager uses the standard /.well-known/openid-configuration document to discover the remaining endpoints.';
+        ? 'In Duo, choose Generic OIDC Relying Party with Authorization Code. Enable openid, email, and profile scopes. Do not enable offline_access or refresh tokens. Copy Issuer, Client ID, and Client Secret from Duo Metadata. Do not enter Duo Discovery, Token, JWKS, or UserInfo URLs here; Firewall Policy Manager discovers them from the issuer.'
+        : 'Use a standards-compliant OIDC provider. Enter its issuer URL, client ID, and secret. Request openid profile email scopes; do not request offline_access or refresh tokens. Firewall Policy Manager uses the standard /.well-known/openid-configuration document to discover the remaining endpoints.';
   return (
     <AppAlert color="blue">
       <AppText size="sm">{guidance}</AppText>
@@ -213,9 +216,10 @@ function ProviderRow({ provider, onSaved }: { provider: OidcProvider; onSaved: (
           <AppText fw={700}>
             {provider.display_name} ({provider.kind})
           </AppText>
-          <AppText size="xs" c={provider.enabled ? 'teal' : 'dimmed'} fw={700} tt="uppercase">
-            {provider.enabled ? 'Enabled' : 'Disabled'}
-          </AppText>
+          <AppStatusBadge
+            value={provider.enabled ? 'ENABLED' : 'DISABLED'}
+            label={provider.enabled ? 'Enabled' : 'Disabled'}
+          />
         </AppGroup>
         <AppStack gap={2}>
           <AppText size="sm">Issuer: {provider.issuer_url}</AppText>

@@ -1,3 +1,5 @@
+// Copyright 2026 Cisco Systems, Inc.
+// SPDX-License-Identifier: Apache-2.0
 import { expect, test, type Page } from '@playwright/test';
 
 function collectRuntimeFailures(page: Page) {
@@ -75,10 +77,13 @@ test.describe('release-candidate application journeys', () => {
     for (const [nav, heading] of [
       ['Users', 'Users'],
       ['Groups', 'Groups'],
+      ['Identity providers', 'Identity providers'],
+      ['SMTP notifications', 'SMTP notifications'],
+      ['Pending approvals', 'Pending approvals'],
       ['Access grants', 'Access grants'],
-      ['Provider connections', 'Provider connections'],
+      ['Providers', 'Provider connections'],
       ['Sync & drift', 'Sync & drift'],
-      ['All ChangeSets', 'All ChangeSets'],
+      ['All Changesets', 'All ChangeSets'],
       ['Deployments', 'Deployments'],
       ['Audit', 'Audit'],
     ] as const) {
@@ -88,6 +93,37 @@ test.describe('release-candidate application journeys', () => {
 
     expect(failures, failures.join('\n')).toEqual([]);
   });
+
+  for (const user of [
+    'approver@example.test',
+    'read-only@example.test',
+    'no-groups@example.test',
+  ]) {
+    test(`restricts the workspace for ${user}`, async ({ page }) => {
+      await preparePage(page, user);
+      const failures = collectRuntimeFailures(page);
+      await page.goto('/');
+      await expect(page.getByRole('heading', { name: 'Security posture' })).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Providers', exact: true })).toHaveCount(0);
+      await expect(page.getByRole('button', { name: 'Users', exact: true })).toHaveCount(0);
+      const unscoped = await page.request.get('/api/v1/rules', { headers: { 'X-Dev-User': user } });
+      expect(unscoped.status()).toBe(403);
+      if (user.startsWith('approver')) {
+        await page.getByRole('button', { name: 'Pending approvals', exact: true }).click();
+        await expect(page.getByRole('heading', { name: 'Pending approvals' })).toBeVisible();
+      } else {
+        await expect(
+          page.getByRole('button', { name: 'Pending approvals', exact: true }),
+        ).toHaveCount(0);
+        await page.getByRole('button', { name: 'Policies', exact: true }).click();
+        await expect(page.getByRole('heading', { name: 'Policy browser' })).toBeVisible();
+        if (user.startsWith('no-groups')) {
+          await expect(page.getByRole('button', { name: 'Select', exact: true })).toHaveCount(0);
+        }
+      }
+      expect(failures, failures.join('\n')).toEqual([]);
+    });
+  }
 
   test('denies a disabled development identity without exposing the application shell', async ({
     page,

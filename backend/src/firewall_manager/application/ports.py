@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Ports required by application services."""
 
 # ruff: noqa: PLR0913, PLR0917 -- persistence ports retain explicit security context.
@@ -365,6 +367,22 @@ class ChangeSetRepository(Protocol):
     def object_mutation_context(
         self, object_id: UUID, policy_id: UUID, organization_id: UUID
     ) -> dict[str, object] | None: ...
+
+    def object_delete_pending(
+        self,
+        object_id: UUID,
+        organization_id: UUID,
+        *,
+        exclude_change_set_id: UUID | None = None,
+    ) -> bool: ...
+
+    def rule_delete_pending(
+        self,
+        rule_id: UUID,
+        organization_id: UUID,
+        *,
+        exclude_change_set_id: UUID | None = None,
+    ) -> bool: ...
 
     def object_equivalent_id(
         self,

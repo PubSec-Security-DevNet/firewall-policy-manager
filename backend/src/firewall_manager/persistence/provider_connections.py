@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """SQL persistence for isolated, unlimited provider connections."""
 
 import re

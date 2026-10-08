@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """ChangeSet-only restore and recreate proposals."""
 
 from uuid import UUID, uuid4

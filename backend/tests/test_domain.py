@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Provider-neutral delegated-management domain behavior."""
 
 import pytest
@@ -84,3 +86,26 @@ def test_invalid_network_object_value_is_rejected() -> None:
             object_type=FirewallObjectType.NETWORK,
             normalized_value="10.20.not-an-address",
         )
+
+
+@pytest.mark.parametrize(
+    ("requested", "grant", "allowed"),
+    [
+        ("10.0.0.0", "10.0.0.0/24", True),
+        ("10.0.0.255", "10.0.0.0/24", True),
+        ("10.0.1.0", "10.0.0.0/24", False),
+        ("10.0.0.0/25", "10.0.0.0/24", True),
+        ("10.0.0.0/23", "10.0.0.0/24", False),
+        ("10.0.0.254-10.0.1.1", "10.0.0.0/24", False),
+        ("010.0.0.1", "10.0.0.0/8", False),
+        ("0x0a000001", "10.0.0.0/8", False),
+        ("167772161", "10.0.0.0/8", False),
+        ("10.0.0.129/25", "10.0.0.0/24", True),
+        ("::ffff:10.0.0.1", "10.0.0.0/8", False),
+        ("2001:0db8:0000::1", "2001:db8::/64", True),
+        ("2001:db8::/63", "2001:db8::/64", False),
+        ("10.0.0.2-10.0.0.1", "10.0.0.0/24", False),
+    ],
+)
+def test_adversarial_ip_boundaries(requested: str, grant: str, allowed: bool) -> None:
+    assert network_is_contained(requested, grant) is allowed

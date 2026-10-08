@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Effective delegated authorization invariants and negative matrix."""
 
 from uuid import UUID
@@ -248,7 +250,7 @@ def test_other_group_membership_and_grants_never_contribute() -> None:
     )
     assert finance_denial.reason is AuthorizationReason.RESOURCE_NOT_USABLE
     repository.memberships[UNRELATED] = True
-    repository.policy_capability_values[(USER, UNRELATED, POLICY_A)] = {"view", "deploy"}
+    repository.policy_capability_values[(USER, UNRELATED, POLICY_A)] = {"view"}
     repository.objects[(UNRELATED, POLICY_A, ENGINEERING_OBJECT)] = (
         MANAGER,
         "OBSERVED",
@@ -379,6 +381,25 @@ def test_ipv6_and_group_crossover() -> None:
         value="2001:db8:1::/48",
         group_id=ENGINEERING,
     ).allowed
+
+
+def test_owned_drifted_rule_remains_actionable() -> None:
+    repository = FakeAuthorizationRepository()
+    repository.rules[(FINANCE_RULE, POLICY_A)] = (FINANCE, "DRIFTED", 8)
+    repository.policy_capability_values[(USER, FINANCE, POLICY_A)] = {
+        "view",
+        "modify_rule",
+        "delete_rule",
+        "reorder_rule",
+    }
+
+    for action in (Action.MODIFY, Action.DELETE, Action.REORDER):
+        assert authorize(
+            repository,
+            AuthorizationResourceType.RULE,
+            action=action,
+            resource_id=FINANCE_RULE,
+        ).allowed
     assert not authorize(
         repository,
         AuthorizationResourceType.IP_NETWORK,
@@ -456,7 +477,7 @@ def test_direct_user_grant_is_only_effective_in_same_group_policy() -> None:
         action=Action.REORDER,
         group_id=FINANCE,
     ).allowed
-    repository.policy_capability_values[(USER, UNRELATED, POLICY_A)] = {"view", "deploy"}
+    repository.policy_capability_values[(USER, UNRELATED, POLICY_A)] = {"view"}
     repository.memberships[UNRELATED] = True
     assert not authorize(
         repository,

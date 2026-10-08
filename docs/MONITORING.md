@@ -1,28 +1,38 @@
 # Production monitoring
 
-The API exposes Prometheus text metrics at `/api/v1/metrics`. Keep this endpoint on the internal
-monitoring network; it is intentionally not part of the authenticated browser API. The endpoint
-currently reports HTTP request totals and process-local worker job counters. Scrape every 15–30
-seconds and aggregate across API replicas.
+The canonical single-host deployment includes Prometheus and Grafana behind the optional
+`monitoring` Compose profile:
 
-Minimum alerts:
+```sh
+docker compose --env-file /opt/firewall-manager/runtime/.env.production \
+  -f compose.production.yaml --profile monitoring up -d prometheus grafana
+```
 
-- API readiness fails for two consecutive checks;
-- worker health fails because the Redis heartbeat is older than two minutes;
-- scheduler health or queue depth is stale for two intervals;
-- HTTP 5xx or 429 rates exceed the deployment baseline;
-- provider connection has no successful sync within its configured interval plus grace period;
-- deployment remains `DEPLOYING` beyond the provider's expected window;
-- deployment becomes `RECONCILIATION_REQUIRED` or `UNKNOWN`;
-- secret-store validation or provider credential retrieval fails;
-- PostgreSQL backup and restore checks are overdue.
+Prometheus is container-private. Grafana binds to host loopback only, requires the generated admin
+password file, disables anonymous access and sign-up, and should be reached through an SSH tunnel
+or approved authenticated ingress.
 
-Dashboards should include request rate/latency/status, queue depth and age, worker/scheduler
-heartbeats, provider sync duration/status, deployment state and age, reconciliation backlog, and
-database connection saturation. Correlate alerts with the response `X-Correlation-ID` and the
-durable audit/deployment record; never put credentials, tokens, provider payloads, or cookies in
+The API exposes Prometheus text metrics at `/api/v1/metrics`. Caddy returns 404 for this path, so it
+is available only to Prometheus on the internal monitoring network. The endpoint reports HTTP
+request totals plus worker and scheduler heartbeat gauges backed by Redis. Scrape every 15–30
+seconds and aggregate across API replicas in an advanced multi-replica deployment.
+
+Included alerts cover:
+
+- API scrape availability;
+- HTTP 5xx rates;
+- sustained HTTP 429 rate limiting;
+- stale worker heartbeat;
+- stale scheduler heartbeat.
+
+The included dashboard shows request status/rate limiting and worker/scheduler health. Extend the
+monitoring platform with database, Redis, host, and container exporters when queue depth, storage,
+and database saturation are required. Alert operationally on overdue backups, provider sync,
+long-running deployments, and reconciliation state using the organization's event pipeline.
+
+Correlate alerts with response `X-Correlation-ID` values and durable audit/deployment records.
+Never put credentials, tokens, provider payloads, cookies, or high-cardinality resource IDs in
 metric labels.
 
-The current in-process request counters are useful for local and single-process deployments. A
-multi-replica production deployment must also scrape every replica and enforce ingress-level
-rate limits so an individual process restart cannot reset the global limit.
+The request counters are process-local. A multi-replica deployment must scrape every API replica
+and enforce ingress-level rate limits so a process restart cannot reset the global limit.

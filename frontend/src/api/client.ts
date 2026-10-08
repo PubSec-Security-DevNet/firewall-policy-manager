@@ -1,3 +1,5 @@
+// Copyright 2026 Cisco Systems, Inc.
+// SPDX-License-Identifier: Apache-2.0
 import type { components } from './schema';
 
 export type Session = components['schemas']['SessionResponse'];
@@ -784,3 +786,26 @@ export async function loadInventory(): Promise<Inventory> {
     discrepancies: [],
   };
 }
+
+export type LegacyOwnershipReview = {
+  id: string;
+  resource_type: string;
+  resource_id: string;
+  group_id: string;
+  policy_id: string | null;
+  name: string;
+  resource_revision: number | null;
+  status: string;
+};
+export const loadLegacyOwnership = () =>
+  get<LegacyOwnershipReview[]>('/api/v1/admin/legacy-ownership');
+export const confirmLegacyOwnership = (item: LegacyOwnershipReview, reason: string) =>
+  request<LegacyOwnershipReview>(`/api/v1/admin/legacy-ownership/${item.id}/confirm`, {
+    method: 'POST',
+    body: JSON.stringify({
+      active_group_id: item.group_id,
+      access_policy_id: item.policy_id,
+      resource_revision: item.resource_revision,
+      reason,
+    }),
+  });

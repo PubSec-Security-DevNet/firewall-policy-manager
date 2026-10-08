@@ -1,3 +1,5 @@
+// Copyright 2026 Cisco Systems, Inc.
+// SPDX-License-Identifier: Apache-2.0
 import { chromium } from 'playwright';
 
 const baseURL = process.env.E2E_BASE_URL ?? 'http://localhost:5173';

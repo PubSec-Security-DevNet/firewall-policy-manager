@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """FMC mock-compatible and real read-only adapter boundaries."""
 
 import httpx

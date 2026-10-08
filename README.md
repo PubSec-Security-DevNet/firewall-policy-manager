@@ -1,16 +1,89 @@
-# Firewall Manager
+# Firewall Policy Manager
 
-Firewall Manager is an early delegated control plane for Cisco Secure Firewall Management Center
-(FMC) and Security Cloud Control (SCC). Milestone 4 adds administratively managed, unlimited real
-FMC/SCC connections, encrypted write-only credentials, verified TLS/private-CA support, connection
-testing, version-specific compatibility evidence, and scheduled read-only synchronization on top
-of the Milestone 3 delegated ChangeSet and mock-transaction architecture.
+Firewall Policy Manager is a delegated control plane for Cisco Secure Firewall Management Center
+(FMC) and Security Cloud Control (SCC). It provides OIDC authentication, scoped administration,
+inventory synchronization, approval-backed ChangeSets, provider deployment controls, audit
+evidence, and reconciliation workflows.
 
-Real-provider configuration writes, approvals, deployments, and MCP provider administration are
-not implemented. The transaction path still fails closed unless its target is explicitly a
-deterministic mock; every real connection reports `writable: false` regardless of credential role.
+## Why Firewall Policy Manager
 
-## Quick start
+Many organizations need application teams, business units, or regional operators to manage their
+own firewall rules while continuing to share centrally operated FMC or SCC infrastructure. Separate
+firewall or management instances can provide strong isolation, but they may not be supported by the
+deployed platform, fit the network topology, or be operationally and economically practical. The
+usual alternatives—routing every change through a central ticket queue or granting broad provider
+access—either slow delivery or weaken administrative boundaries.
+
+Firewall Policy Manager provides a governed middle path. Central teams retain ownership of the
+shared infrastructure and define each Group's policy, rule category, objects, zones, address ranges,
+approval requirements, and deployment authority. Delegated teams can then perform authorized rule
+and object work inside those boundaries, with validation, audit, synchronization, and reconciliation
+applied consistently.
+
+This delegated model complements rather than replaces separate instances. Where regulatory,
+failure-domain, or network-isolation requirements demand a hard infrastructure boundary, use the
+appropriate provider and platform isolation controls.
+
+## Production deployment
+
+**For every real installation, use the production container stack.** It runs the reverse proxy,
+production frontend, API, worker, singleton scheduler, PostgreSQL, authenticated Redis, and optional
+Prometheus/Grafana entirely in containers. The host needs Docker Engine, Docker Compose, Git, DNS,
+and network access—not Python, Node.js, PostgreSQL, Redis, or a web server. A trusted certificate is
+recommended; the stack creates a self-signed certificate when no PEM pair is supplied.
+
+The canonical command is:
+
+```sh
+docker compose --env-file /opt/firewall-manager/runtime/.env.production \
+  -f compose.production.yaml up -d
+```
+
+For a guided installation and day-two commands, use the optional production helper:
+
+```sh
+./scripts/production.sh setup
+./scripts/production.sh status
+./scripts/production.sh stop
+./scripts/production.sh start
+./scripts/production.sh cert-refresh
+```
+
+It prompts for the public hostname and operator email, creates protected configuration and secret
+files, builds images, migrates the database, starts the stack, and validates HTTPS. It never has a
+command that deletes production volumes or secret files. `cert-refresh` safely replaces only a
+self-signed certificate; use `cert-reload` after installing a renewed CA-issued PEM pair. The
+production guide includes a table explaining the effect and persistence behavior of every command.
+
+Use the helper, or complete the guide's configuration, secret, TLS, and migration sequence before
+treating the raw Compose command as a production start. Complete OIDC setup in the browser after
+the services are healthy. Use the copy/paste production sequence in the
+[full production installation guide](docs/production-installation.md).
+
+Production quick start:
+
+1. Provision Linux with Docker Engine, the Compose plugin, Git, DNS, and TCP 443.
+2. Check out an immutable release and create protected runtime, certificate, secret, and backup
+   directories outside the repository.
+3. Copy [.env.production.example](.env.production.example), generate the PostgreSQL, Redis,
+   Grafana, and protected application-key secret files, and optionally install a trusted HTTPS
+   certificate.
+4. Build the application images and start PostgreSQL and Redis.
+5. Run the containerized Alembic migration and start the API, worker, singleton scheduler,
+   production frontend, and Caddy edge.
+6. Use the one-time setup screen to test OIDC and create the first organization, provider, and
+   Platform Admin; the client secret is stored through the encrypted application SecretStore.
+7. Onboard FMC/SCC read-only, validate sync and capabilities, then configure authorization,
+   approvals, backups, monitoring, and write gates.
+8. Complete the guide's health, HTTPS, persistence, restart, restore, and security checks.
+
+The production stack publishes only TCP 80/443. Grafana is optional and binds to host loopback;
+PostgreSQL, Redis, Prometheus, API, worker, and scheduler have no public host bindings.
+
+> `compose.yaml` is not a production shortcut. It deliberately enables mock FMC/SCC providers,
+> development authentication, fixture users/data, Vite, source mounts, and API reload mode.
+
+## Development setup — not for production
 
 Requirements: Docker Engine with Compose v2, `curl`, and `make`.
 
@@ -20,202 +93,41 @@ make up
 make smoke
 ```
 
-Open <http://localhost:5173>. Use the header selector to switch immediately among the deterministic
-Admin, Firewall Admin, Group Admin, Alice, Bob, Carol, Viewer, Disabled User, and No Groups
-identities. Selection is browser-session scoped and a switch reloads the application, clearing the
-active Group and all user-specific UI state. Development authentication and its identity-list
-endpoint are rejected/absent outside explicit development or test mode.
+Open <http://localhost:5173>. The header identity selector, mock providers, local-only passwords,
+seeded organizations, hot reload, and source bind mounts exist solely for development and tests.
+See [docs/development.md](docs/development.md) for the service layout and common commands.
 
-The mock-only stack does not require a secret-store key. Before creating a real connection,
-generate a 32-byte base64 key with the command in `.env.example`, put it in the ignored local
-`.env` as `APP_SECRET_KEY`, and restart the application processes. Production must inject this key
-from an external secrets-management mechanism; it must never be committed or placed in an image.
-All production replicas and workers sharing a database require the same key. Do not rotate the root
-key merely by changing the environment value—current ciphertext must first be migrated. Production
-bootstrap, recovery, and rotation requirements are documented in
-[`docs/OPERATIONS.md`](docs/OPERATIONS.md#production-secretstore-bootstrap).
+## Documentation
 
-## Local services
+- [Production installation and operations](docs/production-installation.md)
+- [Development environment](docs/development.md)
+- [Authentication and OIDC](docs/AUTHENTICATION.md)
+- [Monitoring](docs/MONITORING.md)
+- [Ingress security](docs/INGRESS_SECURITY.md)
+- [Delegated policy model](docs/product/DELEGATED_POLICY_MANAGEMENT.md)
+- [SBOM workflow](docs/SBOM.md)
+- [Production release checklist](docs/PRODUCTION_RELEASE_CHECKLIST.md)
 
-The canonical Compose project starts the Vite frontend, FastAPI backend, PostgreSQL, Redis,
-Dramatiq worker, scheduler, separate mock FMC/SCC services, and one-shot migration, seed, and
-synchronization jobs. Migrations and seed data are repeatable. Startup discovers both mocks and
-persists policies, categories, rules, objects, zones, dependencies, provider versions, and sync status as
-`OBSERVED`; it never adopts or modifies provider resources.
+## Security
 
-Common commands:
+Provider and application credentials are write-only encrypted records in PostgreSQL. The canonical
+deployment mounts the AES-256-GCM master key read-only from a protected host file into only the
+application containers that require it. Real provider connections begin disabled and read-only.
+TLS verification cannot be disabled; FMC private trust is supplied as an explicit CA bundle.
 
-```sh
-make up                 # build and start the stack
-make logs               # follow service logs
-make migrate            # apply Alembic migrations
-make seed               # safely reapply deterministic seed data
-make sync               # run read-only synchronization for configured local managers
-make test               # backend and frontend quality checks
-make architecture       # import-boundary contracts
-make security-check     # Python and npm dependency audits
-make db-backup FILE=... # create a PostgreSQL custom-format backup
-make db-restore-test FILE=... # validate a backup without changing live data
-make db-restore FILE=... CONFIRM=restore # explicitly confirmed in-place restore
-make operational-smoke                # restart worker/scheduler and verify health
-make sbom                              # generate a CycloneDX SBOM with Syft
-make smoke              # full local integration smoke test
-make docker-clean       # prune only stopped/dangling resources from this Compose project
-make down               # stop containers, retain data
-make reset CONFIRM=local  # remove this project's stack, volumes, and locally built images
-```
+Do not report secrets, `docker compose config` output from a secret-bearing customization,
+application keys, private keys, database dumps, or provider payloads in an issue.
 
-See [docs/SBOM.md](docs/SBOM.md) for the complete local Syft and
-Dependency-Track workflow.
+## Contributing
 
-## Organizations and access recovery
+Run `make license-check`, `make test`, `make architecture`, `make security-check`, and
+`git diff --check` for application changes. Production packaging changes must also render
+`compose.production.yaml`, build both application images, and complete the production smoke and
+persistence procedure in the production guide.
 
-The data model is organization-scoped: users, groups, policies, firewall managers, provider
-connections, OIDC providers, SMTP settings, secrets, and audit evidence belong to an organization.
-The initial setup wizard creates the first organization. The current application does not yet
-provide a UI for creating additional organizations or selecting an organization after login; the
-multi-organization model is currently used for tenant isolation and delegated authorization.
+## License
 
-The local Compose seed creates two demonstration organizations, `Example Organization` and
-`Isolated Organization`, for isolation testing. In development, choose the seeded `Other Viewer`
-identity (`other-viewer@example.test`) from the development-user selector to access the isolated
-organization. These are seed fixtures, not organizations created through the product UI.
+Copyright 2026 Cisco Systems, Inc.
 
-If an existing organization has lost all OIDC providers, run the recovery command inside the
-trusted application environment after applying migrations:
-
-```sh
-docker compose exec backend alembic upgrade head
-docker compose exec backend python -m firewall_manager.recovery_setup
-```
-
-With exactly one organization, the command targets it automatically. With multiple organizations,
-list them and select the intended target:
-
-```sh
-docker compose exec backend python -m firewall_manager.recovery_setup --list-organizations
-docker compose exec backend python -m firewall_manager.recovery_setup --organization-name "Organization Name"
-```
-
-If provider records themselves are preventing recovery, remove all OIDC providers for the target
-organization first. This is deliberately guarded because it removes provider configuration,
-encrypted OIDC client secrets, and their external-identity mappings while preserving users and
-application data:
-
-```sh
-docker compose exec backend python -m firewall_manager.remove_oidc_providers --list-organizations
-docker compose exec backend python -m firewall_manager.remove_oidc_providers \
-  --organization-name "Organization Name" --confirm
-```
-
-The command prints a short-lived, one-time recovery URL. Opening it shows a recovery setup form
-that creates a replacement administrator email enrollment and OIDC provider without deleting the
-existing organization or its data. The first successful login binds the provider identity to that
-email automatically. Recovery is operator-authorized and is unavailable to ordinary visitors;
-the URL is consumed after successful setup or expires after its configured window (30 minutes by
-default). A genuinely empty database uses the normal initial setup wizard and does not require a
-recovery URL.
-
-Build and smoke commands automatically remove stopped containers, unused networks, and dangling
-or obsolete tagged images labeled for the `firewall-manager-local` Compose project. Routine
-cleanup never removes database/Redis volumes, current images, running containers, or resources
-from another project. The confirmed reset is the only normal command that prunes project-labeled
-local persistent data. Shared Docker builder cache is intentionally retained because Docker cannot
-reliably scope it to one Compose project; use Docker's global cache controls manually only when
-their cross-project impact is acceptable.
-
-For host-side checks, create `backend/.venv` with Python 3.12+ and install
-`pip install -e 'backend[dev]'`; run `npm ci` in `frontend/`. CI runs the same formatter, linter,
-type, test, architecture, dependency, secret, SAST, container, migration, and Compose smoke gates.
-
-## Real provider connections
-
-Administration → Provider connections supports any number of independently credentialed FMC and
-SCC connections. Connections start disabled, must pass the actual read path before they can be
-enabled, retain separate health/sync/evidence/audit state, and may be disabled or retired without
-deleting historical inventory. FMC uses a dedicated username/password to obtain short-lived REST
-tokens in memory; SCC uses an API-only bearer token and a controlled Cisco region selector. FMC
-requires HTTPS with system trust or an administrator-supplied CA bundle. There is no TLS bypass and
-redirects are not followed. A custom bundle containing the exact presented leaf certificate may
-serve as an explicit identity pin when legacy FMC certificates do not match the endpoint name;
-uploading only an issuing CA does not relax hostname verification.
-
-Credentials are AES-256-GCM ciphertext in a dedicated secret table. Associated data binds each
-ciphertext to its organization, connection purpose, secret UUID, and key version; connection rows
-hold only the reference and safe metadata. Passwords, tokens, CA material, access/refresh tokens,
-and authorization headers are excluded from API responses/audit and covered by logging-redaction
-tests. The abstraction supports deployment-injected keys and an optional HashiCorp Vault KV v2
-provider; the database still stores only ciphertext.
-
-The UI includes capability-derived least-privilege setup guidance and links to Cisco's FMC 7.6/7.7
-REST guides and SCC Firewall Manager API 1.20.0 documentation. Labels that Cisco does not verify
-uniformly across FMC versions are explicitly shown as version-specific rather than guessed.
-
-Live read-only probes are never part of ordinary CI. They require `RUN_REAL_FMC_TESTS=true` or
-`RUN_REAL_SCC_TESTS=true`, the corresponding `REAL_*` credentials, and
-`REAL_PROVIDER_NON_PRODUCTION_ACK=non-production-read-only`. Never point them at production. A
-successful configured-connection test records evidence only for its discovered provider version;
-the repository-wide real profiles remain `NOT_STARTED` until actual live compatibility evidence is
-deliberately collected.
-
-## Architecture
-
-Browser requests reach versioned FastAPI routes, which resolve a principal and call reusable
-application services. Application services depend on repository and normalized provider ports;
-concrete SQLAlchemy and FMC/SCC HTTP adapters remain outside the domain. Background jobs use the
-same package and an external Redis broker. PostgreSQL and Redis hold all durable/shared state.
-
-The API contract is available at <http://localhost:8000/docs> in development/test; interactive
-docs and the runtime OpenAPI document are disabled in staging/production. Health endpoints are
-under `/api/v1/health`. Safe local configuration is documented inline in [.env.example](.env.example).
-Delegated reads are `/api/v1/delegated/policies` and `/delegated/context`; both require an explicit
-active Group and the context endpoint also requires an Access Policy. Administration endpoints are
-under `/api/v1/admin`; provider connections are under `/api/v1/admin/provider-connections` and are
-restricted to the active platform `admin` role. Legacy organization-scoped inventory endpoints remain available to the
-development administrator/read scaffold and use bounded cursor pagination.
-
-Key source areas are:
-
-- `backend/src/firewall_manager/domain`: normalized domain/provider DTOs and states;
-- `backend/src/firewall_manager/application`: effective authorization, administration, delegated
-  inventory, and shared sync services;
-- `backend/src/firewall_manager/providers`: provider contract adapters, capability validation, and
-  deterministic mocks;
-- `backend/src/firewall_manager/persistence`: SQLAlchemy models/repositories;
-- `frontend/src/features` and `frontend/src/ui`: view state and semantic presentation boundary;
-- `config/provider-capabilities.yaml`: validated capability evidence.
-
-The delegated-management product contract, including mandatory active-Group context, is in
-[docs/product/DELEGATED_POLICY_MANAGEMENT.md](docs/product/DELEGATED_POLICY_MANAGEMENT.md). The
-current read APIs are organization-scoped development inventory, not completed delegated views.
-
-## Authentication
-
-Production authentication uses configurable Microsoft Entra ID, Cisco Duo Single Sign-On, or
-generic OIDC profiles through one server-side Authorization Code implementation. Administrators
-configure and rotate providers under Access & delegation → Identity providers; client secrets are
-encrypted in the existing SecretStore and never returned to the browser. See
-[`docs/AUTHENTICATION.md`](docs/AUTHENTICATION.md) for provider registration, redirect URI, claims,
-session, and secret-management requirements. Development identity switching remains available only
-when explicitly enabled in development/test.
-
-## Current limitations
-
-- Production OIDC requires deployment-owned provider configuration and pre-provisioned
-  issuer+subject User mappings; automatic JIT user provisioning and IdP-group authorization are
-  intentionally not enabled.
-- The bootstrap `admin` role is development-oriented; delegated access itself is evaluated from
-  current membership, policy delegation, resource grants, and the exact active Group.
-- Real FMC/SCC read adapters and connection management are implemented, but compatibility is not
-  claimed for a version until a live, non-production read-only test succeeds for that connection.
-  Repository-wide real capability baselines remain `NOT_STARTED`.
-- ChangeSet drafts and deterministic mock rule/object transactions are implemented. Approval,
-  deployment, and all production provider writes remain unavailable.
-- Enabled real connections use one bounded scheduler batch and the existing worker queue. Advanced
-  distributed claiming/locking and large-scale backpressure remain future work.
-- MCP and the private FMC connector are not implemented.
-- Non-browser integrations use short-lived, scoped bearer tokens created by Platform Admins;
-  tokens are hash-only at rest, inherit the target User's role and grants, and are revocable.
-- Production configuration requires HTTPS public URLs, secure cookies, security headers, and the
-  scheduled expired-session/token cleanup job. CI runs dependency audits, SAST, secret scanning,
-  and HIGH/CRITICAL container image scans.
+Firewall Policy Manager is licensed under the Apache License, Version 2.0. See
+[LICENSE](LICENSE) for details.

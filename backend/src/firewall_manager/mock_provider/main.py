@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """HTTP façade over the deterministic normalized FMC/SCC mock provider."""
 
 from dataclasses import asdict

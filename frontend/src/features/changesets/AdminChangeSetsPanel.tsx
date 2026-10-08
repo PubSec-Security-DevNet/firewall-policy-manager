@@ -1,3 +1,5 @@
+// Copyright 2026 Cisco Systems, Inc.
+// SPDX-License-Identifier: Apache-2.0
 import { useEffect, useState } from 'react';
 
 import {
@@ -92,9 +94,12 @@ export function AdminChangeSetsPanel({ initialDetailsId }: { initialDetailsId?: 
 
   const retry = async (item: ChangeSet) => {
     if (!item.active_group_id) return;
+    const recovery = item.reconciliation_retry_available;
     if (
       !window.confirm(
-        `Retry ${item.title}?\n\nCompleted provider operations will be reconciled and skipped safely.`,
+        recovery
+          ? `Recover ${item.title}?\n\nThe recorded provider success will be revalidated and the existing provider resource will be adopted without blindly repeating the write.`
+          : `Retry ${item.title}?\n\nCompleted provider operations will be reconciled and skipped safely.`,
       )
     )
       return;
@@ -188,7 +193,7 @@ export function AdminChangeSetsPanel({ initialDetailsId }: { initialDetailsId?: 
                           }
                           onClick={() => void retry(item)}
                         >
-                          Retry
+                          {item.reconciliation_retry_available ? 'Recover' : 'Retry'}
                         </AppActionButton>
                       )}
                     </Group>

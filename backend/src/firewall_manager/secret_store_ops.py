@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Operator checks and authenticated key rotation for database-backed secrets."""
 
 import base64

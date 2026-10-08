@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """FastAPI process composition root."""
 
 import logging
@@ -15,6 +17,7 @@ from starlette.responses import Response
 
 from firewall_manager.api.dependencies import (
     get_change_set_execution_dispatcher,
+    get_deployment_dispatcher,
     get_provider_factory,
     get_provider_sync_dispatcher,
 )
@@ -31,7 +34,12 @@ from firewall_manager.security.csrf import token as csrf_token
 from firewall_manager.security.csrf import valid as csrf_valid
 from firewall_manager.security.oidc import COOKIE_NAME
 from firewall_manager.security.redaction import SecretRedactionFilter
-from firewall_manager.worker.tasks import execute_change_set, synchronize_provider_connection
+from firewall_manager.version import __version__
+from firewall_manager.worker.tasks import (
+    execute_change_set,
+    execute_deployment_batch,
+    synchronize_provider_connection,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -73,12 +81,15 @@ def create_app() -> FastAPI:  # noqa: PLR0915 -- composition root owns all proce
     error_response = {"model": ErrorEnvelope, "description": "Safe application error envelope"}
     docs_enabled = settings.app_environment in {"development", "test"}
     application = FastAPI(
-        title="Firewall Manager API",
-        version="0.1.0",
+        title="Firewall Policy Manager API",
+        version=__version__,
         responses=dict.fromkeys((401, 403, 404, 409, 422, 500, 502, 503), error_response),
         docs_url="/docs" if docs_enabled else None,
         redoc_url="/redoc" if docs_enabled else None,
         openapi_url="/openapi.json" if docs_enabled else None,
+    )
+    application.dependency_overrides[get_deployment_dispatcher] = lambda: (
+        lambda deployment_id: execute_deployment_batch.send(str(deployment_id))
     )
     application.add_middleware(
         CORSMiddleware,

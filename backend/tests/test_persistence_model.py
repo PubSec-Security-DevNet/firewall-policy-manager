@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Structural persistence invariants that do not require a running database."""
 
 from typing import cast

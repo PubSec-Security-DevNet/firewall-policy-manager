@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """SQLAlchemy 2 models for normalized application and provider state."""
 
 from datetime import datetime
@@ -94,10 +96,16 @@ class User(TimestampMixin, Base):
     role: Mapped[str] = mapped_column(String(50))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     default_group_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("application_groups.id"), nullable=True
+        ForeignKey("application_groups.id", ondelete="SET NULL"), nullable=True
     )
     default_policy_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("access_policies.id"), nullable=True
+        ForeignKey(
+            "access_policies.id",
+            ondelete="SET NULL",
+            name="fk_users_default_policy_id_access_policies",
+            use_alter=True,
+        ),
+        nullable=True,
     )
     revision: Mapped[int] = mapped_column(Integer, default=1)
 
@@ -108,7 +116,6 @@ class ExternalIdentity(TimestampMixin, Base):
     __tablename__ = "external_identities"
     __table_args__ = (
         UniqueConstraint("issuer", "subject"),
-        Index("ix_external_identities_user_id", "user_id"),
         Index("ix_external_identities_provider_id", "provider_id"),
     )
 
@@ -168,7 +175,6 @@ class ApiToken(TimestampMixin, Base):
     __tablename__ = "api_tokens"
     __table_args__ = (
         UniqueConstraint("token_hash"),
-        Index("ix_api_tokens_user_id", "user_id"),
         Index("ix_api_tokens_expires_at", "expires_at"),
     )
 
@@ -370,7 +376,9 @@ class ProviderConnection(TimestampMixin, Base):
     deployment_last_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     write_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     write_enabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    write_enabled_by_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
+    write_enabled_by_user_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.id"), index=True
+    )
     retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     revision: Mapped[int] = mapped_column(Integer, default=1)
 
@@ -1035,6 +1043,11 @@ class ChangeSet(TimestampMixin, Base):
         ),
     )
 
+    execution_epoch: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    mutation_intent: Mapped[dict[str, object]] = mapped_column(
+        JSONB, default=dict, server_default="{}"
+    )
+
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     organization_id: Mapped[UUID] = mapped_column(ForeignKey("organizations.id"), index=True)
     principal_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), index=True)
@@ -1134,6 +1147,11 @@ class Deployment(TimestampMixin, Base):
         CheckConstraint("revision >= 1", name="ck_deployments_revision"),
     )
 
+    execution_epoch: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    mutation_intent: Mapped[dict[str, object]] = mapped_column(
+        JSONB, default=dict, server_default="{}"
+    )
+
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     organization_id: Mapped[UUID] = mapped_column(ForeignKey("organizations.id"), index=True)
     provider_connection_id: Mapped[UUID | None] = mapped_column(
@@ -1188,3 +1206,26 @@ class DriftRecord(TimestampMixin, Base):
 # Temporary source-compatibility alias while Milestone 0 callers migrate to generic objects.
 NetworkObject = FirewallObject
 PolicyCategory = RuleCategory
+
+
+class LegacyOwnershipReview(TimestampMixin, Base):
+    """Preserved legacy authority, inert until one scoped administrator confirmation."""
+
+    __tablename__ = "legacy_ownership_reviews"
+    __table_args__ = (
+        UniqueConstraint("resource_type", "resource_id"),
+        Index(
+            "ix_legacy_reviews_scope", "organization_id", "group_id", "policy_id", "confirmed_at"
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(ForeignKey("organizations.id"))
+    resource_type: Mapped[str] = mapped_column(String(30))
+    resource_id: Mapped[UUID]
+    group_id: Mapped[UUID] = mapped_column(ForeignKey("application_groups.id"))
+    policy_id: Mapped[UUID | None] = mapped_column(ForeignKey("access_policies.id"))
+    snapshot: Mapped[dict[str, object]] = mapped_column(JSONB)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    confirmed_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
+    confirmation_reason: Mapped[str | None] = mapped_column(String(1000))

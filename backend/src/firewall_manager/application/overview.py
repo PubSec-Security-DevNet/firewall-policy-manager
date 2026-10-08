@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Read-only system overview use case shared by delivery interfaces."""
 
 import asyncio
@@ -24,12 +26,18 @@ class OverviewService:
         organization = self._repository.organization_name(principal.organization_id)
         if organization is None:
             raise ResourceOutOfScopeError
+        if principal.role != "admin":
+            # No explicit Group+Policy context: use the delegated context endpoint.
+            return {
+                "organization": organization,
+                "counts": dict.fromkeys(
+                    ("managers", "policies", "rules", "objects", "change_sets"), 0
+                ),
+                "providers": [],
+            }
         normalized_summaries = getattr(self._repository, "provider_summaries", None)
         if normalized_summaries is not None:
-            providers = normalized_summaries(
-                principal.organization_id,
-                None if principal.role == "admin" else principal.user_id,
-            )
+            providers = normalized_summaries(principal.organization_id)
         else:
             providers = [
                 {
@@ -42,14 +50,8 @@ class OverviewService:
                 )
                 if inventory.evidence_profile is not ProviderEvidenceProfile.MOCK
             ]
-        scoped_counts = getattr(self._repository, "counts_for_user", None)
-        counts = (
-            self._repository.counts(principal.organization_id)
-            if principal.role == "admin" or scoped_counts is None
-            else scoped_counts(principal.organization_id, principal.user_id)
-        )
         return {
             "organization": organization,
-            "counts": counts,
+            "counts": self._repository.counts(principal.organization_id),
             "providers": providers,
         }

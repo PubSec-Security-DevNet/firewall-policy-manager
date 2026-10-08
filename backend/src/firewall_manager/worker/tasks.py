@@ -1,8 +1,11 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Idempotent worker tasks for health and queue-backed provider synchronization."""
 
 import asyncio
 import calendar
 import os
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from typing import cast
 from uuid import UUID, uuid4
@@ -12,26 +15,35 @@ from redis import Redis
 from sqlalchemy import delete, select
 
 from firewall_manager.application.changesets import ChangeSetService
-from firewall_manager.application.deployments import DeploymentService
+from firewall_manager.application.deployments import (
+    DeploymentService,
+    is_definitive_provider_rejection,
+)
 from firewall_manager.application.errors import ApplicationError
+from firewall_manager.application.mutation_guard import mutation_context
 from firewall_manager.application.synchronization import SynchronizationService
 from firewall_manager.config import get_settings
 from firewall_manager.domain.models import ChangeSetState, Principal
 from firewall_manager.notifications import deliver_queued_email_notifications
 from firewall_manager.observability import job as record_job
-from firewall_manager.persistence.changesets import SqlChangeSetRepository
+from firewall_manager.persistence.changesets import (
+    CHANGE_SET_EXECUTION_LEASE_SECONDS,
+    SqlChangeSetRepository,
+)
 from firewall_manager.persistence.database import new_session
+from firewall_manager.persistence.execution_fencing import (
+    ExecutionFence,
+    ExecutionFenceLostError,
+    mutation_scope,
+)
 from firewall_manager.persistence.models import (
-    AccessPolicy,
     AuditEvent,
     AuthenticationEvent,
     AuthSession,
     ChangeSet,
     Deployment,
-    Device,
     FirewallManager,
     ProviderConnection,
-    ProviderDomain,
     ProviderTransaction,
     User,
 )
@@ -43,10 +55,10 @@ from firewall_manager.providers.transactions import GuardedProviderTransactionEx
 from firewall_manager.security.api_tokens import cleanup_expired as cleanup_expired_api_tokens
 from firewall_manager.security.secret_provider import master_key
 from firewall_manager.worker.broker import broker
+from firewall_manager.worker.health_keys import WORKER_HEARTBEAT_KEY
 
 BROKER = broker
 
-WORKER_HEARTBEAT_KEY = "firewall-manager:worker:last-heartbeat"
 AUDIT_PURGE_LOCK_KEY = "firewall-manager:audit-retention:last-run"
 
 
@@ -136,14 +148,20 @@ def execute_change_set(
     )
 
 
-async def _execute_change_set(
+async def _execute_change_set(  # noqa: PLR0912, PLR0915 -- explicit execution and recovery routing
     change_set_id: UUID,
     principal_id: UUID,
     group_id: UUID,
     organization_id: UUID,
 ) -> None:
     settings = get_settings()
-    with new_session() as session:
+    with new_session() as check_session:
+        current = check_session.get(ChangeSet, change_set_id)
+        uncertain = current is not None and current.state == "RECONCILIATION_REQUIRED"
+    if uncertain:
+        await _reconcile_change_set(change_set_id)
+        return
+    with new_session() as session, mutation_scope(session):
         user = session.get(User, principal_id)
         row = session.get(ChangeSet, change_set_id)
         if (
@@ -174,7 +192,10 @@ async def _execute_change_set(
             repository,
             GuardedProviderTransactionExecutor(secrets, build_real_provider),
         )
-        worker_owner = f"{os.uname().nodename}:{os.getpid()}"
+        worker_owner = f"{os.uname().nodename}:{os.getpid()}:{uuid4()}"
+        lease_heartbeat = asyncio.create_task(
+            _heartbeat_change_set_execution(change_set_id, worker_owner)
+        )
         try:
             execution = await service.execute(
                 principal, group_id, change_set_id, queued=True, execution_owner=worker_owner
@@ -205,7 +226,14 @@ async def _execute_change_set(
             )
             for connection_id in connection_ids:
                 DeploymentService(session).schedule_connector(principal, connection_id)
+                session.commit()
+                fence = session.info.get("execution_fence")
+                if isinstance(fence, ExecutionFence):
+                    fence.check()
                 synchronize_provider_connection.send(str(connection_id))
+        except ExecutionFenceLostError:
+            session.rollback()
+            return
         except ApplicationError as exc:
             if exc.details.get("code") == "CHANGE_SET_ALREADY_CLAIMED":
                 # Redis may redeliver while the original worker still owns the durable
@@ -232,7 +260,11 @@ async def _execute_change_set(
                     principal,
                     group_id,
                     change_set_id,
-                    ChangeSetState.FAILED.value,
+                    (
+                        ChangeSetState.RECONCILIATION_REQUIRED.value
+                        if getattr(session.get(ChangeSet, change_set_id), "mutation_intent", {})
+                        else ChangeSetState.FAILED.value
+                    ),
                     {},
                     {"code": exc.code},
                 )
@@ -257,7 +289,11 @@ async def _execute_change_set(
                     principal,
                     group_id,
                     change_set_id,
-                    ChangeSetState.FAILED.value,
+                    (
+                        ChangeSetState.RECONCILIATION_REQUIRED.value
+                        if getattr(session.get(ChangeSet, change_set_id), "mutation_intent", {})
+                        else ChangeSetState.FAILED.value
+                    ),
                     {},
                     {"code": "CHANGE_SET_EXECUTION_ERROR"},
                 )
@@ -272,6 +308,110 @@ async def _execute_change_set(
                 )
                 session.commit()
             raise
+        finally:
+            lease_heartbeat.cancel()
+            with suppress(asyncio.CancelledError):
+                await lease_heartbeat
+
+
+async def _heartbeat_change_set_execution(change_set_id: UUID, owner: str) -> None:
+    """Keep a live provider call from expiring its durable worker claim."""
+    while True:
+        await asyncio.sleep(30)
+        with new_session() as session:
+            repository = SqlChangeSetRepository(session)
+            if not repository.heartbeat_execution_lease(
+                change_set_id,
+                owner,
+                lease_seconds=CHANGE_SET_EXECUTION_LEASE_SECONDS,
+            ):
+                return
+            session.commit()
+
+
+async def _reconcile_change_set(change_set_id: UUID) -> None:  # noqa: PLR0915 -- fenced read-only recovery
+    """Recover result evidence only. An uncertain job can never enter mutation execution."""
+    with new_session() as session, mutation_scope(session):
+        row = session.scalar(
+            select(ChangeSet).where(ChangeSet.id == change_set_id).with_for_update()
+        )
+        now = datetime.now(UTC)
+        if row is None or row.state != "RECONCILIATION_REQUIRED" or not row.mutation_intent:
+            return
+        if row.execution_lease_until is not None and row.execution_lease_until > now:
+            return
+        row.execution_epoch += 1
+        row.execution_owner = f"reconcile:{uuid4()}"
+        row.execution_lease_until = now + timedelta(minutes=10)
+        session.commit()
+        fence = ExecutionFence(session, ChangeSet, row.id, row.execution_epoch, row.execution_owner)
+        entries = list(row.mutation_intent.get("entries", []))
+        settings = get_settings()
+        secrets = EncryptedDatabaseSecretStore(
+            session, master_key(settings), settings.secret_store_key_version
+        )
+        try:
+            for index, intent in enumerate(entries):
+                manager_id = intent.get("context", {}).get("manager_id")
+                manager = (
+                    session.get(FirewallManager, UUID(str(manager_id))) if manager_id else None
+                )
+                if manager is None or manager.provider_connection_id is None:
+                    continue
+                pinned_id = intent.get("context", {}).get("provider_connection_id")
+                if not pinned_id:
+                    continue
+                context = SqlProviderConnectionRepository(session).connection_context(
+                    row.organization_id, UUID(str(pinned_id))
+                )
+                if context is None:
+                    continue
+                recorded = intent.get("context", {})
+                if recorded.get("provider_endpoint") != context.get(
+                    "base_endpoint"
+                ) or recorded.get("provider_region") != context.get("region"):
+                    entries[index] = {
+                        **intent,
+                        "reconciliation": {
+                            "state": "UNKNOWN",
+                            "reason": "PROVIDER_CONTEXT_CHANGED",
+                        },
+                    }
+                    row.mutation_intent = {**row.mutation_intent, "entries": entries}
+                    session.commit()
+                    continue
+                credential = secrets.retrieve(
+                    row.organization_id,
+                    UUID(str(context["credential_reference"])),
+                    f"provider-connection:{pinned_id}",
+                )
+                provider = build_real_provider(context, credential, context.get("capabilities", {}))
+                try:
+                    evidence = await provider.reconcile_mutation(intent)
+                finally:
+                    await provider.aclose()
+                entries[index] = {**intent, "reconciliation": evidence}
+                row.mutation_intent = {**row.mutation_intent, "entries": entries}
+                row.failure_info = {
+                    **row.failure_info,
+                    "recovery": "READ_ONLY_RECONCILIATION",
+                    "outcomes": [
+                        item.get("reconciliation", {}).get("state", "UNKNOWN") for item in entries
+                    ],
+                }
+                # Keep the aggregate job under review: remaining operations and ownership
+                # adoption must not be inferred from desired state or a same-name object.
+                session.commit()
+        except ExecutionFenceLostError:
+            session.rollback()
+        finally:
+            try:
+                fence.check()
+                row.execution_owner = None
+                row.execution_lease_until = None
+                session.commit()
+            except ExecutionFenceLostError:
+                session.rollback()
 
 
 @dramatiq.actor(max_retries=0)
@@ -280,7 +420,15 @@ def recover_expired_change_set_executions() -> None:
     with new_session() as session:
         repository = SqlChangeSetRepository(session)
         recovered = repository.recover_expired_execution_leases()
-        rows = [session.get(ChangeSet, item) for item in recovered]
+        uncertain = list(
+            session.scalars(
+                select(ChangeSet).where(
+                    ChangeSet.state == "RECONCILIATION_REQUIRED",
+                    ChangeSet.execution_lease_until.is_(None),
+                )
+            )
+        )
+        rows = [session.get(ChangeSet, item) for item in recovered] + uncertain
         session.commit()
     for row in rows:
         if row is not None:
@@ -303,7 +451,9 @@ def recover_expired_deployments() -> None:
                 .where(
                     Deployment.lease_until.is_not(None),
                     Deployment.lease_until <= now,
-                    Deployment.state.in_(("READY", "DEPLOYING", "UNKNOWN")),
+                    Deployment.state.in_(
+                        ("READY", "DEPLOYING", "UNKNOWN", "RECONCILIATION_REQUIRED")
+                    ),
                 )
                 .with_for_update()
             )
@@ -315,6 +465,9 @@ def recover_expired_deployments() -> None:
                 "code": "DEPLOYMENT_WORKER_LEASE_EXPIRED",
                 "message": "Provider state must be reconciled before retrying.",
             }
+            row.execution_epoch += 1
+            if row.rollback_state in {"READY", "ROLLING_BACK"}:
+                row.rollback_state = "RECONCILIATION_REQUIRED"
             row.lease_owner = None
             row.lease_until = None
             row.heartbeat_at = now
@@ -323,6 +476,9 @@ def recover_expired_deployments() -> None:
                 if connection is not None:
                     connection.deployment_status = "RECONCILIATION_REQUIRED"
         session.commit()
+        recovered_ids = [str(row.id) for row in rows if row.provider_connection_id]
+    for deployment_id in recovered_ids:
+        execute_deployment_batch.send(deployment_id)
 
 
 @dramatiq.actor(max_retries=0)
@@ -428,7 +584,7 @@ def execute_deployment_batch(deployment_id: str) -> None:
 
 async def _execute_deployment_batch(deployment_id: UUID) -> None:  # noqa: PLR0911, PLR0912, PLR0915
     settings = get_settings()
-    with new_session() as session:
+    with new_session() as session, mutation_scope(session):
         owner = f"deployment:{os.uname().nodename}:{os.getpid()}:{uuid4()}"
         now = datetime.now(UTC)
         deployment = session.scalar(
@@ -436,17 +592,31 @@ async def _execute_deployment_batch(deployment_id: UUID) -> None:  # noqa: PLR09
         )
         if deployment is None or deployment.provider_connection_id is None:
             return
+        if deployment.state not in {
+            "READY",
+            "DEPLOYING",
+            "RECONCILIATION_REQUIRED",
+        } and deployment.rollback_state not in {
+            "READY",
+            "ROLLING_BACK",
+        }:
+            return
         connection = session.get(ProviderConnection, deployment.provider_connection_id)
         if connection is None or connection.lifecycle != "ACTIVE":
             return
-        if connection.deployment_paused:
+        if connection.deployment_paused and deployment.state == "READY":
             return
         if deployment.lease_until is not None and deployment.lease_until > now:
             return
+        deployment.execution_epoch += 1
         deployment.lease_owner = owner
         deployment.lease_until = now + timedelta(minutes=10)
         deployment.heartbeat_at = now
         session.commit()
+        fence = ExecutionFence(
+            session, Deployment, deployment.id, deployment.execution_epoch, owner
+        )
+        fence.authorize = lambda: DeploymentService(session).authorize_dispatch(deployment.id)
         repository = SqlProviderConnectionRepository(session)
         context = repository.connection_context(connection.organization_id, connection.id)
         if context is None:
@@ -466,6 +636,35 @@ async def _execute_deployment_batch(deployment_id: UUID) -> None:  # noqa: PLR09
         }
         provider = build_real_provider(context, credential, capabilities)
         try:
+            if deployment.state == "RECONCILIATION_REQUIRED":
+                entries = deployment.mutation_intent.get("entries", [])
+                jobs = provider.recover_deployment_jobs(entries)
+                scopes = {
+                    str(item.get("context", {}).get("scope", {}).get("domain_id"))
+                    for item in entries
+                }
+                planned = set(deployment.plan_snapshot.get("dispatch_domains", []))
+                if (
+                    not jobs
+                    or not planned
+                    or {str(job["domain_id"]) for job in jobs} != planned
+                    or len(jobs) != len(scopes)
+                    or deployment.rollback_state == "RECONCILIATION_REQUIRED"
+                ):
+                    deployment.failure_info = {
+                        **deployment.failure_info,
+                        "recovery": "PROVIDER_OUTCOME_UNKNOWN",
+                    }
+                    session.commit()
+                    return
+                deployment.plan_snapshot = {
+                    **deployment.plan_snapshot,
+                    "provider_jobs": jobs,
+                    "recovered_from_intent": True,
+                }
+                deployment.external_operation_id = str(jobs[0]["external_operation_id"])
+                deployment.state = "DEPLOYING"
+                session.commit()
             if deployment.rollback_state == "READY":
                 jobs = deployment.plan_snapshot.get("provider_jobs", [])
                 first_job = jobs[0] if isinstance(jobs, list) and jobs else {}
@@ -483,9 +682,24 @@ async def _execute_deployment_batch(deployment_id: UUID) -> None:  # noqa: PLR09
                     device_ids = list(deployment.target_device_ids)
                 if not domain_id or not original_operation_id or not device_ids:
                     raise ApplicationError(details={"code": "ROLLBACK_PROVIDER_CONTEXT_MISSING"})
-                result = await provider.rollback_deployment(
-                    domain_id, original_operation_id, device_ids
+                deployment.rollback_state = "RECONCILIATION_REQUIRED"
+                session.commit()
+                token = mutation_context.set(
+                    {
+                        "operation_id": f"rollback:{deployment.id}:{original_operation_id}",
+                        "provider_connection_id": str(connection.id),
+                        "connection_revision": context.get("revision"),
+                        "provider_endpoint": context.get("base_endpoint"),
+                        "provider_region": context.get("region"),
+                        "rollback_devices": device_ids,
+                    }
                 )
+                try:
+                    result = await provider.rollback_deployment(
+                        domain_id, original_operation_id, device_ids
+                    )
+                finally:
+                    mutation_context.reset(token)
                 deployment.rollback_external_operation_id = (
                     str(result.get("external_operation_id") or "") or None
                 )
@@ -524,33 +738,73 @@ async def _execute_deployment_batch(deployment_id: UUID) -> None:  # noqa: PLR09
                 session.commit()
                 return
             if deployment.state == "READY":
+                if deployment.plan_snapshot.get("start_intent"):
+                    deployment.state = "RECONCILIATION_REQUIRED"
+                    connection.deployment_status = "RECONCILIATION_REQUIRED"
+                    session.commit()
+                    return
+                deployment.plan_snapshot = {**deployment.plan_snapshot, "start_intent": True}
+                deployment.state = "RECONCILIATION_REQUIRED"
+                session.commit()
                 jobs: list[dict[str, object]] = []
-                for change_set_id in deployment.included_change_set_ids:
-                    change_set = session.get(ChangeSet, UUID(str(change_set_id)))
-                    if change_set is None or change_set.access_policy_id is None:
-                        continue
-                    policy = session.get(AccessPolicy, change_set.access_policy_id)
-                    if policy is None:
-                        continue
-                    domain = session.get(ProviderDomain, policy.domain_id)
-                    if domain is None:
-                        continue
-                    device_ids = deployment.target_device_ids or list(
-                        session.scalars(
-                            select(Device.native_id).where(Device.domain_id == domain.id)
+                dispatch_scopes = DeploymentService(session).dispatch_scope(deployment.id)
+                deployment.plan_snapshot = {
+                    **deployment.plan_snapshot,
+                    "dispatch_domains": [work["domain_id"] for work in dispatch_scopes],
+                }
+                session.commit()
+                already_deployed = True
+                for work in dispatch_scopes:
+                    token = mutation_context.set(
+                        {
+                            "operation_id": f"deployment:{deployment.id}:{work['domain_id']}",
+                            "provider_connection_id": str(connection.id),
+                            "connection_revision": context.get("revision"),
+                            "provider_endpoint": context.get("base_endpoint"),
+                            "provider_region": context.get("region"),
+                            "scope": work,
+                        }
+                    )
+                    try:
+                        result = await provider.start_deployment(
+                            str(work["domain_id"]),
+                            work["policy_ids"],
+                            work["device_ids"],
+                            work["expected_mutations"],
                         )
-                    )
-                    result = await provider.start_deployment(
-                        domain.native_id, [policy.native_id], device_ids
-                    )
+                    finally:
+                        mutation_context.reset(token)
+                    if str(result.get("state") or "").upper() != "DEPLOYED":
+                        already_deployed = False
                     jobs.append(
                         {
                             "external_operation_id": result.get("external_operation_id"),
-                            "domain_id": domain.native_id,
+                            "domain_id": work["domain_id"],
                             "provider": result.get("provider", {}),
+                            "state": result.get("state"),
+                            "devices": result.get("devices", []),
                         }
                     )
+                    deployment.pending_change_evidence = result.get("preflight", {})
+                    deployment.plan_snapshot = {**deployment.plan_snapshot, "provider_jobs": jobs}
+                    session.commit()
+                if not jobs:
+                    raise ApplicationError(details={"code": "DEPLOYMENT_SCOPE_EMPTY"})
                 deployment.plan_snapshot = {**deployment.plan_snapshot, "provider_jobs": jobs}
+                if already_deployed:
+                    deployment.state = "DEPLOYED"
+                    deployment.device_results = [
+                        device
+                        for job in jobs
+                        for device in job.get("devices", [])
+                        if isinstance(device, dict)
+                    ]
+                    connection.deployment_status = "COMPLETED"
+                    connection.deployment_last_completed_at = datetime.now(UTC)
+                    session.commit()
+                    fence.check()
+                    synchronize_provider_connection.send(str(connection.id))
+                    return
                 if jobs:
                     deployment.external_operation_id = (
                         str(jobs[0].get("external_operation_id") or "") or None
@@ -581,6 +835,9 @@ async def _execute_deployment_batch(deployment_id: UUID) -> None:  # noqa: PLR09
                 ]
                 connection.deployment_status = "COMPLETED"
                 connection.deployment_last_completed_at = datetime.now(UTC)
+                session.commit()
+                fence.check()
+                synchronize_provider_connection.send(str(connection.id))
             elif any(str(item.get("state")) == "FAILED" for item in statuses):
                 deployment.state = "FAILED"
                 deployment.failure_info = deployment_failure_info(statuses)
@@ -591,6 +848,9 @@ async def _execute_deployment_batch(deployment_id: UUID) -> None:  # noqa: PLR09
             deployment.heartbeat_at = datetime.now(UTC)
             deployment.lease_until = datetime.now(UTC) + timedelta(minutes=10)
             session.commit()
+        except ExecutionFenceLostError:
+            session.rollback()
+            return
         except Exception as exc:
             session.rollback()
             deployment = session.get(Deployment, deployment_id)
@@ -628,17 +888,33 @@ async def _execute_deployment_batch(deployment_id: UUID) -> None:  # noqa: PLR09
                 deployment.heartbeat_at = datetime.now(UTC)
                 deployment.lease_until = datetime.now(UTC) + timedelta(minutes=10)
                 session.commit()
-            elif deployment is not None and deployment.state == "READY":
-                deployment.state = "FAILED"
-                failure_info: dict[str, object] = {"code": "PROVIDER_DEPLOYMENT_START_FAILED"}
-                if isinstance(exc, ApplicationError):
-                    failure_info.update(exc.details)
-                else:
-                    details = getattr(exc, "details", None)
-                    if isinstance(details, dict):
-                        failure_info.update(details)
+            elif deployment is not None and deployment.state in {
+                "READY",
+                "RECONCILIATION_REQUIRED",
+            }:
+                deployment.state = "RECONCILIATION_REQUIRED"
+                failure_info = _deployment_start_failure_info(exc)
                 deployment.failure_info = failure_info
-                connection.deployment_status = "FAILED"
+                if (
+                    not deployment.mutation_intent
+                    and not deployment.external_operation_id
+                ) or is_definitive_provider_rejection(failure_info):
+                    # Preflight/authorization refused, or the provider definitively rejected
+                    # the deployment request before accepting a job.
+                    deployment.state = "FAILED"
+                    if failure_info["code"] == "PROVIDER_DEPLOYMENT_START_UNCERTAIN":
+                        failure_info["code"] = str(
+                            failure_info.pop("provider_code", "PROVIDER_DEPLOYMENT_START_FAILED")
+                        )
+                    deployment.failure_info = failure_info
+                    deployment.plan_snapshot = {
+                        key: value
+                        for key, value in deployment.plan_snapshot.items()
+                        if key != "start_intent"
+                    }
+                    connection.deployment_status = "FAILED"
+                else:
+                    connection.deployment_status = "RECONCILIATION_REQUIRED"
             deployment.heartbeat_at = datetime.now(UTC)
             deployment.lease_until = datetime.now(UTC) + timedelta(minutes=10)
             session.commit()
@@ -649,13 +925,35 @@ async def _execute_deployment_batch(deployment_id: UUID) -> None:  # noqa: PLR09
             # terminal failure and let the normal lease cleanup run.
             return
         finally:
-            current = session.get(Deployment, deployment_id)
-            if current is not None and current.lease_owner == owner:
-                current.lease_owner = None
-                current.lease_until = None
-                current.heartbeat_at = datetime.now(UTC)
-                session.commit()
+            try:
+                fence.check()
+                current = session.get(Deployment, deployment_id)
+                if current is not None:
+                    current.lease_owner = None
+                    current.lease_until = None
+                    current.heartbeat_at = datetime.now(UTC)
+                    session.commit()
+            except ExecutionFenceLostError:
+                session.rollback()
             await provider.aclose()
+
+
+def _deployment_start_failure_info(exc: BaseException) -> dict[str, object]:
+    """Preserve deterministic preflight errors; reserve uncertain for in-flight writes."""
+    if isinstance(exc, ApplicationError):
+        return {"code": exc.code, **exc.details}
+    details = getattr(exc, "details", None)
+    info: dict[str, object] = {"code": "PROVIDER_DEPLOYMENT_START_UNCERTAIN"}
+    if isinstance(details, dict):
+        info.update(details)
+    provider_code = getattr(exc, "code", None)
+    if (
+        isinstance(provider_code, str)
+        and provider_code
+        and info["code"] == "PROVIDER_DEPLOYMENT_START_UNCERTAIN"
+    ):
+        info["provider_code"] = provider_code
+    return info
 
 
 def deployment_failure_info(statuses: list[dict[str, object]]) -> dict[str, object]:

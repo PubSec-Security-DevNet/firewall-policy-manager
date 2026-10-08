@@ -1,3 +1,5 @@
+// Copyright 2026 Cisco Systems, Inc.
+// SPDX-License-Identifier: Apache-2.0
 import { useEffect, useMemo, useState } from 'react';
 import { IconArrowsShuffle, IconSearch } from '@tabler/icons-react';
 
@@ -645,7 +647,7 @@ function SyncDriftContent({
   );
 }
 
-function explainDiscrepancy(item: {
+export function explainDiscrepancy(item: {
   management_state: string;
   kind: string;
   provider?: string;
@@ -664,17 +666,24 @@ function explainDiscrepancy(item: {
   if (item.management_state === 'CONFLICT') {
     return `This ${resource} has changed in both the application and ${provider}. Review the details before choosing which version to keep.`;
   }
-  const previous = item.previous_snapshot ?? {};
+  const recorded = item.previous_snapshot ?? {};
+  const nestedBaseline = recorded.application_snapshot;
+  const previous =
+    nestedBaseline && typeof nestedBaseline === 'object' && !Array.isArray(nestedBaseline)
+      ? (nestedBaseline as Record<string, unknown>)
+      : recorded;
   const observed = item.observed_snapshot ?? {};
   const ignoredKeys = new Set([
     'metadata',
     'domain_id',
     'sharing_mode',
     'provider_version',
+    'fingerprint',
     'member_object_ids',
   ]);
-  const changed = Object.keys({ ...previous, ...observed }).filter(
+  const changed = Object.keys(previous).filter(
     (key) =>
+      key in observed &&
       !ignoredKeys.has(key) && JSON.stringify(previous[key]) !== JSON.stringify(observed[key]),
   );
   if (changed.length) {
@@ -866,7 +875,7 @@ function AuditContent({ snapshot }: { snapshot: AdministrationSnapshot }) {
             </Text>
             {typeof selectedEvent.details.reason === 'string' && (
               <Text size="sm">
-                <strong>Proxy reason:</strong> {selectedEvent.details.reason}
+                <strong>Reason:</strong> {selectedEvent.details.reason}
               </Text>
             )}
             {typeof selectedEvent.details.effective_user_email === 'string' && (

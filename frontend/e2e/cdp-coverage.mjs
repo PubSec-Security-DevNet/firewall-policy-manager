@@ -1,3 +1,5 @@
+// Copyright 2026 Cisco Systems, Inc.
+// SPDX-License-Identifier: Apache-2.0
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -130,10 +132,7 @@ async function main() {
     function_checks: functions.tested.map(([name, passed]) => ({ name, passed })),
     runtime_events: [],
   };
-  writeFileSync(
-    join(reportDir, 'cdp-coverage.json'),
-    `${JSON.stringify(report, null, 2)}\n`,
-  );
+  writeFileSync(join(reportDir, 'cdp-coverage.json'), `${JSON.stringify(report, null, 2)}\n`);
   console.log(JSON.stringify(report, null, 2));
 }
 

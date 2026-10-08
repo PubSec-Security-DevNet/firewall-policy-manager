@@ -1,0 +1,53 @@
+[
+  {
+    "output": "dashboard.png",
+    "route": "home",
+    "nav": "Home",
+    "heading": "Security posture",
+    "purpose": "Landing-page operational overview",
+    "clipHeight": 1000
+  },
+  {
+    "output": "groups.png",
+    "route": "groups",
+    "nav": "Groups",
+    "heading": "Groups",
+    "purpose": "Delegated administration and membership",
+    "clipHeight": 730
+  },
+  {
+    "output": "access-grants.png",
+    "route": "grants",
+    "nav": "Access grants",
+    "heading": "Access grants",
+    "purpose": "Explicit policy and resource boundaries",
+    "clipHeight": 1330
+  },
+  {
+    "output": "rules.png",
+    "route": "rules",
+    "nav": "Rules",
+    "heading": "Rules workspace",
+    "purpose": "Group-owned access-rule workflow",
+    "clipHeight": 840,
+    "waitSelector": "tbody"
+  },
+  {
+    "output": "objects.png",
+    "route": "objects",
+    "nav": "Objects",
+    "heading": "Object inventory",
+    "purpose": "Object ownership and use rights",
+    "clipHeight": 770,
+    "waitSelector": "tbody"
+  },
+  {
+    "output": "changesets.png",
+    "route": "changes",
+    "nav": "Changes",
+    "heading": "ChangeSets",
+    "purpose": "Change governance and provider results",
+    "clipHeight": 1180,
+    "waitSelector": "tbody"
+  }
+]

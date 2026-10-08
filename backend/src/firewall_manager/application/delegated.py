@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Delegated read models built on the authoritative authorization boundary."""
 
 from uuid import UUID

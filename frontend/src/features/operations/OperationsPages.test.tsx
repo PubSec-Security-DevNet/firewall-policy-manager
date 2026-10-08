@@ -1,3 +1,5 @@
+// Copyright 2026 Cisco Systems, Inc.
+// SPDX-License-Identifier: Apache-2.0
 import { MantineProvider } from '@mantine/core';
 import axe from 'axe-core';
 import { render, screen } from '@testing-library/react';
@@ -5,7 +7,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { appTheme } from '../../ui/theme';
-import { AuditPage, resourceTypeLabel, SyncDriftPage } from './OperationsPages';
+import { AuditPage, explainDiscrepancy, resourceTypeLabel, SyncDriftPage } from './OperationsPages';
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -15,6 +17,28 @@ describe('operations pages', () => {
     expect(resourceTypeLabel('firewall_objects')).toBe('Object');
     expect(resourceTypeLabel('rule_categories')).toBe('Rule category');
     expect(resourceTypeLabel('new_provider_resource')).toBe('New Provider Resource');
+  });
+
+  it('describes only comparable provider changes from the application baseline', () => {
+    const message = explainDiscrepancy({
+      management_state: 'DRIFTED',
+      kind: 'Rule',
+      previous_snapshot: {
+        application_snapshot: {
+          position: 4,
+          enabled: true,
+          source_object_ids: ['object-1'],
+        },
+        source_object_ids: ['object-1'],
+      },
+      observed_snapshot: {
+        position: 5,
+        enabled: true,
+      },
+    });
+
+    expect(message).toContain('Position');
+    expect(message).not.toContain('Source Object Ids');
   });
 
   it('presents provider synchronization failures and drift without fabricating remediation', async () => {

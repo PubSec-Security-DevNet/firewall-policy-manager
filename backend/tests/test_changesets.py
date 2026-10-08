@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Milestone 3 authorization, drift, naming, and mock transaction invariants."""
 
 # ruff: noqa: PLR0913, PLR0917 -- fake preserves the explicit production port.
@@ -153,6 +155,7 @@ class MemoryChangeSetRepository:
         self.category_name_collision = False
         self.category_slug = "FINANCE"
         self.category_revision_marker = "categories-v1"
+        self.object_inventory_marker = "objects-v1"
         self.equivalent_mutation_id: UUID | None = None
 
     # Authorization port
@@ -337,6 +340,50 @@ class MemoryChangeSetRepository:
         row["validated_revision"] = None
         return deepcopy(operation)
 
+    def object_delete_pending(
+        self,
+        object_id: UUID,
+        organization_id: UUID,
+        *,
+        exclude_change_set_id: UUID | None = None,
+    ) -> bool:
+        if organization_id != ORG:
+            return False
+        for change_set_id, row in self.change_sets.items():
+            if exclude_change_set_id is not None and change_set_id == exclude_change_set_id:
+                continue
+            if row["state"] in {"SUCCEEDED", "CANCELLED", "REJECTED", "ROLLED_BACK"}:
+                continue
+            for operation in row["operations"]:  # type: ignore[union-attr]
+                if (
+                    operation["kind"] == "DELETE_OBJECT"
+                    and str(operation["payload"].get("object_id")) == str(object_id)
+                ):
+                    return True
+        return False
+
+    def rule_delete_pending(
+        self,
+        rule_id: UUID,
+        organization_id: UUID,
+        *,
+        exclude_change_set_id: UUID | None = None,
+    ) -> bool:
+        if organization_id != ORG:
+            return False
+        for change_set_id, row in self.change_sets.items():
+            if exclude_change_set_id is not None and change_set_id == exclude_change_set_id:
+                continue
+            if row["state"] in {"SUCCEEDED", "CANCELLED", "REJECTED", "ROLLED_BACK"}:
+                continue
+            for operation in row["operations"]:  # type: ignore[union-attr]
+                if (
+                    operation["kind"] == "DELETE_RULE"
+                    and str(operation["payload"].get("rule_id")) == str(rule_id)
+                ):
+                    return True
+        return False
+
     def update_operation(
         self,
         actor: Principal,
@@ -390,6 +437,8 @@ class MemoryChangeSetRepository:
             result["rule_ordering"] = self.ordering_marker
         if operation["kind"] == "ENSURE_RULE_CATEGORY":
             result["category_inventory"] = self.category_revision_marker
+        if operation["kind"] == "CREATE_OBJECT":
+            result["object_inventory"] = self.object_inventory_marker
         return result
 
     def naming_context(self, *args: object) -> dict[str, object]:
@@ -628,8 +677,11 @@ class MemoryChangeSetRepository:
     def cancel_change_set(self, *args: object) -> dict[str, object]:
         raise NotImplementedError
 
-    def delete_change_set(self, *args: object) -> None:
-        raise NotImplementedError
+    def delete_change_set(
+        self, actor: Principal, group_id: UUID, change_set_id: UUID
+    ) -> None:
+        del actor, group_id
+        self.change_sets.pop(change_set_id, None)
 
     def record_change_event(self, *args: object) -> None:
         pass
@@ -878,6 +930,30 @@ def test_failed_change_set_without_provider_attempt_can_be_revalidated_and_reque
     assert dispatched == [(change_set_id, USER, FINANCE, ORG)]
 
 
+def test_receipt_backed_reconciliation_can_be_retried_safely() -> None:
+    repository, service, change_set = service_and_change(ProviderKind.FMC)
+    ready = service.add_operation(
+        principal(),
+        FINANCE,
+        UUID(str(change_set["id"])),
+        ChangeOperationKind.CREATE_RULE,
+        valid_rule(),
+    )
+    change_set_id = UUID(str(ready["id"]))
+    row = repository.change_sets[change_set_id]
+    row["state"] = "RECONCILIATION_REQUIRED"
+    row["reconciliation_retry_available"] = True
+    dispatched: list[tuple[UUID, UUID, UUID, UUID]] = []
+
+    def dispatch(change_id: UUID, user_id: UUID, group_id: UUID, organization_id: UUID) -> None:
+        dispatched.append((change_id, user_id, group_id, organization_id))
+
+    retried = service.retry_execution(principal(), FINANCE, change_set_id, dispatch)
+
+    assert retried["state"] == "QUEUED"
+    assert dispatched == [(change_set_id, USER, FINANCE, ORG)]
+
+
 def test_failed_change_set_with_provider_attempt_cannot_be_retried() -> None:
     repository, service, change_set = service_and_change(ProviderKind.FMC)
     ready = service.add_operation(
@@ -934,6 +1010,24 @@ async def test_stale_revision_and_post_preflight_edit_are_rejected() -> None:
     )
     with pytest.raises(InvalidChangeSetStateError):
         await service.execute(principal(), FINANCE, UUID(str(change_set["id"])))
+
+
+@pytest.mark.asyncio
+async def test_object_create_rebases_when_inventory_changed_by_another_changeset() -> None:
+    repository, service, change_set = service_and_change()
+    ready = service.add_operation(
+        principal(),
+        FINANCE,
+        UUID(str(change_set["id"])),
+        ChangeOperationKind.CREATE_OBJECT,
+        {"object_type": "PORT_SERVICE", "name": "https", "value": "tcp/443"},
+    )
+    assert ready["state"] == "READY"
+
+    repository.object_inventory_marker = "objects-v2"
+    result = await service.execute(principal(), FINANCE, UUID(str(change_set["id"])))
+
+    assert result["state"] == "SUCCEEDED"
 
 
 @pytest.mark.asyncio
@@ -1099,6 +1193,61 @@ async def test_unreferenced_owned_object_delete_follows_provider_path(
     assert all(
         item.native_id != f"{provider_kind.value}-object-finance-servers" for item in objects.items
     )
+
+
+def test_second_object_delete_is_rejected_while_first_changeset_is_pending() -> None:
+    repository, service, first_change_set = service_and_change()
+    first = service.add_operation(
+        principal(),
+        FINANCE,
+        UUID(str(first_change_set["id"])),
+        ChangeOperationKind.DELETE_OBJECT,
+        {"object_id": str(FINANCE_OBJECT), "object_type": "NETWORK"},
+    )
+    assert first["state"] == "READY"
+
+    second_change_set = service.create(
+        principal(), FINANCE, POLICY, "Duplicate deletion", ""
+    )
+    with pytest.raises(ChangeSetConflictError) as raised:
+        service.add_operation(
+            principal(),
+            FINANCE,
+            UUID(str(second_change_set["id"])),
+            ChangeOperationKind.DELETE_OBJECT,
+            {"object_id": str(FINANCE_OBJECT), "object_type": "NETWORK"},
+        )
+
+    assert raised.value.details["code"] == "OBJECT_DELETE_ALREADY_PENDING"
+    assert UUID(str(second_change_set["id"])) not in repository.change_sets
+
+
+def test_second_rule_delete_is_rejected_while_first_changeset_is_pending() -> None:
+    repository, service, first_change_set = service_and_change()
+    rule_id = uuid4()
+    first = service.add_operation(
+        principal(),
+        FINANCE,
+        UUID(str(first_change_set["id"])),
+        ChangeOperationKind.DELETE_RULE,
+        {"rule_id": str(rule_id)},
+    )
+    assert first["state"] == "READY"
+
+    second_change_set = service.create(
+        principal(), FINANCE, POLICY, "Duplicate rule deletion", ""
+    )
+    with pytest.raises(ChangeSetConflictError) as raised:
+        service.add_operation(
+            principal(),
+            FINANCE,
+            UUID(str(second_change_set["id"])),
+            ChangeOperationKind.DELETE_RULE,
+            {"rule_id": str(rule_id)},
+        )
+
+    assert raised.value.details["code"] == "RULE_DELETE_ALREADY_PENDING"
+    assert UUID(str(second_change_set["id"])) not in repository.change_sets
 
 
 @pytest.mark.asyncio
@@ -1569,3 +1718,42 @@ def test_defined_roles_do_not_bypass_current_group_policy_grants(role: str) -> N
         valid_rule(),
     )
     assert result["state"] == "VALIDATION_FAILED"
+
+
+def test_user_cannot_submit_without_current_operation_capability() -> None:
+    repository, service, row = service_and_change()
+    ready = service.add_operation(
+        principal(),
+        FINANCE,
+        UUID(str(row["id"])),
+        ChangeOperationKind.CREATE_RULE,
+        valid_rule(),
+    )
+    change_set_id = UUID(str(row["id"]))
+    assert ready["state"] == "READY"
+    repository.capabilities.discard("create_rule")
+    dispatched = []
+    with pytest.raises(ResourceOutOfScopeError):
+        service.queue_execution(
+            principal(), FINANCE, change_set_id, lambda *args: dispatched.append(args)
+        )
+    assert not dispatched
+
+
+def test_compensating_rollback_refuses_newer_managed_resource(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository, service, row = service_and_change()
+    change_set_id = UUID(str(row["id"]))
+    repository.change_sets[change_set_id]["operations"] = [
+        {
+            "kind": "MODIFY_RULE",
+            "payload": {"rule_id": str(uuid4())},
+            "rollback_snapshot": {"revision": 1, "state": {"name": "Previous"}},
+        }
+    ]
+    monkeypatch.setattr(repository, "rule_revision", lambda *_: 9, raising=False)
+    monkeypatch.setattr(repository, "rule_management_state", lambda *_: "MANAGED", raising=False)
+    with pytest.raises(InvalidChangeSetStateError) as error:
+        service.create_rollback(principal(), FINANCE, change_set_id)
+    assert error.value.details["code"] == "ROLLBACK_CONFLICT"

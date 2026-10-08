@@ -1,6 +1,6 @@
 # Production authentication
 
-Firewall Manager uses a backend-for-frontend OpenID Connect Authorization Code flow. The browser
+Firewall Policy Manager uses a backend-for-frontend OpenID Connect Authorization Code flow. The browser
 never receives provider client secrets or access/refresh tokens. A successful provider identity is
 first matched by an explicitly provisioned external identity mapping using issuer + provider `sub`.
 Email and display name claims are metadata only and are never used to authorize or auto-link a User;
@@ -30,8 +30,9 @@ requires an OIDC application/integration in Duo Admin Panel. Generic OIDC uses t
 standard discovery document and can support other enterprise OIDC providers without a new auth
 stack.
 
-Production requires HTTPS issuer and discovered endpoints and either deployment-injected
-`APP_SECRET_KEY` or the configured Vault secret provider. The application
+Production requires HTTPS issuer and discovered endpoints plus a stable application key. The
+canonical Compose deployment reads it from `APP_SECRET_KEY_FILE`; direct `APP_SECRET_KEY` injection
+and the Vault provider remain supported for custom deployments. The application
 accepts only RS256 ID tokens, validates the JWKS signature,
 issuer, audience, expiry, and one-time browser nonce/state binding. Sessions are opaque,
 server-side, HttpOnly, Secure in staging/production, SameSite Lax, idle/absolute bounded, and
@@ -55,15 +56,17 @@ revoke a token, and keep tokens short-lived and narrowly scoped.
 
 ## Operations
 
-Provision application Users and their explicit external issuer/subject mappings before enabling login. Changes to
-provider configuration require a deployment restart and should be tested against the provider's
-non-production tenant. Keep `APP_SECRET_KEY` stable across API, worker, and scheduler replicas;
-rotate it only with the documented ciphertext migration procedure. Never log the provider secret,
-authorization code, ID token, or session cookie.
+Provision application Users and their explicit external issuer/subject mappings before enabling
+login. Test provider configuration changes against the provider's non-production tenant. Keep the
+key supplied through `APP_SECRET_KEY_FILE` stable across API,
+worker, and scheduler replicas; rotate it only with the documented ciphertext migration procedure.
+Never log the provider secret, authorization code, ID token, or session cookie.
 
-Production may set `SECRET_STORE_PROVIDER=vault` and provide `VAULT_URL`, `VAULT_SECRET_PATH`,
-and an injected `VAULT_TOKEN` to resolve `APP_SECRET_KEY` from HashiCorp Vault KV v2. The token is
-used only at runtime and is not stored in PostgreSQL.
+The canonical production stack mounts the protected host key read-only at
+`/run/secrets/app_secret_key`. An advanced deployment may instead set
+`SECRET_STORE_PROVIDER=vault` and provide the required Vault connection and authentication
+configuration; that requires a deployment-specific Compose override and an external auto-unseal
+design if unattended restart is required.
 
 Run `make secret-check` after deployment to decrypt-validate every stored secret without printing
 its value. For rotation, inject `OLD_APP_SECRET_KEY`, `NEW_APP_SECRET_KEY`, and an incremented
@@ -71,11 +74,13 @@ its value. For rotation, inject `OLD_APP_SECRET_KEY`, `NEW_APP_SECRET_KEY`, and 
 `make secret-check`, then remove both key variables from the job environment. Keep the old key
 available for recovery until verification and the backup window are complete.
 
-For first production access, run `python -m firewall_manager.bootstrap_admin` inside the trusted
-application environment with `BOOTSTRAP_ORGANIZATION_NAME`, `BOOTSTRAP_ADMIN_EMAIL`,
-`BOOTSTRAP_ADMIN_DISPLAY_NAME`, `BOOTSTRAP_ADMIN_ISSUER`, and `BOOTSTRAP_ADMIN_SUBJECT` injected
-only for that command. It refuses to run once any application User exists. Remove the variables
-after success; there is no public bootstrap route, password, or default credential.
+For first production access, use the one-time setup screen shown only when the database contains no
+organization, User, or OIDC provider. Enter the organization, administrator, and provider details,
+then complete **Test configuration** through the real OIDC provider before saving. The callback
+captures the authenticated identity's immutable subject and completion creates the Platform Admin,
+external identity mapping, and encrypted database-managed provider together. Once any setup state
+exists, the unauthenticated first-run screen is no longer available. There is no default account,
+password, or development identity in production.
 
 ## Existing deployment recovery
 
@@ -99,9 +104,9 @@ python -m firewall_manager.recovery_setup --organization-name "Organization Name
 
 The command prints a short-lived URL containing a one-time recovery code. The recovery form accepts
 a new administrator display name, email, OIDC issuer/subject, and provider credentials. Successful
-completion creates a pending admin User keyed by the supplied email and adds the OIDC provider with
-its client secret encrypted in SecretStore. On the first successful login, the provider's stable
-identity is automatically bound to that email and the external identity mapping is created. The
+completion binds the administrator to the issuer and immutable subject obtained by the required
+test sign-in and stores the OIDC client secret encrypted in SecretStore. Email does not establish
+an identity mapping. For additional Users, enter the exact OIDC issuer and subject in Users. The
 organization and existing data are preserved. The
 recovery code is stored only as a hash, expires after 30 minutes by default, and is consumed after
 successful setup. Do not send the URL through an untrusted channel.

@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Composition factory for real, configuration-read-only provider adapters."""
 
 from firewall_manager.domain.models import CapabilityStatus, ProviderKind

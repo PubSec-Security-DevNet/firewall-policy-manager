@@ -1,7 +1,7 @@
 {
   "name": "firewall-manager-frontend",
   "private": true,
-  "version": "0.1.0",
+  "license": "Apache-2.0",
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
@@ -19,6 +19,7 @@
     "e2e:cdp:functions": "node e2e/cdp-function-smoke.mjs",
     "e2e:cdp:faults": "node e2e/cdp-fault-smoke.mjs",
     "e2e:cdp:fixture": "node e2e/cdp-fixture-setup.mjs",
+    "docs:screenshots": "node e2e/docs-screenshots.mjs",
     "api:generate": "openapi-typescript ../openapi.json -o src/api/schema.d.ts"
   },
   "dependencies": {

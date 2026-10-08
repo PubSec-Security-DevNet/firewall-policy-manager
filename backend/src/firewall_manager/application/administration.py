@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Authorization administration use cases shared by delivery interfaces."""
 
 from ipaddress import ip_address, ip_network

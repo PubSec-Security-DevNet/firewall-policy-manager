@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Shared Cisco FMC/cdFMC REST implementation with an explicit write gate."""
 
 import asyncio
@@ -28,6 +30,8 @@ from firewall_manager.application.errors import (
     ProviderTlsValidationError,
     ProviderUnavailableError,
 )
+from firewall_manager.application.mutation_guard import current_mutation_guard, mutation_context
+from firewall_manager.application.naming import provider_native_id_equal
 from firewall_manager.domain.models import (
     CapabilityStatus,
     ChangeOperationKind,
@@ -55,6 +59,14 @@ from firewall_manager.domain.models import (
     ProviderTransactionState,
     RuleObjectElement,
     ZoneElement,
+)
+from firewall_manager.providers.deployment_preflight import (
+    ACCESS_POLICY_TYPE,
+    check_changes,
+    collection,
+    configuration,
+    expected_resources,
+    refuse,
 )
 from firewall_manager.providers.transactions import (
     ProviderExecutionResult,
@@ -501,116 +513,303 @@ class CiscoReadOnlyProvider:
         warning = await self._pending_change_warning(domain_id, policy_id)
         return warning or {"pending_change_count": 0, "scope_known": True, "changes": []}
 
-    async def start_deployment(  # noqa: PLR0912 -- provider response compatibility branches
-        self, domain_id: str, policy_ids: list[str], device_ids: list[str]
+    async def start_deployment(  # noqa: PLR0912, PLR0915 -- ordered provider-boundary validation
+        self,
+        domain_id: str,
+        policy_ids: list[str],
+        device_ids: list[str],
+        expected_mutations: list[dict[str, Any]] | None = None,
     ) -> dict[str, object]:
-        # Deployment is intentionally gated by the connector's explicit write_enabled flag in
-        # _mutate_json, not by stale capability evidence. Dev sources are used to establish that
-        # evidence, so requiring prior evidence here would make first real deployment impossible.
+        """Final observed-scope preflight, then one durable guarded selective dispatch."""
+        if not self._writable:
+            raise ProductionWriteDisabledError
         if not device_ids or not policy_ids:
-            raise ProviderContractError
-        deployable = await self._get_with_params(
-            self._config_path(domain_id, "deployment/deployabledevices"),
-            {"offset": 0, "limit": 1000, "expanded": True},
+            refuse("DEPLOYMENT_SCOPE_EMPTY")
+        if self._capabilities.get("pending_change_inspection") is not CapabilityStatus.SUPPORTED:
+            refuse("DEPLOYMENT_INSPECTION_UNAVAILABLE")
+        domain_path = self._config_path(domain_id, "").rstrip("/")
+        expected = expected_resources(expected_mutations or [], domain_path)
+        evidence: dict[str, Any] = {
+            "observed_at": datetime.now(UTC).isoformat(),
+            "domain_id": domain_id,
+            "policy_ids": policy_ids,
+            "device_ids": sorted(set(device_ids)),
+            "provider_boundary_limitation": "OUT_OF_BAND_EDIT_AFTER_PREFLIGHT",
+            "devices": [],
+        }
+        path = self._config_path(domain_id, "deployment/deployabledevices")
+        raw = await self._get_with_params(
+            path, {"offset": 0, "limit": 1000, "expanded": True, "groupDependency": True}
         )
-        raw_items = deployable.get("items", []) if isinstance(deployable, dict) else []
-        provider_device_ids: list[str] = []
-        device_evidence: list[dict[str, object]] = []
-        if isinstance(raw_items, list):
-            for item in raw_items:
-                if not isinstance(item, dict):
-                    continue
-                device_evidence.append(
-                    {
-                        "id": str(item.get("id") or ""),
-                        "can_be_deployed": item.get("canBeDeployed"),
-                        "is_deploying": item.get("isDeploying"),
-                        "up_to_date": item.get("upToDate"),
-                        "message": str(item.get("message") or "")[:300],
-                    }
+        devices = collection(raw)
+        if not devices:
+            requested_device_ids = {str(device_id) for device_id in device_ids}
+            inventory = collection(
+                await self._get_with_params(
+                    self._config_path(domain_id, "devices/devicerecords"),
+                    {"offset": 0, "limit": 1000, "expanded": True},
                 )
-                if item.get("canBeDeployed") is False or item.get("isDeploying") is True:
-                    continue
-                device = item.get("device")
-                if isinstance(device, dict) and device.get("id"):
-                    provider_device_ids.append(str(device["id"]))
-                elif item.get("deviceId"):
-                    provider_device_ids.append(str(item["deviceId"]))
-                members = item.get("deviceMembers")
-                if isinstance(members, list):
-                    provider_device_ids.extend(
-                        str(member["id"])
-                        for member in members
-                        if isinstance(member, dict) and member.get("id")
-                    )
-                if (
-                    not isinstance(device, dict)
-                    and not isinstance(members, list)
-                    and item.get("id")
-                ):
-                    provider_device_ids.append(str(item["id"]))
-        provider_device_ids = list(dict.fromkeys(provider_device_ids))
-        if not provider_device_ids:
-            # Some FMC versions return an empty deployabledevices collection even while the
-            # requested device has provider-side changes.  The deployment request endpoint is
-            # authoritative in that case, so fall back only to explicitly requested devices
-            # confirmed by the same domain's inventory.
-            inventory = await self._get_with_params(
-                self._config_path(domain_id, "devices/devicerecords"),
-                {"offset": 0, "limit": 1000, "expanded": True},
             )
-            inventory_items = inventory.get("items", []) if isinstance(inventory, dict) else []
-            known_device_ids = {
-                str(item.get("id"))
-                for item in inventory_items
-                if isinstance(item, dict) and item.get("id")
-            }
-            provider_device_ids = [
-                device_id
-                for device_id in dict.fromkeys(device_ids)
-                if device_id in known_device_ids
+            matching_inventory = [
+                item
+                for item in inventory
+                if any(
+                    provider_native_id_equal(item.get("id"), device_id)
+                    for device_id in requested_device_ids
+                )
             ]
-            if not provider_device_ids:
-                raise ProviderContractError(
-                    details={
-                        "code": "NO_DEPLOYABLE_DEVICES",
-                        "provider_device_evidence": device_evidence[:20],
-                        "provider_messages": [
-                            {
-                                "message": (
-                                    "FMC reported no deployable devices and none of the requested "
-                                    "devices were present in the domain inventory."
-                                )
-                            }
+            if len(matching_inventory) == len(set(device_ids)) and all(
+                str(item.get("deploymentStatus") or "").upper() == "DEPLOYED"
+                and any(
+                    provider_native_id_equal(item.get("accessPolicy", {}).get("id"), policy_id)
+                    for policy_id in policy_ids
+                )
+                for item in matching_inventory
+            ):
+                return {
+                    "state": "DEPLOYED",
+                    "external_operation_id": None,
+                    "provider": {
+                        "status": "DEPLOYED",
+                        "reason": "NO_DEPLOYABLE_CHANGES",
+                    },
+                    "preflight": {
+                        **evidence,
+                        "already_deployed": True,
+                        "devices": [
+                            {"device": item, "pending_changes": []} for item in matching_inventory
                         ],
+                    },
+                    "devices": matching_inventory,
+                }
+        selected = []
+        for device_id in sorted(set(device_ids)):
+            matching = [
+                d
+                for d in devices
+                if provider_native_id_equal(d.get("device", {}).get("id") or d.get("id"), device_id)
+            ]
+            if len(matching) != 1:
+                refuse("DEPLOYMENT_TARGET_UNAVAILABLE")
+            device = matching[0]
+            provider_device_id = str(device.get("device", {}).get("id") or device.get("id"))
+            if device.get("canBeDeployed") is not True or device.get("isDeploying") is True:
+                refuse("DEPLOYMENT_TARGET_NOT_READY")
+            statuses = device.get("policyStatusList")
+            if not isinstance(statuses, list) or not statuses:
+                refuse("DEPLOYMENT_POLICY_ASSIGNMENT_UNKNOWN")
+            assigned = False
+            for status in statuses:
+                if not isinstance(status, dict) or not isinstance(status.get("policy"), dict):
+                    refuse("DEPLOYMENT_INSPECTION_MALFORMED")
+                policy = status["policy"]
+                if policy.get("type") == ACCESS_POLICY_TYPE and any(
+                    provider_native_id_equal(policy.get("id"), policy_id)
+                    for policy_id in policy_ids
+                ):
+                    assigned = True
+                dependencies = status.get("referredPolicyList", [])
+                # Referred policies are provider-managed dependencies. Their pending
+                # state is advisory and may reflect work outside this application;
+                # the provider will enforce any actual deployment requirement.
+                if not isinstance(dependencies, list):
+                    dependencies = []
+            if not assigned:
+                refuse("DEPLOYMENT_POLICY_SCOPE_UNPROVEN")
+            dependencies = device.get("groupDependencyDetails")
+            if not isinstance(dependencies, dict):
+                dependencies = {}
+            mandatory = dependencies.get("mandatoryDeployablePolicies", [])
+            selective = dependencies.get("selectivelyDeployablePolicies", [])
+            groups = dependencies.get("dependentPolicyList", [])
+            if not isinstance(mandatory, list):
+                mandatory = []
+            if not isinstance(groups, list):
+                groups = []
+            if selective is not None and not isinstance(selective, list):
+                selective = []
+            # FMC returns null instead of [] when no policies are selectively
+            # deployable. That is an explicit empty set, not unknown scope.
+            selective = [] if selective is None else selective
+            members = device.get("deviceMembers")
+            if (
+                not isinstance(members, list)
+                or not members
+                or any(
+                    not isinstance(member, dict)
+                    or not any(
+                        provider_native_id_equal(member.get("id"), candidate)
+                        for candidate in device_ids
+                    )
+                    for member in members
+                )
+            ):
+                refuse("DEPLOYMENT_ADDITIONAL_DEVICE_UNAUTHORIZED")
+            changes = collection(
+                await self._get_with_params(
+                    f"{path}/{provider_device_id}/pendingchanges",
+                    {"offset": 0, "limit": 1000, "expanded": True},
+                )
+            )
+            unattributed = check_changes(changes, expected)
+            version = device.get("version") or raw.get("version")
+            if not str(version or "").isdigit() or str(version) == "0":
+                refuse("DEPLOYMENT_VERSION_UNKNOWN")
+            selected.append(
+                {"id": provider_device_id, "version": str(version), "mandatory": bool(mandatory)}
+            )
+            device_evidence = {"device": device, "pending_changes": changes}
+            if unattributed:
+                device_evidence["unattributed_pending_changes"] = unattributed
+            evidence["devices"].append(device_evidence)
+        for intent in expected.values():
+            try:
+                current = await self._get(intent["resource_path"])
+            except ProviderError as exc:
+                if intent["method"] == "DELETE" and exc.details.get("http_status") == 404:
+                    continue
+                raise
+            if intent["method"] == "DELETE" or configuration(current) != configuration(
+                intent["result"]
+            ):
+                refuse("DEPLOYMENT_RESOURCE_CHANGED")
+            # FMC can advance a resource timestamp after an application-owned write
+            # without changing the resource configuration (for example while applying
+            # a rule reorder). The configuration comparison above is the authoritative
+            # external-change check; version-only churn must not block deployment of the
+            # configuration that was just staged.
+        # Re-read deployable metadata after resource inspection. FMC advances the deployment
+        # token for application-owned writes and for unrelated provider activity, so a token
+        # change by itself is not an unsafe scope change. The final token is the one that must
+        # be submitted; the provider still remains the authority for any race after this read.
+        latest = collection(
+            await self._get_with_params(
+                path, {"offset": 0, "limit": 1000, "expanded": True, "groupDependency": True}
+            )
+        )
+        latest_by_id: dict[str, dict[str, Any]] = {}
+        for snapshot in evidence["devices"]:
+            snapshot_id = str(
+                snapshot["device"].get("device", {}).get("id") or snapshot["device"].get("id")
+            )
+            current = next(
+                (
+                    current
+                    for current in latest
+                    if provider_native_id_equal(
+                        current.get("device", {}).get("id") or current.get("id"), snapshot_id
+                    )
+                ),
+                None,
+            )
+            if current is None:
+                refuse("DEPLOYMENT_TARGET_UNAVAILABLE")
+            current_version = str(current.get("version") or "")
+            if not current_version.isdigit() or current_version == "0":
+                refuse("DEPLOYMENT_VERSION_UNKNOWN")
+            latest_by_id[snapshot_id.casefold()] = current
+            if current_version != str(snapshot["device"].get("version") or ""):
+                snapshot["deployment_version_changed"] = {
+                    "before": str(snapshot["device"].get("version") or ""),
+                    "after": current_version,
+                }
+        for item in selected:
+            current = latest_by_id.get(str(item["id"]).casefold())
+            if current is None:
+                refuse("DEPLOYMENT_TARGET_UNAVAILABLE")
+            item["version"] = str(current["version"])
+        body = {
+            "type": "DeploymentRequest",
+            "deviceList": [d["id"] for d in selected],
+            "version": min((d["version"] for d in selected), key=int),
+            "forceDeploy": False,
+            # FMC may reject a deployment with HTTP 400 when it reports a
+            # non-actionable policy warning. The operator owns the deployment
+            # decision; warnings must not block dispatch.
+            "ignoreWarning": True,
+            "selectedPoliciesforDevices": [
+                {
+                    "deviceUUID": d["id"],
+                    "selectedPolicies": [] if d["mandatory"] else [ACCESS_POLICY_TYPE],
+                }
+                for d in selected
+            ],
+        }
+        token = mutation_context.set({**(mutation_context.get() or {}), "preflight": evidence})
+        try:
+            response = await self._mutate_json(
+                "POST", self._config_path(domain_id, "deployment/deploymentrequests"), body
+            )
+        finally:
+            mutation_context.reset(token)
+        task = response.get("metadata", {}).get("task", {}).get("id") or response.get("taskId")
+        if not task:
+            raise _AmbiguousMutationError("DEPLOYMENT_JOB_ID_MISSING")
+        return {
+            "external_operation_id": f"{domain_id}:{task}",
+            "provider": response,
+            "preflight": evidence,
+        }
+
+    def recover_deployment_jobs(self, intents: list[dict[str, Any]]) -> list[dict[str, object]]:
+        """Use recorded provider receipts only; never infer or resubmit a missing job."""
+        jobs = []
+        for intent in intents:
+            if not str(intent.get("path", "")).endswith("/deployment/deploymentrequests"):
+                continue
+            response = intent.get("response") or {}
+            body = response.get("body") or {}
+            if not isinstance(body, dict) or not 200 <= response.get("status", 0) < 300:
+                continue
+            task = body.get("metadata", {}).get("task", {}).get("id") or body.get("taskId")
+            domain = intent.get("context", {}).get("scope", {}).get("domain_id")
+            if task and domain:
+                jobs.append(
+                    {
+                        "external_operation_id": f"{domain}:{task}",
+                        "domain_id": domain,
+                        "provider": body,
                     }
                 )
-        # FMC starts a full deployment through deploymentrequests.  The
-        # deployabledevices collection is read-only; posting to its /deploy
-        # subresource with a policyList is rejected by real FMC instances.
-        response = await self._mutate_json(
-            "POST",
-            self._config_path(domain_id, "deployment/deploymentrequests"),
-            {
-                "deviceList": provider_device_ids,
-                "forceDeploy": False,
-                "ignoreWarning": True,
-                "type": "DeploymentRequest",
-                # 0 tells FMC to use the current pending-change timestamp.
-                "version": "0",
-            },
-        )
-        metadata = response.get("metadata")
-        task = metadata.get("task") if isinstance(metadata, dict) else None
-        task_id = task.get("id") if isinstance(task, dict) else None
-        if not task_id:
-            task_id = response.get("taskId") or response.get("id")
-        if not task_id:
-            raise ProviderContractError
+        return jobs
+
+    async def reconcile_mutation(self, intent: dict[str, Any]) -> dict[str, object]:  # noqa: PLR0911 -- fail-closed outcome classification
+        """Read a durable target. Presence proves desired state, never exactly-once delivery.
+
+        A create without its provider receipt remains unknown: name matching cannot prove
+        ownership. Known PUT/DELETE targets can be inspected without repeating the write.
+        """
+        path = str(intent.get("path") or "")
+        domain = str(intent.get("context", {}).get("domain_id") or "")
+        if not domain or not path.startswith(self._config_path(domain, "")):
+            return {"state": "UNKNOWN"}
+        method = intent.get("method")
+        response = intent.get("response") or {}
+        body = response.get("body") or {}
+        request = intent.get("request") or {}
+        if method == "POST":
+            native_id = body.get("id") if isinstance(body, dict) else None
+            if not native_id or not 200 <= response.get("status", 0) < 300:
+                return {"state": "UNKNOWN"}
+            path += "/" + str(native_id)
+        elif method not in {"PUT", "DELETE"}:
+            return {"state": "UNKNOWN"}
+        try:
+            current = await self._get(path)
+        except ProviderError as exc:
+            if method == "DELETE" and exc.details.get("http_status") == 404:
+                return {"state": "DESIRED_STATE_PRESENT", "resource_id": path.rsplit("/", 1)[-1]}
+            return {"state": "UNKNOWN", "error_code": exc.code}
+        if method == "DELETE" or not isinstance(current, dict) or not isinstance(request, dict):
+            return {"state": "UNKNOWN"}
+        desired = configuration(request)
+        if not desired or any(configuration(current.get(k)) != v for k, v in desired.items()):
+            return {"state": "UNKNOWN", "reason": "PROVIDER_STATE_DIFFERS"}
         return {
-            # Preserve the domain because FMC task status is domain-scoped.
-            "external_operation_id": f"{domain_id}:{task_id}",
-            "provider": response,
+            "state": "DESIRED_STATE_PRESENT",
+            "resource": current,
+            "receipt_recorded": bool(response),
+            "resource_id": current.get("id"),
         }
 
     async def deployment_status(self, external_operation_id: str) -> dict[str, object]:
@@ -1038,12 +1237,27 @@ class CiscoReadOnlyProvider:
                         )
                     )
                     continue
-                resource, mutated = await self._execute_operation(
-                    kind,
-                    typed_payload,
-                    checked_pending_scopes,
-                    operation_warnings,
+                token = mutation_context.set(
+                    {
+                        **(mutation_context.get() or {}),
+                        "operation_id": str(operation_id),
+                        "change_set_id": str(change_set_id),
+                        "manager_id": str(manager_id),
+                        "provider": self.kind.value,
+                        "expected_revision": typed_payload.get("expected_provider_version"),
+                        "domain_id": typed_payload.get("domain_native_id"),
+                        "policy_id": typed_payload.get("policy_native_id"),
+                    }
                 )
+                try:
+                    resource, mutated = await self._execute_operation(
+                        kind,
+                        typed_payload,
+                        checked_pending_scopes,
+                        operation_warnings,
+                    )
+                finally:
+                    mutation_context.reset(token)
                 if kind is ChangeOperationKind.ENSURE_RULE_CATEGORY:
                     provider_name = typed_payload.get("provider_name")
                     native_id = resource.get("native_id")
@@ -1339,9 +1553,17 @@ class CiscoReadOnlyProvider:
             )
             return self._provider_resource(response), True
         rule_id = self._required(payload, "rule_native_id")
-        current = await self._assert_current(
-            f"{base}/{rule_id}", payload.get("expected_rule_version")
-        )
+        try:
+            current = await self._assert_current(
+                f"{base}/{rule_id}", payload.get("expected_rule_version")
+            )
+        except ProviderUnavailableError as exc:
+            if kind is ChangeOperationKind.DELETE_RULE and exc.details.get("http_status") == 404:
+                # A provider-side delete may have completed before the application observed its
+                # result, or an operator may have removed the rule directly. Treat absence as
+                # the desired terminal state and let persistence retire the local active row.
+                return {"native_id": rule_id, "fingerprint": "already-absent"}, False
+            raise
         if _name(current, "") != self._required(payload, "expected_rule_name"):
             raise _ProviderMutationConflictError("PROVIDER_OWNERSHIP_NAME_CONFLICT")
         current_action = str(current.get("action", "")).upper()
@@ -1402,6 +1624,11 @@ class CiscoReadOnlyProvider:
                 "section",
             ):
                 body.pop(field, None)
+            if bool(body.get("logBegin")) or bool(body.get("logEnd")):
+                # Reorder recreates the rule from the provider response. Preserve
+                # a valid connection-event destination even when the old response
+                # omitted it or reported it as false.
+                body["sendEventsToFMC"] = True
             await self._mutate_json("DELETE", f"{base}/{rule_id}", None)
             try:
                 response = await self._mutate_json(
@@ -1427,7 +1654,7 @@ class CiscoReadOnlyProvider:
         response = await self._mutate_json("PUT", f"{base}/{rule_id}", body)
         return self._provider_resource(response), True
 
-    async def _execute_object(
+    async def _execute_object(  # noqa: PLR0912 -- explicit object mutation outcomes
         self, kind: ChangeOperationKind, domain_id: str, payload: dict[str, object]
     ) -> tuple[dict[str, object], bool]:
         resolution = payload.get("resolution")
@@ -1465,9 +1692,16 @@ class CiscoReadOnlyProvider:
             response = await self._mutate_json("POST", base, body)
             return self._provider_resource(response), True
         native_id = self._required(payload, "object_native_id")
-        current = await self._assert_current(
-            f"{base}/{native_id}", payload.get("expected_object_version")
-        )
+        try:
+            current = await self._assert_current(
+                f"{base}/{native_id}", payload.get("expected_object_version")
+            )
+        except ProviderUnavailableError as exc:
+            if kind is ChangeOperationKind.DELETE_OBJECT and exc.details.get("http_status") == 404:
+                # A prior delete may have completed before the local transaction was retried.
+                # Treat the provider's already-absent response as the desired terminal state.
+                return {"native_id": native_id, "fingerprint": "already-absent"}, False
+            raise
         if _name(current, "") != self._required(payload, "expected_provider_name"):
             raise _ProviderMutationConflictError("PROVIDER_OWNERSHIP_NAME_CONFLICT")
         if kind is ChangeOperationKind.DELETE_OBJECT:
@@ -1477,7 +1711,7 @@ class CiscoReadOnlyProvider:
         response = await self._mutate_json("PUT", f"{base}/{native_id}", body)
         return self._provider_resource(response), True
 
-    async def _pending_change_warning(
+    async def _pending_change_warning(  # noqa: PLR0912 -- version-specific provider envelopes
         self, domain_id: str, _policy_id: str
     ) -> dict[str, object] | None:
         if (
@@ -1489,12 +1723,16 @@ class CiscoReadOnlyProvider:
             self._config_path(domain_id, "deployment/deployabledevices"),
             {"offset": 0, "limit": 1000, "expanded": True},
         )
-        raw_items = payload.get("items", []) if isinstance(payload, dict) else []
+        raw_items = payload.get("items") if isinstance(payload, dict) else None
+        raw_paging = payload.get("paging", {}) if isinstance(payload, dict) else {}
+        paging = cast("dict[str, object]", raw_paging) if isinstance(raw_paging, dict) else {}
+        # FMC 10.0.x returns an empty deployable-device collection as paging.count=0
+        # without an items key. That is a complete, known empty result—not unknown state.
+        if raw_items is None and str(paging.get("count", "")).strip() == "0":
+            raw_items = []
         if not isinstance(raw_items, list):
             raise _ProviderMutationConflictError("PENDING_CHANGE_STATE_UNKNOWN")
         items = cast("list[object]", raw_items)
-        raw_paging = payload.get("paging", {}) if isinstance(payload, dict) else {}
-        paging = cast("dict[str, object]", raw_paging) if isinstance(raw_paging, dict) else {}
         count = paging.get("count", len(items))
         if int(str(count)) > len(items):
             raise _ProviderMutationConflictError("PENDING_CHANGE_STATE_INCOMPLETE")
@@ -1508,11 +1746,18 @@ class CiscoReadOnlyProvider:
                     f"deployment/deployabledevices/{item['id']}/pendingchanges",
                 )
             )
-            pending_items = pending.get("items", []) if isinstance(pending, dict) else []
+            pending_items = pending.get("items") if isinstance(pending, dict) else None
             if not isinstance(pending_items, list):
                 raise _ProviderMutationConflictError("PENDING_CHANGE_STATE_UNKNOWN")
             if not all(isinstance(change, dict) for change in pending_items):
                 raise _ProviderMutationConflictError("PENDING_CHANGE_STATE_UNKNOWN")
+            pending_paging = pending.get("paging", {})
+            if (
+                not isinstance(pending_paging, dict)
+                or pending_paging.get("next")
+                or int(str(pending_paging.get("count", len(pending_items)))) > len(pending_items)
+            ):
+                raise _ProviderMutationConflictError("PENDING_CHANGE_STATE_INCOMPLETE")
             pending_changes.extend(cast("Mapping[str, Any]", change) for change in pending_items)
         if not pending_changes:
             return None
@@ -1546,9 +1791,12 @@ class CiscoReadOnlyProvider:
         current = cast("Mapping[str, Any]", payload)
         if expected_version is not None and str(expected_version) != str(_version(current)):
             raise _ProviderMutationConflictError("STALE_PROVIDER_REVISION")
+        context = mutation_context.get()
+        if context is not None:
+            mutation_context.set({**context, "preimage_path": path, "preimage": dict(current)})
         return current
 
-    async def _mutate_json(  # noqa: PLR0913 -- transport retry controls are explicit
+    async def _mutate_json(  # noqa: PLR0913, PLR0912 -- explicit guarded transport outcomes
         self,
         method: str,
         path: str,
@@ -1559,6 +1807,8 @@ class CiscoReadOnlyProvider:
         retry_auth: bool = True,
     ) -> Mapping[str, Any]:
         """Send a mutation exactly once; transport/5xx outcomes are always ambiguous."""
+        if not self._writable:
+            raise ProductionWriteDisabledError
         await self._ensure_target_safe()
         if ensure_identity:
             await self._ensure_identity()
@@ -1567,6 +1817,12 @@ class CiscoReadOnlyProvider:
             if self.kind is ProviderKind.FMC
             else {"Authorization": f"Bearer {self._bearer_token or ''}"}
         )
+        guard = current_mutation_guard.get()
+        if guard is not None:
+            mutation_context.set(
+                {**(mutation_context.get() or {}), "request_parameters": params or {}}
+            )
+            guard.before_mutation(method, path, payload)
         try:
             response = await self._client.request(
                 method,
@@ -1575,12 +1831,37 @@ class CiscoReadOnlyProvider:
                 json=payload,
                 params=params,
             )
+            if guard is not None:
+                guard.after_mutation(
+                    {
+                        "status": response.status_code,
+                        "body": response.json() if response.content else {},
+                    }
+                )
             self._capture_certificate(response)
         except httpx.TransportError as exc:
             if self._is_tls_error(exc):
                 raise ProviderTlsValidationError from exc
             raise _AmbiguousMutationError("MUTATION_TRANSPORT_RESULT_UNKNOWN") from exc
-        if response.status_code >= 500 or response.status_code == 429:
+        if response.status_code == 429:
+            details = self._provider_validation_details(response)
+            provider_messages = details.get("provider_messages", [])
+            parallel_mutation_rejected = any(
+                "parallel add/update/delete operations are blocked" in str(value).lower()
+                for message in provider_messages
+                if isinstance(message, dict)
+                for value in message.values()
+            )
+            if parallel_mutation_rejected:
+                # cdFMC rejects this request before applying it when another mutation is
+                # active. This is a definitive non-mutating result, unlike a generic
+                # rate-limit response whose delivery outcome may still be unknown.
+                raise _ProviderMutationConflictError(
+                    "PROVIDER_RATE_LIMITED",
+                    {**details, "retry_safe": True},
+                )
+            raise _AmbiguousMutationError("MUTATION_PROVIDER_RESULT_UNKNOWN", details)
+        if response.status_code >= 500:
             raise _AmbiguousMutationError(
                 "MUTATION_PROVIDER_RESULT_UNKNOWN",
                 self._provider_validation_details(response),
@@ -1756,6 +2037,11 @@ class CiscoReadOnlyProvider:
         logging_mode = str(payload.get("logging", "NONE")).upper()
         body["logBegin"] = logging_mode == "BEGIN"
         body["logEnd"] = logging_mode == "END"
+        # The delegated UI exposes connection logging but not a destination
+        # selector. FMC rejects logBegin/logEnd without at least one destination,
+        # so use the FMC Event Viewer as the explicit application default.
+        if logging_mode in {"BEGIN", "END"}:
+            body["sendEventsToFMC"] = True
         category = payload.get("category_native_id")
         if category:
             category_reference: dict[str, object] = {"id": str(category), "type": "Category"}
@@ -2012,12 +2298,20 @@ class CiscoReadOnlyProvider:
         if not self._username or not self._password:
             raise ProviderConfigurationError
         await self._ensure_target_safe()
-        response = await self._send(
-            "POST",
-            "/api/fmc_platform/v1/auth/generatetoken",
-            auth=httpx.BasicAuth(self._username, self._password),
-            allow_auth_post=True,
-        )
+        for attempt in range(2):
+            try:
+                response = await self._send(
+                    "POST",
+                    "/api/fmc_platform/v1/auth/generatetoken",
+                    auth=httpx.BasicAuth(self._username, self._password),
+                    allow_auth_post=True,
+                )
+            except ProviderAuthenticationError:
+                if attempt == 1:
+                    raise
+                await asyncio.sleep(0.2)
+            else:
+                break
         access_token = response.headers.get("x-auth-access-token")
         if not access_token:
             raise ProviderContractError
@@ -2092,7 +2386,7 @@ class CiscoReadOnlyProvider:
         raise ProviderUnavailableError
 
     async def _activate_exact_certificate_pin(self) -> bool:
-        """Replace hostname identity with an exact uploaded leaf pin after verified preflight."""
+        """Use an exact uploaded leaf pin when hostname identity is unavailable."""
         if self._exact_pin_active or not self._exact_pin_fingerprints:
             return False
         parsed = urlsplit(self._endpoint)
@@ -2218,7 +2512,7 @@ class CiscoReadOnlyProvider:
             raise ProviderPermissionError
         if response.status_code == 429:
             raise ProviderRateLimitedError
-        raise ProviderUnavailableError
+        raise ProviderUnavailableError(details={"http_status": response.status_code})
 
     @staticmethod
     def _is_tls_error(exc: httpx.TransportError) -> bool:

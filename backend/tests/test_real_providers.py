@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Sanitized real-adapter parsing, write, deployment, and safety tests."""
 
 import json
@@ -15,9 +17,11 @@ from cryptography.x509.oid import NameOID
 from firewall_manager.application.errors import (
     ProductionWriteDisabledError,
     ProviderConfigurationError,
+    ProviderContractError,
     ProviderTlsValidationError,
     ProviderUnavailableError,
 )
+from firewall_manager.application.mutation_guard import current_mutation_guard
 from firewall_manager.domain.models import (
     CapabilityStatus,
     PageRequest,
@@ -169,6 +173,34 @@ async def test_real_fmc_uses_token_auth_and_normalizes_read_only_inventory(
 
 
 @pytest.mark.asyncio
+async def test_real_fmc_retries_transient_authentication_failure() -> None:
+    auth_attempts = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal auth_attempts
+        assert request.url.path.endswith("/auth/generatetoken")
+        auth_attempts += 1
+        if auth_attempts == 1:
+            return httpx.Response(401)
+        return httpx.Response(204, headers={"X-auth-access-token": "recovered-token"})
+
+    provider = RealFmcProvider(
+        endpoint="https://fmc.example.test",
+        display_name="FMC auth retry",
+        username="api-user",
+        password=_test_credential("fmc-auth-retry"),
+        capabilities=_capabilities(),
+        transport=httpx.MockTransport(handler),
+        validate_network_target=False,
+    )
+    try:
+        await provider._authenticate_fmc()  # pyright: ignore[reportPrivateUsage]
+        assert auth_attempts == 2
+    finally:
+        await provider.aclose()
+
+
+@pytest.mark.asyncio
 async def test_real_provider_operation_layer_rejects_configuration_post() -> None:
     class MutationProbe(RealFmcProvider):
         async def attempt_configuration_post(self) -> None:
@@ -195,6 +227,81 @@ def _write_capabilities() -> dict[str, CapabilityStatus]:
     return values
 
 
+@pytest.mark.asyncio
+async def test_real_fmc_empty_deployable_devices_without_items_is_known_empty() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/auth/generatetoken"):
+            return httpx.Response(204, headers={"X-auth-access-token": "token"})
+        if request.url.path.endswith("/deployment/deployabledevices"):
+            return httpx.Response(
+                200,
+                json={"paging": {"offset": 0, "limit": 0, "count": 0, "pages": 0}},
+            )
+        raise AssertionError(f"unexpected request: {request.method} {request.url.path}")
+
+    provider = RealFmcProvider(
+        endpoint="https://fmc.example.test",
+        display_name="FMC empty deployable devices",
+        username="api-user",
+        password=_test_credential("empty-deployable-devices"),
+        capabilities=_write_capabilities(),
+        transport=httpx.MockTransport(handler),
+        validate_network_target=False,
+    )
+    try:
+        assert await provider.inspect_pending_changes("domain-1", "policy-1") == {
+            "pending_change_count": 0,
+            "scope_known": True,
+            "changes": [],
+        }
+    finally:
+        await provider.aclose()
+
+
+@pytest.mark.asyncio
+async def test_real_fmc_already_deployed_device_completes_without_starting_a_job() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/auth/generatetoken"):
+            return httpx.Response(204, headers={"X-auth-access-token": "token"})
+        if request.url.path.endswith("/deployment/deployabledevices"):
+            return httpx.Response(
+                200,
+                json={"paging": {"offset": 0, "limit": 0, "count": 0, "pages": 0}},
+            )
+        if request.url.path.endswith("/devices/devicerecords"):
+            return _collection(
+                [
+                    {
+                        "id": "device-1",
+                        "deploymentStatus": "DEPLOYED",
+                        "accessPolicy": {
+                            "id": "policy-1",
+                            "type": "AccessPolicy",
+                        },
+                    }
+                ]
+            )
+        raise AssertionError(f"unexpected request: {request.method} {request.url.path}")
+
+    provider = RealFmcProvider(
+        endpoint="https://fmc.example.test",
+        display_name="FMC already deployed",
+        username="api-user",
+        password=_test_credential("already-deployed"),
+        capabilities=_write_capabilities(),
+        transport=httpx.MockTransport(handler),
+        writable=True,
+        validate_network_target=False,
+    )
+    try:
+        result = await provider.start_deployment("domain-1", ["policy-1"], ["device-1"])
+        assert result["state"] == "DEPLOYED"
+        assert result["external_operation_id"] is None
+        assert result["preflight"]["already_deployed"] is True
+    finally:
+        await provider.aclose()
+
+
 def _create_rule_operation() -> list[dict[str, object]]:
     return [
         {
@@ -209,6 +316,40 @@ def _create_rule_operation() -> list[dict[str, object]]:
                 "name": "FINANCE__allow-web",
                 "action": "ALLOW",
                 "source_object_native_ids": ["network-1"],
+            },
+        }
+    ]
+
+
+def _delete_rule_operation() -> list[dict[str, object]]:
+    return [
+        {
+            "id": str(uuid4()),
+            "kind": "DELETE_RULE",
+            "provider_payload": {
+                "domain_native_id": "domain-1",
+                "policy_native_id": "policy-1",
+                "rule_native_id": "rule-1",
+                "expected_rule_name": "FINANCE__allow-web",
+                "expected_rule_action": "ALLOW",
+            },
+        }
+    ]
+
+
+def _delete_object_operation() -> list[dict[str, object]]:
+    return [
+        {
+            "id": str(uuid4()),
+            "kind": "DELETE_OBJECT",
+            "provider_payload": {
+                "domain_native_id": "domain-1",
+                "policy_native_id": "policy-1",
+                "object_native_id": "object-1",
+                "expected_object_version": "1",
+                "expected_provider_name": "FINANCE__example",
+                "object_type": "NETWORK",
+                "normalized_value": "10.20.10.0/24",
             },
         }
     ]
@@ -307,6 +448,22 @@ def test_system_application_criteria_are_sent_as_provider_app_conditions() -> No
     }
 
 
+def test_real_rule_logging_selects_fmc_event_viewer_destination() -> None:
+    begin = CiscoReadOnlyProvider._rule_payload(  # pyright: ignore[reportPrivateUsage]
+        {"name": "FINANCE__logged", "logging": "BEGIN"}
+    )
+    end = CiscoReadOnlyProvider._rule_payload(  # pyright: ignore[reportPrivateUsage]
+        {"name": "FINANCE__logged", "logging": "END"}
+    )
+    no_logging = CiscoReadOnlyProvider._rule_payload(  # pyright: ignore[reportPrivateUsage]
+        {"name": "FINANCE__quiet", "logging": "NONE"}
+    )
+
+    assert begin["sendEventsToFMC"] is True
+    assert end["sendEventsToFMC"] is True
+    assert "sendEventsToFMC" not in no_logging
+
+
 @pytest.mark.asyncio
 async def test_real_fmc_rule_create_is_guarded_and_normalized() -> None:
     requests: list[httpx.Request] = []
@@ -394,7 +551,23 @@ async def test_real_fmc_mutation_reauthenticates_once_after_expired_token() -> N
         writable=True,
     )
 
-    result = await provider.execute_transaction(uuid4(), uuid4(), _create_rule_operation())
+    class RecordingGuard:
+        def __init__(self) -> None:
+            self.last_response_status: int | None = None
+
+        def before_mutation(self, _method: str, _path: str, _payload: object = None) -> None:
+            if self.last_response_status not in {None, 401}:
+                raise AssertionError("a non-authenticated mutation was delivered twice")
+
+        def after_mutation(self, result: object = None) -> None:
+            assert isinstance(result, dict)
+            self.last_response_status = int(result["status"])
+
+    guard_token = current_mutation_guard.set(RecordingGuard())
+    try:
+        result = await provider.execute_transaction(uuid4(), uuid4(), _create_rule_operation())
+    finally:
+        current_mutation_guard.reset(guard_token)
 
     assert result.state is ProviderTransactionState.SUCCEEDED
     assert result.operation_results[0]["provider_resource_id"] == "rule-created-after-reauth"
@@ -445,6 +618,136 @@ async def test_real_mutation_timeout_is_ambiguous_and_never_retried() -> None:
     assert result.state is ProviderTransactionState.RECONCILIATION_REQUIRED
     assert result.operation_results[0]["status"] == "AMBIGUOUS"
     assert mutation_attempts == 1
+    await provider.aclose()
+
+
+@pytest.mark.asyncio
+async def test_parallel_mutation_rejection_is_non_mutating_and_retryable() -> None:
+    mutation_attempts = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal mutation_attempts
+        if request.url.path.endswith("/auth/generatetoken"):
+            return httpx.Response(204, headers={"X-auth-access-token": "token"})
+        if request.url.path.endswith("/policy/accesspolicies/policy-1"):
+            return httpx.Response(200, json={"id": "policy-1", "version": "1"})
+        if request.url.path.endswith("/deployment/deployabledevices"):
+            return _collection([])
+        if request.url.path.endswith("/pendingchanges"):
+            return _collection([])
+        if request.method == "GET" and request.url.path.endswith("/accessrules"):
+            return _collection([])
+        mutation_attempts += 1
+        return httpx.Response(
+            429,
+            json={
+                "error": {
+                    "category": "FRAMEWORK",
+                    "messages": [
+                        {
+                            "description": (
+                                "Parallel add/update/delete operations are blocked. "
+                                "Please retry the request."
+                            )
+                        }
+                    ],
+                }
+            },
+        )
+
+    provider = RealFmcProvider(
+        endpoint="https://fmc.example.test",
+        display_name="FMC parallel mutation test",
+        username="api-user",
+        password=_test_credential("fmc-parallel-mutation"),
+        capabilities=_write_capabilities(),
+        transport=httpx.MockTransport(handler),
+        validate_network_target=False,
+        writable=True,
+    )
+    result = await provider.execute_transaction(uuid4(), uuid4(), _create_rule_operation())
+    assert result.state is ProviderTransactionState.CONFLICT
+    assert result.operation_results[0]["status"] == "CONFLICT"
+    assert result.operation_results[0]["mutated"] is False
+    failure = result.operation_results[0]["failure"]
+    assert failure["code"] == "PROVIDER_RATE_LIMITED"
+    assert failure["retry_safe"] is True
+    assert failure["provider_status"] == 429
+    assert any(
+        "parallel add/update/delete operations are blocked" in str(message).lower()
+        for message in failure["provider_messages"]
+    )
+    assert mutation_attempts == 1
+    await provider.aclose()
+
+
+@pytest.mark.asyncio
+async def test_delete_of_already_missing_rule_is_idempotent() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/auth/generatetoken"):
+            return httpx.Response(204, headers={"X-auth-access-token": "token"})
+        if request.url.path.endswith("/policy/accesspolicies/policy-1"):
+            return httpx.Response(200, json={"id": "policy-1", "version": "1"})
+        if request.url.path.endswith("/deployment/deployabledevices"):
+            return _collection([])
+        if request.url.path.endswith("/pendingchanges"):
+            return _collection([])
+        if request.url.path.endswith("/accessrules/rule-1"):
+            return httpx.Response(404, json={"message": "not found"})
+        raise AssertionError(f"unexpected request: {request.method} {request.url.path}")
+
+    capabilities = _write_capabilities()
+    capabilities[ProviderCapability.ACCESS_RULE_DELETE.value] = CapabilityStatus.SUPPORTED
+    provider = RealFmcProvider(
+        endpoint="https://fmc.example.test",
+        display_name="FMC idempotent delete test",
+        username="api-user",
+        password=_test_credential("fmc-idempotent-delete"),
+        capabilities=capabilities,
+        transport=httpx.MockTransport(handler),
+        validate_network_target=False,
+        writable=True,
+    )
+    result = await provider.execute_transaction(uuid4(), uuid4(), _delete_rule_operation())
+    assert result.state is ProviderTransactionState.SUCCEEDED
+    assert result.operation_results[0]["status"] == "SUCCEEDED"
+    assert result.operation_results[0]["mutated"] is False
+    assert result.operation_results[0]["provider_resource_id"] == "rule-1"
+    await provider.aclose()
+
+
+@pytest.mark.asyncio
+async def test_delete_of_already_missing_object_is_idempotent() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/auth/generatetoken"):
+            return httpx.Response(204, headers={"X-auth-access-token": "token"})
+        if request.url.path.endswith("/policy/accesspolicies/policy-1"):
+            return httpx.Response(200, json={"id": "policy-1", "version": "1"})
+        if request.url.path.endswith("/deployment/deployabledevices"):
+            return _collection([])
+        if request.url.path.endswith("/pendingchanges"):
+            return _collection([])
+        if request.url.path.endswith("/object/networks/object-1"):
+            return httpx.Response(404, json={"message": "not found"})
+        raise AssertionError(f"unexpected request: {request.method} {request.url.path}")
+
+    capabilities = _write_capabilities()
+    capabilities[ProviderCapability.NETWORK_OBJECT_MUTATION.value] = CapabilityStatus.SUPPORTED
+    provider = RealFmcProvider(
+        endpoint="https://fmc.example.test",
+        display_name="FMC idempotent object delete test",
+        username="api-user",
+        password=_test_credential("fmc-idempotent-object-delete"),
+        capabilities=capabilities,
+        transport=httpx.MockTransport(handler),
+        validate_network_target=False,
+        writable=True,
+    )
+    result = await provider.execute_transaction(uuid4(), uuid4(), _delete_object_operation())
+    assert result.state is ProviderTransactionState.SUCCEEDED
+    assert result.operation_results[0]["status"] == "SUCCEEDED"
+    assert result.operation_results[0]["mutated"] is False
+    assert result.operation_results[0]["provider_resource_id"] == "object-1"
     await provider.aclose()
 
 
@@ -548,6 +851,10 @@ async def test_real_scc_devices_use_scc_uid_for_deployment() -> None:
         assert request.headers["Authorization"] == f"Bearer {scc_token}"
         if request.url.path == "/firewall/v1/token":
             return httpx.Response(200, json={"tenantUid": "tenant-1"})
+        if request.url.path.endswith("/devices/devicerecords/fmc-device-1"):
+            return httpx.Response(
+                200, json={"id": "fmc-device-1", "accessPolicy": {"id": "policy-1"}}
+            )
         assert request.url.path == "/firewall/v1/inventory/devices"
         return _collection(
             [
@@ -585,6 +892,8 @@ async def test_real_scc_starts_and_polls_ftd_deployment() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
         assert request.headers["Authorization"] == f"Bearer {scc_token}"
+        if request.url.path.endswith("/deployment/deployabledevices"):
+            return httpx.Response(200, json={"items": [], "paging": {"count": 0}})
         if request.method == "GET" and request.url.path.endswith("/v1/inventory/devices"):
             return httpx.Response(
                 200,
@@ -620,7 +929,7 @@ async def test_real_scc_starts_and_polls_ftd_deployment() -> None:
                     {"uid": "device-1", "selectedPolicyTypes": ["FULL_DEPLOY"]},
                     {"uid": "device-2", "selectedPolicyTypes": ["FULL_DEPLOY"]},
                 ],
-                "ignoreWarnings": True,
+                "ignoreWarnings": False,
             }
             return httpx.Response(202, json={"entityUid": "deployment-run-1"})
         assert request.method == "GET"
@@ -646,17 +955,18 @@ async def test_real_scc_starts_and_polls_ftd_deployment() -> None:
         region="eu",
         display_name="SCC — Europe",
         token=scc_token,
-        capabilities=_capabilities(),
+        capabilities={**_capabilities(), "pending_change_inspection": CapabilityStatus.SUPPORTED},
         transport=httpx.MockTransport(handler),
         validate_network_target=False,
         writable=True,
     )
-    started = await provider.start_deployment(
-        "tenant-1", ["policy-1"], ["device-1", "device-2", "onprem-device", "device-1"]
-    )
-    status = await provider.deployment_status(str(started["external_operation_id"]))
+    with pytest.raises(ProviderContractError) as refused:
+        await provider.start_deployment(
+            "tenant-1", ["policy-1"], ["device-1", "device-2", "onprem-device", "device-1"]
+        )
+    assert refused.value.details["code"] == "DEPLOYMENT_TARGET_UNAUTHORIZED"
+    status = await provider.deployment_status("deployment-run-1")
 
-    assert started["external_operation_id"] == "deployment-run-1"
     assert status["state"] == "DEPLOYED"
     assert status["provider_status"] == "DEPLOY_COMPLETED"
     assert status["devices"] == [{"uid": "device-1", "status": "DONE"}]
@@ -664,7 +974,8 @@ async def test_real_scc_starts_and_polls_ftd_deployment() -> None:
     rollback_status = await provider.rollback_status(str(rollback["external_operation_id"]))
     assert rollback["external_operation_id"] == "domain-1:rollback-task-1"
     assert rollback_status["state"] == "ROLLED_BACK"
-    assert [request.method for request in requests] == ["GET", "POST", "GET", "GET", "POST", "GET"]
+    assert not any(request.url.path.endswith("/ftds/deploy") for request in requests)
+    assert sum(request.method == "POST" for request in requests) == 1  # native rollback only
     await provider.aclose()
 
 
@@ -697,4 +1008,73 @@ async def test_real_provider_refuses_redirects_instead_of_following_origins() ->
     )
     with pytest.raises(ProviderUnavailableError):
         await provider.information()
+    await provider.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["fmc", "scc"])
+@pytest.mark.parametrize("pending", ["external", "ours", "empty", "unknown"])
+async def test_deployment_refuses_unattributed_pending_changes(kind: str, pending: str) -> None:
+    mutations = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and "generatetoken" in request.url.path:
+            return httpx.Response(204, headers={"X-auth-access-token": "fixture"})
+        if request.method != "GET":
+            mutations.append(request.url.path)
+            return httpx.Response(202, json={"id": "unexpected"})
+        if request.url.path.endswith("pendingchanges"):
+            return httpx.Response(
+                200,
+                json=(
+                    {"items": []}
+                    if pending == "empty"
+                    else {
+                        "items": [
+                            {
+                                "entityType": "AccessPolicy",
+                                "lastUpdatedByUsers": [
+                                    "firewall-policy-manager"
+                                    if pending == "ours"
+                                    else "someone-else"
+                                ],
+                            }
+                        ]
+                    }
+                ),
+            )
+        return httpx.Response(200, json={"items": [{"id": "device-1"}], "paging": {"count": 1}})
+
+    options = {
+        "capabilities": {
+            **_capabilities(),
+            "pending_change_inspection": (
+                CapabilityStatus.NOT_STARTED if pending == "unknown" else CapabilityStatus.SUPPORTED
+            ),
+        },
+        "transport": httpx.MockTransport(handler),
+        "validate_network_target": False,
+        "writable": True,
+        "display_name": "Test",
+    }
+    provider = (
+        RealFmcProvider(
+            endpoint="https://fmc.example.test",
+            username="fixture",
+            password=_test_credential("deploy"),
+            **options,
+        )
+        if kind == "fmc"
+        else RealSccProvider(region="eu", token=_test_credential("deploy"), **options)
+    )
+    with pytest.raises(ProviderContractError) as error:
+        await provider.start_deployment("domain", ["policy"], ["device-1"])
+    assert error.value.details["code"] in {
+        "DEPLOYMENT_TARGET_UNAUTHORIZED",
+        "DEPLOYMENT_TARGET_NOT_READY",
+        "DEPLOYMENT_INSPECTION_UNAVAILABLE",
+    }
+    # Even a matching writer identity does not establish exact candidate ownership.
+    # These incomplete legacy fixtures never establish deployable target evidence.
+    assert mutations == []
     await provider.aclose()

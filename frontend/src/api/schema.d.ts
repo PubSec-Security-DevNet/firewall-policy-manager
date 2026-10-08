@@ -123,6 +123,40 @@ export interface paths {
         patch: operations["update_group_approval_api_v1_admin_groups__group_id__approval_patch"];
         trace?: never;
     };
+    "/api/v1/admin/legacy-ownership": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Legacy Ownership Reviews */
+        get: operations["legacy_ownership_reviews_api_v1_admin_legacy_ownership_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/legacy-ownership/{review_id}/confirm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Confirm Legacy Ownership */
+        post: operations["confirm_legacy_ownership_api_v1_admin_legacy_ownership__review_id__confirm_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/oidc-providers": {
         parameters: {
             query?: never;
@@ -1181,6 +1215,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/dev/users": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Development Users
+         * @description Return deterministic identities; this router is never mounted in production.
+         */
+        get: operations["development_users_api_v1_dev_users_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/firewall-managers": {
         parameters: {
             query?: never;
@@ -1553,8 +1607,6 @@ export interface components {
         };
         /** AuthorizationResourceUpsertRequest */
         AuthorizationResourceUpsertRequest: {
-            /** Id */
-            id?: string | null;
             /** Capabilities */
             capabilities?: string[] | null;
             /** Category Id */
@@ -1567,6 +1619,8 @@ export interface components {
             expected_revision?: number | null;
             /** Group Id */
             group_id?: string | null;
+            /** Id */
+            id?: string | null;
             /** Is Active */
             is_active?: boolean | null;
             /** Network */
@@ -1782,6 +1836,8 @@ export interface components {
             failure_info: {
                 [key: string]: unknown;
             };
+            /** Reconciliation Retry Available */
+            reconciliation_retry_available?: boolean;
             /**
              * Id
              * Format: uuid
@@ -1908,8 +1964,12 @@ export interface components {
             /** Objects */
             objects: components["schemas"]["DelegatedObjectResponse"][];
             policy: components["schemas"]["DelegatedPolicySummary"];
-            /** Policy Device Assignment */
-            policy_device_assignment?: "ASSIGNED" | "UNASSIGNED" | "UNKNOWN";
+            /**
+             * Policy Device Assignment
+             * @default UNKNOWN
+             * @enum {string}
+             */
+            policy_device_assignment: "ASSIGNED" | "UNASSIGNED" | "UNKNOWN";
             /**
              * Provider Is Mock
              * @default true
@@ -1965,7 +2025,7 @@ export interface components {
             /**
              * Access Permission
              * @default use
-             * @enum {string}
+             * @constant
              */
             access_permission: "use";
             /** Created By User Id */
@@ -1998,14 +2058,16 @@ export interface components {
             owner_group_id?: string | null;
             /** Owner Policy Id */
             owner_policy_id?: string | null;
-            /** Provider Metadata */
-            provider_metadata?: { [key: string]: string };
             /**
              * Owner Type
              * @default PROVIDER
              * @enum {string}
              */
             owner_type: "GROUP" | "PROVIDER";
+            /** Provider Metadata */
+            provider_metadata?: {
+                [key: string]: string;
+            };
         };
         /** DelegatedPolicySummary */
         DelegatedPolicySummary: {
@@ -2030,20 +2092,20 @@ export interface components {
         DelegatedRuleResponse: {
             /** Action */
             action: string;
-            /** Applications */
-            applications?: string[];
             /** Application Object Ids */
             application_object_ids?: string[];
+            /** Applications */
+            applications?: string[];
             /** Category Id */
             category_id?: string | null;
-            /** Drift Id */
-            drift_id?: string | null;
             /** Destination Networks */
             destination_networks?: string[];
             /** Destination Services */
             destination_services?: string[];
             /** Destination Zones */
             destination_zones?: string[];
+            /** Drift Id */
+            drift_id?: string | null;
             /**
              * Enabled
              * @default true
@@ -2224,6 +2286,17 @@ export interface components {
         DeploymentRollbackRequest: {
             /** Selected Change Set Ids */
             selected_change_set_ids: string[];
+        };
+        /** DevelopmentIdentityResponse */
+        DevelopmentIdentityResponse: {
+            /** Display Name */
+            display_name: string;
+            /** Email */
+            email: string;
+            /** Enabled */
+            enabled: boolean;
+            /** Role */
+            role: string;
         };
         /** DraftCategoryOperationRequest */
         DraftCategoryOperationRequest: {
@@ -2522,6 +2595,8 @@ export interface components {
             admin_email: string;
             /** Admin Issuer */
             admin_issuer?: string | null;
+            /** Organization Name */
+            organization_name?: string | null;
             /** Provider Client Id */
             provider_client_id: string;
             /**
@@ -2547,6 +2622,23 @@ export interface components {
         InitialSetupTestResponse: {
             /** Login Url */
             login_url: string;
+        };
+        /** LegacyOwnershipConfirmationRequest */
+        LegacyOwnershipConfirmationRequest: {
+            /**
+             * Access Policy Id
+             * Format: uuid
+             */
+            access_policy_id: string;
+            /**
+             * Active Group Id
+             * Format: uuid
+             */
+            active_group_id: string;
+            /** Reason */
+            reason: string;
+            /** Resource Revision */
+            resource_revision: number;
         };
         /** ManagerResponse */
         ManagerResponse: {
@@ -2843,6 +2935,11 @@ export interface components {
             base_endpoint?: string | null;
             /** Ca Certificate */
             ca_certificate?: string | null;
+            /**
+             * Deployment Interval Minutes
+             * @default 15
+             */
+            deployment_interval_minutes: number;
             /** Display Name */
             display_name: string;
             /** Password */
@@ -2919,6 +3016,11 @@ export interface components {
             credential_updated_at: string;
             /** Credential Username */
             credential_username: string | null;
+            /**
+             * Deployment Interval Minutes
+             * @default 15
+             */
+            deployment_interval_minutes: number;
             /** Deployment Last Completed At */
             deployment_last_completed_at?: string | null;
             /** Deployment Last Started At */
@@ -3074,6 +3176,8 @@ export interface components {
             applications_sync_interval_minutes?: number | null;
             /** Base Endpoint */
             base_endpoint?: string | null;
+            /** Deployment Interval Minutes */
+            deployment_interval_minutes?: number | null;
             /** Deployment Schedule Enabled */
             deployment_schedule_enabled?: boolean | null;
             /** Display Name */
@@ -3352,7 +3456,7 @@ export interface components {
             /** Proxy Actor Role */
             proxy_actor_role?: string | null;
             /** Role */
-            role?: "user" | "approver" | "firewall_operator" | "admin";
+            role: string;
             /**
              * User Id
              * Format: uuid
@@ -3516,8 +3620,9 @@ export interface components {
             /**
              * Role
              * @default user
+             * @enum {string}
              */
-            role: string;
+            role: "user" | "approver" | "firewall_operator" | "admin";
         };
         /** UserRoleUpdateRequest */
         UserRoleUpdateRequest: {
@@ -4136,6 +4241,208 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["GroupApprovalUpdateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Safe application error envelope */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    legacy_ownership_reviews_api_v1_admin_legacy_ownership_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Dev-User"?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                fm_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    }[];
+                };
+            };
+            /** @description Safe application error envelope */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    confirm_legacy_ownership_api_v1_admin_legacy_ownership__review_id__confirm_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Dev-User"?: string | null;
+            };
+            path: {
+                review_id: string;
+            };
+            cookie?: {
+                fm_session?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LegacyOwnershipConfirmationRequest"];
             };
         };
         responses: {
@@ -11173,6 +11480,98 @@ export interface operations {
             };
         };
     };
+    development_users_api_v1_dev_users_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DevelopmentIdentityResponse"][];
+                };
+            };
+            /** @description Safe application error envelope */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Safe application error envelope */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
     firewall_managers_api_v1_firewall_managers_get: {
         parameters: {
             query?: {
@@ -11287,7 +11686,9 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HealthResponse"];
+                    "application/json": {
+                        [key: string]: string;
+                    };
                 };
             };
             /** @description Safe application error envelope */
@@ -12257,7 +12658,11 @@ export interface operations {
                 fm_session?: string | null;
             };
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["ReconciliationRestoreRequest"] | null;
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {

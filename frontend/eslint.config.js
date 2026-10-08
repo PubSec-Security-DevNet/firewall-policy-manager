@@ -1,3 +1,5 @@
+// Copyright 2026 Cisco Systems, Inc.
+// SPDX-License-Identifier: Apache-2.0
 import eslint from '@eslint/js';
 import globals from 'globals';
 import reactHooks from 'eslint-plugin-react-hooks';
@@ -18,6 +20,7 @@ export default tseslint.config(
       'e2e/cdp-fixture-setup.mjs',
       'e2e/cdp-coverage.mjs',
       'e2e/cdp-fault-smoke.mjs',
+      'e2e/docs-screenshots.mjs',
     ],
   },
   eslint.configs.recommended,

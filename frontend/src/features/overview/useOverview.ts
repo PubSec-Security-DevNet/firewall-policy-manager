@@ -1,3 +1,5 @@
+// Copyright 2026 Cisco Systems, Inc.
+// SPDX-License-Identifier: Apache-2.0
 import { useEffect, useState } from 'react';
 
 import { ApiError, loadInitialOverview, type Overview, type Session } from '../../api/client';

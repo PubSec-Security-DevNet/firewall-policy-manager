@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Validated loader for the provider capability evidence file."""
 
 import json
@@ -108,7 +110,9 @@ def verify_capability_evidence(
 def load_capabilities(path: Path) -> CapabilityDocument:
     """Load and validate the JSON-form YAML 1.2 capability document."""
     with path.open(encoding="utf-8") as handle:
-        payload = json.load(handle)
+        payload = json.loads(
+            "\n".join(line for line in handle if not line.lstrip().startswith("#"))
+        )
     return CapabilityDocument.model_validate(payload)
 
 

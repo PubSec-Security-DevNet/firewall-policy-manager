@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """SQLAlchemy implementations of application repository ports."""
 
 from collections.abc import Sequence
@@ -15,6 +17,7 @@ from firewall_manager.application.errors import (
     ResourceOutOfScopeError,
     StaleWriteError,
 )
+from firewall_manager.application.naming import provider_native_id_equal
 from firewall_manager.domain.models import (
     AuthorizationDecision,
     CapabilityStatus,
@@ -42,6 +45,7 @@ from firewall_manager.domain.models import (
     SyncStatus,
 )
 from firewall_manager.domain.networks import network_is_contained, normalize_ip_network
+from firewall_manager.persistence.legacy_ownership import pending_review
 from firewall_manager.persistence.models import (
     AccessPolicy,
     AccessRule,
@@ -97,6 +101,46 @@ SyncedModel = TypeVar(
     SecurityZone,
     VariableSet,
 )
+
+
+def _deployment_rule_resource_id(
+    operation: ChangeSetOperation,
+    rules: Sequence[AccessRule],
+) -> UUID | None:
+    """Resolve a deployment operation to its application rule row.
+
+    CREATE_RULE payloads retain the user-requested name, while the persisted rule uses the
+    provider-resolved group prefix. Prefer the resolved provider name and native receipt, with
+    the original payload fields retained for older operations.
+    """
+    payload = operation.payload or {}
+    resolution = operation.resolution or {}
+    execution_result = operation.execution_result or {}
+    rules_by_name = {row.name: row.id for row in rules}
+    rules_by_native_id = {str(row.native_id): row.id for row in rules}
+
+    rule_id = payload.get("rule_id")
+    if rule_id:
+        try:
+            return UUID(str(rule_id))
+        except ValueError:
+            pass
+
+    for native_id in (
+        execution_result.get("provider_resource_id"),
+        payload.get("rule_native_id"),
+    ):
+        if native_id is not None:
+            resource_id = rules_by_native_id.get(str(native_id))
+            if resource_id is not None:
+                return resource_id
+
+    for name in (resolution.get("provider_name"), payload.get("name")):
+        if name is not None:
+            resource_id = rules_by_name.get(str(name))
+            if resource_id is not None:
+                return resource_id
+    return None
 
 
 def _same_managed_object_value(object_type: object, expected: object, observed: object) -> bool:
@@ -240,107 +284,14 @@ class SqlOverviewRepository:
             ),
         }
 
-    def _accessible_policy_ids(self, user_id: UUID, organization_id: UUID):
-        group_ids = select(GroupMembership.group_id).where(
-            GroupMembership.user_id == user_id,
-            GroupMembership.organization_id == organization_id,
-            GroupMembership.status == "ACTIVE",
-        )
-        return select(PolicyDelegation.policy_id).where(
-            PolicyDelegation.organization_id == organization_id,
-            PolicyDelegation.group_id.in_(group_ids),
-            PolicyDelegation.is_active.is_(True),
-            PolicyDelegation.capabilities.contains(["view"]),
-        )
-
-    def counts_for_user(self, organization_id: UUID, user_id: UUID) -> dict[str, int]:
-        policy_ids = self._accessible_policy_ids(user_id, organization_id)
-        group_ids = select(GroupMembership.group_id).where(
-            GroupMembership.user_id == user_id,
-            GroupMembership.organization_id == organization_id,
-            GroupMembership.status == "ACTIVE",
-        )
-        real_policy_ids = select(AccessPolicy.id).where(
-            AccessPolicy.organization_id == organization_id,
-            AccessPolicy.id.in_(policy_ids),
-            AccessPolicy.manager_id.in_(
-                select(FirewallManager.id).where(FirewallManager.is_mock.is_(False))
-            ),
-        )
-        real_manager_ids = select(AccessPolicy.manager_id).where(
-            AccessPolicy.id.in_(real_policy_ids)
-        )
-        return {
-            "managers": self._count(
-                FirewallManager,
-                FirewallManager.organization_id == organization_id,
-                FirewallManager.id.in_(real_manager_ids),
-            ),
-            "policies": self._count(
-                AccessPolicy,
-                AccessPolicy.organization_id == organization_id,
-                AccessPolicy.id.in_(real_policy_ids),
-            ),
-            "rules": self._count(
-                AccessRule,
-                AccessRule.organization_id == organization_id,
-                AccessRule.policy_id.in_(real_policy_ids),
-            ),
-            "objects": self._count(
-                FirewallObject,
-                FirewallObject.organization_id == organization_id,
-                FirewallObject.manager_id.in_(real_manager_ids),
-                FirewallObject.object_type.not_in(("APPLICATION", "APPLICATION_FILTER")),
-                or_(
-                    FirewallObject.owner_policy_id.in_(real_policy_ids),
-                    FirewallObject.id.in_(
-                        select(ObjectUseGrant.object_id).where(
-                            ObjectUseGrant.organization_id == organization_id,
-                            ObjectUseGrant.policy_id.in_(real_policy_ids),
-                            ObjectUseGrant.permission == "use",
-                        )
-                    ),
-                ),
-            ),
-            "change_sets": self._count(
-                ChangeSet,
-                ChangeSet.organization_id == organization_id,
-                ChangeSet.acting_group_id.in_(group_ids),
-                ChangeSet.access_policy_id.in_(real_policy_ids),
-                ChangeSet.state.in_(
-                    (
-                        ChangeSetState.READY.value,
-                        ChangeSetState.QUEUED.value,
-                        ChangeSetState.EXECUTING.value,
-                    )
-                ),
-            ),
-        }
-
-    def provider_summaries(
-        self, organization_id: UUID, user_id: UUID | None = None
-    ) -> list[dict[str, object]]:
+    def provider_summaries(self, organization_id: UUID) -> list[dict[str, object]]:
         """Return real normalized providers represented in the application inventory."""
-        accessible_policy_ids = (
-            self._accessible_policy_ids(user_id, organization_id) if user_id is not None else None
-        )
         managers = list(
             self._session.scalars(
                 select(FirewallManager)
                 .where(
                     FirewallManager.organization_id == organization_id,
                     FirewallManager.is_mock.is_(False),
-                    *(
-                        [
-                            FirewallManager.id.in_(
-                                select(AccessPolicy.manager_id).where(
-                                    AccessPolicy.id.in_(accessible_policy_ids)
-                                )
-                            )
-                        ]
-                        if accessible_policy_ids is not None
-                        else []
-                    ),
                 )
                 .order_by(FirewallManager.display_name, FirewallManager.id)
             )
@@ -377,11 +328,6 @@ class SqlOverviewRepository:
                 .where(
                     AccessPolicy.organization_id == organization_id,
                     AccessPolicy.manager_id == manager.id,
-                    *(
-                        [AccessPolicy.id.in_(accessible_policy_ids)]
-                        if accessible_policy_ids is not None
-                        else []
-                    ),
                 )
             )
             object_count = self._session.scalar(
@@ -391,22 +337,6 @@ class SqlOverviewRepository:
                     FirewallObject.organization_id == organization_id,
                     FirewallObject.manager_id == manager.id,
                     FirewallObject.object_type.not_in(("APPLICATION", "APPLICATION_FILTER")),
-                    *(
-                        [
-                            or_(
-                                FirewallObject.owner_policy_id.in_(accessible_policy_ids),
-                                FirewallObject.id.in_(
-                                    select(ObjectUseGrant.object_id).where(
-                                        ObjectUseGrant.organization_id == organization_id,
-                                        ObjectUseGrant.policy_id.in_(accessible_policy_ids),
-                                        ObjectUseGrant.permission == "use",
-                                    )
-                                ),
-                            )
-                        ]
-                        if accessible_policy_ids is not None
-                        else []
-                    ),
                 )
             )
             rule_count = self._session.scalar(
@@ -416,11 +346,6 @@ class SqlOverviewRepository:
                 .where(
                     AccessRule.organization_id == organization_id,
                     AccessPolicy.manager_id == manager.id,
-                    *(
-                        [AccessRule.policy_id.in_(accessible_policy_ids)]
-                        if accessible_policy_ids is not None
-                        else []
-                    ),
                 )
             )
             summaries.append(
@@ -1137,11 +1062,15 @@ class SqlAuthorizationRepository:
         if group_grant:
             capabilities.update(group_grant[0])
             revision = max(revision, int(group_grant[1]))
+        if pending_review(self._session, organization_id, group_id=group_id, policy_id=policy_id):
+            capabilities.intersection_update({"view"})
         return capabilities, revision, group_grant is not None
 
     def object_grant_state(
         self, group_id: UUID, policy_id: UUID, object_id: UUID, organization_id: UUID
     ) -> tuple[UUID, str, set[str], int] | None:
+        if pending_review(self._session, organization_id, group_id=group_id, policy_id=policy_id):
+            return None
         rows = list(
             self._session.execute(
                 select(
@@ -1203,6 +1132,8 @@ class SqlAuthorizationRepository:
     def object_mutation_state(
         self, group_id: UUID, policy_id: UUID, object_id: UUID, organization_id: UUID
     ) -> dict[str, object] | None:
+        if pending_review(self._session, organization_id, group_id=group_id, policy_id=policy_id):
+            return None
         """Return authoritative ownership and conservative dependency scope for mutation."""
         row = self._session.execute(
             select(FirewallObject, AccessPolicy.manager_id)
@@ -1380,6 +1311,8 @@ class SqlAuthorizationRepository:
     def rule_owner_state(
         self, rule_id: UUID, policy_id: UUID, organization_id: UUID
     ) -> tuple[UUID | None, str, int] | None:
+        if pending_review(self._session, organization_id, resource_id=rule_id):
+            return None
         row = self._session.execute(
             select(
                 AccessRule.owner_group_id, AccessRule.management_state, AccessRule.revision
@@ -1394,6 +1327,8 @@ class SqlAuthorizationRepository:
     def category_mapping_state(
         self, group_id: UUID, policy_id: UUID, category_id: UUID, organization_id: UUID
     ) -> tuple[UUID, str, int] | None:
+        if pending_review(self._session, organization_id, group_id=group_id, policy_id=policy_id):
+            return None
         row = self._session.execute(
             select(
                 RuleCategory.manager_id,
@@ -1569,7 +1504,11 @@ class SqlAuthorizationRepository:
         operations_by_change_set: dict[str, list[ChangeSetOperation]] = {}
         for operation in operations:
             operations_by_change_set.setdefault(str(operation.change_set_id), []).append(operation)
-        rules_by_name = {row.name: row.id for row in rules}
+        # Deployments are newest first. Once a resource appears in the newest deployment
+        # that touches it, older deployment results must not overwrite its current state.
+        # Otherwise an edit staged to the provider but still waiting for device deployment
+        # can be reported as DEPLOYED by a previous successful batch.
+        seen_rule_ids: set[UUID] = set()
         for deployment in deployments:
             deployment_state = str(deployment.state)
             if deployment_state == "DEPLOYED":
@@ -1587,12 +1526,14 @@ class SqlAuthorizationRepository:
                 continue
             for change_set_id in deployment.included_change_set_ids:
                 for operation in operations_by_change_set.get(str(change_set_id), []):
-                    payload = operation.payload
                     resource_id = None
-                    if operation.kind in {"CREATE_RULE", "MODIFY_RULE", "DELETE_RULE"}:
-                        resource_id = payload.get("rule_id") or rules_by_name.get(
-                            str(payload.get("name") or "")
-                        )
+                    if operation.kind in {
+                        "CREATE_RULE",
+                        "MODIFY_RULE",
+                        "DELETE_RULE",
+                        "MOVE_RULE",
+                    }:
+                        resource_id = _deployment_rule_resource_id(operation, rules)
                     # Object synchronization is independent of firewall deployment.
                     # Deployment state belongs to rules/policies; a standalone object
                     # can be fully synchronized even when an unrelated deployment has
@@ -1600,6 +1541,9 @@ class SqlAuthorizationRepository:
                     if resource_id is None:
                         continue
                     resource_uuid = UUID(str(resource_id))
+                    if resource_uuid in seen_rule_ids:
+                        continue
+                    seen_rule_ids.add(resource_uuid)
                     if operation.kind.startswith("DELETE_") and provider_state == "DEPLOYED":
                         states[resource_uuid] = "NOT_PRESENT"
                     elif resource_uuid in states:
@@ -1873,7 +1817,7 @@ class SqlAuthorizationRepository:
         }
         policy_device_assignment = (
             "ASSIGNED"
-            if str(policy.native_id) in assignment_ids
+            if any(provider_native_id_equal(policy.native_id, item) for item in assignment_ids)
             else "UNKNOWN"
             if manager.is_mock or not devices or not assignment_ids
             else "UNASSIGNED"
@@ -2003,7 +1947,11 @@ class SqlAuthorizationRepository:
                 }
                 for row in rules
             ],
-            "objects": objects,
+            "objects": []
+            if pending_review(
+                self._session, organization_id, group_id=group_id, policy_id=policy_id
+            )
+            else objects,
             "zones": [{"id": row[0], "name": row[1], "direction": row[2]} for row in zones],
             "categories": [{"id": row[0], "name": row[1]} for row in categories],
             "intrusion_policies": [
@@ -2717,10 +2665,10 @@ class SqlSyncRepository:
             entity_type.manager_id == manager_id,
             entity_type.native_id == item.native_id,
         ]
-        # FMC/SCC category native IDs are only unique within a policy. Include
-        # the policy in the observation identity so syncing one policy cannot
-        # move the category row belonging to another policy.
-        if entity_type is RuleCategory and "policy_id" in extra:
+        # FMC/SCC category and rule native IDs are only unique within a policy.
+        # Include the policy in the observation identity so syncing one policy
+        # cannot move the row belonging to another policy.
+        if entity_type in {RuleCategory, AccessRule} and "policy_id" in extra:
             identity_filters.append(entity_type.policy_id == extra["policy_id"])
         row = self._session.scalar(select(entity_type).where(*identity_filters))
         observed_snapshot: dict[str, object] = {
@@ -2883,6 +2831,25 @@ class SqlSyncRepository:
                         },
                     )
                 )
+            elif row.management_state in {ResourceState.DRIFTED, ResourceState.CONFLICT}:
+                # A subsequent sync may observe the same provider value again. Keep
+                # the active discrepancy attached to the latest complete sync so the
+                # accept/restore actions remain valid and current.
+                drift = self._session.scalar(
+                    select(DriftRecord)
+                    .where(
+                        DriftRecord.organization_id == organization_id,
+                        DriftRecord.manager_id == manager_id,
+                        DriftRecord.resource_type == entity_type.__tablename__,
+                        DriftRecord.resource_id == row.id,
+                        DriftRecord.status == row.management_state,
+                    )
+                    .order_by(DriftRecord.created_at.desc())
+                )
+                if drift is not None:
+                    drift.sync_run_id = run_id
+                    drift.observed_fingerprint = item.fingerprint
+                    drift.observed_snapshot = {**observed_snapshot}
             elif row.management_state == ResourceState.MISSING:
                 row.management_state = ResourceState.OBSERVED
                 row.revision += 1
@@ -2902,269 +2869,6 @@ class SqlSyncRepository:
         return self._session.scalar(
             select(model.id).where(model.manager_id == manager_id, model.native_id == native_id)
         )
-
-    def _prefixed_group_policies(
-        self, organization_id: UUID, manager_id: UUID, provider_name: str
-    ) -> list[tuple[UUID, UUID]]:
-        """Return active group/policy scopes matching a provider-owned name prefix."""
-        prefix, separator, _component = provider_name.partition("__")
-        if not separator or not prefix:
-            return []
-        return list(
-            self._session.execute(
-                select(Group.id, AccessPolicy.id)
-                .join(
-                    PolicyDelegation,
-                    (PolicyDelegation.group_id == Group.id)
-                    & (PolicyDelegation.organization_id == Group.organization_id),
-                )
-                .join(
-                    AccessPolicy,
-                    (AccessPolicy.id == PolicyDelegation.policy_id)
-                    & (AccessPolicy.organization_id == PolicyDelegation.organization_id),
-                )
-                .where(
-                    Group.organization_id == organization_id,
-                    Group.provider_slug == prefix,
-                    Group.is_active.is_(True),
-                    PolicyDelegation.is_active.is_(True),
-                    AccessPolicy.manager_id == manager_id,
-                    AccessPolicy.management_state.notin_(("MISSING", "CONFLICT")),
-                )
-                .order_by(AccessPolicy.id)
-            )
-        )
-
-    def _adopt_prefixed_object(
-        self,
-        organization_id: UUID,
-        manager_id: UUID,
-        row: FirewallObject,
-        provider_name: str,
-    ) -> None:
-        if row.object_type in _PROVIDER_SHARED_OBJECT_TYPES:
-            # Application catalogs are provider-owned, read-only, and shared
-            # with every delegated group; they never receive group grants.
-            self._session.query(ObjectUseGrant).filter(
-                ObjectUseGrant.organization_id == organization_id,
-                ObjectUseGrant.object_id == row.id,
-            ).delete(synchronize_session=False)
-            row.owner_group_id = None
-            row.owner_policy_id = None
-            row.expected_provider_name = None
-            return
-        scopes = self._prefixed_group_policies(organization_id, manager_id, provider_name)
-        if row.owner_group_id is not None:
-            if row.created_by_user_id is not None:
-                return
-            allowed = any(
-                self._network_object_scope_allowed(row, group_id, policy_id, organization_id)
-                for group_id, policy_id in scopes
-                if group_id == row.owner_group_id
-            )
-            if allowed:
-                return
-            self._session.query(ObjectUseGrant).filter(
-                ObjectUseGrant.organization_id == organization_id,
-                ObjectUseGrant.group_id == row.owner_group_id,
-                ObjectUseGrant.object_id == row.id,
-            ).delete(synchronize_session=False)
-            row.owner_group_id = None
-            row.owner_policy_id = None
-            row.expected_provider_name = None
-            row.management_state = ResourceState.UNMANAGED
-            row.revision += 1
-            return
-        if not scopes:
-            return
-        scopes = [
-            (group_id, policy_id)
-            for group_id, policy_id in scopes
-            if self._network_object_scope_allowed(row, group_id, policy_id, organization_id)
-        ]
-        if not scopes:
-            return
-        group_id = scopes[0][0]
-        row.owner_group_id = group_id
-        row.owner_policy_id = scopes[0][1]
-        row.expected_provider_name = provider_name
-        row.management_state = ResourceState.MANAGED
-        row.revision += 1
-        for _group_id, policy_id in scopes:
-            for permission in ("use",):
-                exists = self._session.scalar(
-                    select(ObjectUseGrant.id).where(
-                        ObjectUseGrant.organization_id == organization_id,
-                        ObjectUseGrant.group_id == group_id,
-                        ObjectUseGrant.policy_id == policy_id,
-                        ObjectUseGrant.object_id == row.id,
-                        ObjectUseGrant.permission == permission,
-                    )
-                )
-                if exists is None:
-                    self._session.add(
-                        ObjectUseGrant(
-                            organization_id=organization_id,
-                            group_id=group_id,
-                            policy_id=policy_id,
-                            object_id=row.id,
-                            permission=permission,
-                        )
-                    )
-
-    def _network_object_scope_allowed(
-        self, row: FirewallObject, group_id: UUID, policy_id: UUID, organization_id: UUID
-    ) -> bool:
-        if row.object_type not in {"NETWORK", "NETWORK_GROUP"}:
-            return True
-        ranges = list(
-            self._session.scalars(
-                select(IpRangeGrant.network).where(
-                    IpRangeGrant.organization_id == organization_id,
-                    IpRangeGrant.policy_id == policy_id,
-                    IpRangeGrant.group_id == group_id,
-                )
-            )
-        )
-        if row.object_type == "NETWORK":
-            return bool(row.normalized_value) and any(
-                network_is_contained(str(row.normalized_value), str(grant)) for grant in ranges
-            )
-        member_ids = list(
-            self._session.scalars(
-                select(ObjectReference.target_object_id).where(
-                    ObjectReference.organization_id == organization_id,
-                    ObjectReference.source_object_id == row.id,
-                )
-            )
-        )
-        if not member_ids:
-            return False
-        members = list(
-            self._session.scalars(
-                select(FirewallObject).where(
-                    FirewallObject.organization_id == organization_id,
-                    FirewallObject.id.in_(member_ids),
-                )
-            )
-        )
-        return len(members) == len(member_ids) and all(
-            member.object_type == "NETWORK"
-            and bool(member.normalized_value)
-            and any(
-                network_is_contained(str(member.normalized_value), str(grant)) for grant in ranges
-            )
-            for member in members
-        )
-
-    def _adopt_prefixed_rule(  # noqa: PLR0913, PLR0917 -- adoption scope is explicit
-        self,
-        organization_id: UUID,
-        manager_id: UUID,
-        policy_id: UUID,
-        category_id: UUID | None,
-        row: AccessRule,
-        provider_name: str,
-    ) -> None:
-        """Adopt only rules inside the matching immutable group category."""
-        if row.owner_group_id is not None or category_id is None:
-            return
-        category = self._session.get(RuleCategory, category_id)
-        if category is None:
-            return
-        scopes = self._prefixed_group_policies(organization_id, manager_id, provider_name)
-        prefix, _separator, _component = provider_name.partition("__")
-        for group_id, delegated_policy_id in scopes:
-            if delegated_policy_id != policy_id or category.name != f"{prefix}__RULES":
-                continue
-            category_mapping = self._session.scalar(
-                select(GroupPolicyCategoryMapping).where(
-                    GroupPolicyCategoryMapping.organization_id == organization_id,
-                    GroupPolicyCategoryMapping.category_id == category.id,
-                )
-            )
-            if category_mapping is not None and (
-                category_mapping.group_id != group_id or category_mapping.policy_id != policy_id
-            ):
-                continue
-            mapping = self._session.scalar(
-                select(GroupPolicyCategoryMapping).where(
-                    GroupPolicyCategoryMapping.organization_id == organization_id,
-                    GroupPolicyCategoryMapping.group_id == group_id,
-                    GroupPolicyCategoryMapping.policy_id == policy_id,
-                )
-            )
-            if mapping is None:
-                mapping = GroupPolicyCategoryMapping(
-                    organization_id=organization_id,
-                    group_id=group_id,
-                    policy_id=policy_id,
-                    category_id=category.id,
-                    expected_category_name=category.name,
-                    sync_state="SYNCED",
-                    revision=1,
-                )
-                self._session.add(mapping)
-            elif mapping.category_id != category.id:
-                continue
-            else:
-                mapping.sync_state = "SYNCED"
-                mapping.expected_category_name = category.name
-                mapping.revision += 1
-            row.owner_group_id = group_id
-            row.management_state = ResourceState.MANAGED
-            row.revision += 1
-            return
-
-    def _adopt_prefixed_category(
-        self,
-        organization_id: UUID,
-        manager_id: UUID,
-        policy_id: UUID,
-        row: RuleCategory,
-    ) -> None:
-        """Map a provider category into the delegated group that owns its prefix."""
-        prefix, separator, _component = row.name.partition("__")
-        if not separator or row.name != f"{prefix}__RULES":
-            return
-        scopes = self._prefixed_group_policies(organization_id, manager_id, row.name)
-        for group_id, delegated_policy_id in scopes:
-            if delegated_policy_id != policy_id:
-                continue
-            category_mapping = self._session.scalar(
-                select(GroupPolicyCategoryMapping).where(
-                    GroupPolicyCategoryMapping.organization_id == organization_id,
-                    GroupPolicyCategoryMapping.category_id == row.id,
-                )
-            )
-            if category_mapping is not None and (
-                category_mapping.group_id != group_id or category_mapping.policy_id != policy_id
-            ):
-                continue
-            mapping = self._session.scalar(
-                select(GroupPolicyCategoryMapping).where(
-                    GroupPolicyCategoryMapping.organization_id == organization_id,
-                    GroupPolicyCategoryMapping.group_id == group_id,
-                    GroupPolicyCategoryMapping.policy_id == policy_id,
-                )
-            )
-            if mapping is None:
-                self._session.add(
-                    GroupPolicyCategoryMapping(
-                        organization_id=organization_id,
-                        group_id=group_id,
-                        policy_id=policy_id,
-                        category_id=row.id,
-                        expected_category_name=row.name,
-                        sync_state="SYNCED",
-                        revision=1,
-                    )
-                )
-            elif mapping.category_id == row.id:
-                mapping.sync_state = "SYNCED"
-                mapping.expected_category_name = row.name
-                mapping.revision += 1
-            continue
 
     def upsert_device(
         self,
@@ -3212,7 +2916,6 @@ class SqlSyncRepository:
             policy_id=policy_id,
             position=item.position,
         )
-        self._adopt_prefixed_category(organization_id, manager_id, policy_id, row)
         return row.id
 
     def upsert_intrusion_policy(
@@ -3310,14 +3013,6 @@ class SqlSyncRepository:
                 FilePolicy, manager_id, item.file_policy_native_id
             ),
             position=item.position,
-        )
-        self._adopt_prefixed_rule(
-            organization_id,
-            manager_id,
-            policy_id,
-            category_id,
-            row,
-            item.name,
         )
         return row.id
 
@@ -3442,6 +3137,23 @@ class SqlSyncRepository:
             ResourceState.MISSING,
         }:
             row.application_snapshot = self._resource_snapshot(row)
+        if row is not None and row.last_seen_sync_run_id is not None:
+            drift = self._session.scalar(
+                select(DriftRecord)
+                .where(
+                    DriftRecord.organization_id == organization_id,
+                    DriftRecord.resource_type == "access_rules",
+                    DriftRecord.resource_id == row.id,
+                    DriftRecord.sync_run_id == row.last_seen_sync_run_id,
+                    DriftRecord.status.in_(("DRIFTED", "CONFLICT")),
+                )
+                .order_by(DriftRecord.created_at.desc())
+            )
+            if drift is not None:
+                # Rule references are resolved after the initial upsert. Refresh the
+                # observation so reconciliation compares the same canonical fields
+                # as the application baseline instead of a partial provider payload.
+                drift.observed_snapshot = self._resource_snapshot(row)
 
     def replace_object_references(
         self,
@@ -3464,9 +3176,6 @@ class SqlSyncRepository:
             )
             for target_id in targets.values()
         )
-        row = self._session.get(FirewallObject, source_object_id)
-        if row is not None:
-            self._adopt_prefixed_object(organization_id, manager_id, row, row.name)
 
     def complete_sync(
         self,

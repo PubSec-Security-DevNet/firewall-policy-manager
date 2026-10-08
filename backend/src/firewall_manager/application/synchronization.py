@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Provider-independent read-only discovery and reconciliation service."""
 
 from collections.abc import Awaitable, Callable

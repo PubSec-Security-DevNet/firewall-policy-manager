@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 set -euo pipefail
 
 compose=(docker compose --project-name firewall-manager-local)

@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Shared provider behavioral contracts for both first-class mock providers."""
 
 from collections.abc import Callable
@@ -6,6 +8,7 @@ from uuid import uuid4
 import httpx
 import pytest
 
+from firewall_manager.api.schemas import DraftRuleRequest
 from firewall_manager.application.errors import (
     ProviderContractError,
     ProviderPaginationError,
@@ -59,6 +62,18 @@ def test_port_groups_reject_mixed_protocol_members_but_network_groups_are_family
     )
     with pytest.raises(ProviderContractError):
         validate_provider_object_groups([tcp, udp, port_group])
+
+
+@pytest.mark.parametrize("action", ["BLOCK", "TRUST", "MONITOR"])
+def test_non_allow_rules_reject_inspection_attachments(action: str) -> None:
+    with pytest.raises(ValueError, match="only valid for ALLOW"):
+        DraftRuleRequest(
+            action=action,
+            logging="END" if action == "MONITOR" else "NONE",
+            intrusion_policy_id=uuid4(),
+            variable_set_id=uuid4(),
+            file_policy_id=uuid4(),
+        )
 
     ipv4 = DiscoveredObject(
         "v4",

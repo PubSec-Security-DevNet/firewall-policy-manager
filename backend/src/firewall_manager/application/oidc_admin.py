@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Administrator-managed OIDC configuration with write-only secret rotation."""
 
 from __future__ import annotations

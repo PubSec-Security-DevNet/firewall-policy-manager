@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Organization-scoped read-only inventory application service."""
 
 import base64
@@ -50,7 +52,7 @@ class InventoryService:
         limit: int,
         loader: Callable[[int, int], tuple[list[dict[str, object]], int]],
     ) -> InventoryPage:
-        require_action(principal, Action.READ)
+        require_action(principal, Action.MANAGE_PROVIDERS)
         if not 1 <= limit <= 100:
             raise InvalidPaginationError
         offset = _decode_cursor(cursor)
@@ -106,7 +108,7 @@ class InventoryService:
         )
 
     def provider_status(self, principal: Principal) -> list[dict[str, object]]:
-        require_action(principal, Action.READ)
+        require_action(principal, Action.MANAGE_PROVIDERS)
         return self._repository.provider_status(principal.organization_id)
 
     def synchronization_discrepancies(  # noqa: PLR0913, PLR0917 -- explicit filter scope
@@ -118,7 +120,7 @@ class InventoryService:
         state: str | None,
         connection_id: UUID | None,
     ) -> list[dict[str, object]]:
-        require_action(principal, Action.READ)
+        require_action(principal, Action.MANAGE_PROVIDERS)
         return self._repository.synchronization_discrepancies(
             principal.organization_id, manager_id, policy_id, resource_type, state, connection_id
         )
@@ -126,15 +128,15 @@ class InventoryService:
     def accept_provider_state(
         self, principal: Principal, drift_id: UUID, active_group_id: UUID | None = None
     ) -> dict[str, object]:
-        provider_admin = principal.role in {"admin", "firewall_operator"}
-        if active_group_id is None and provider_admin:
-            require_action(principal, Action.MANAGE_PROVIDERS)
+        # Accepting drift changes the authoritative baseline; membership or a supplied
+        # Group ID alone is not authority to bless externally modified resources.
+        require_action(principal, Action.MANAGE_PROVIDERS)
         result = self._repository.accept_provider_state(
             principal.organization_id,
             drift_id,
             principal.audit_user_id,
             active_group_id,
-            scope_to_membership=not provider_admin,
+            scope_to_membership=False,
         )
         if result is None:
             raise ResourceOutOfScopeError

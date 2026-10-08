@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Idempotent deterministic local identity and manager seed data."""
 
 from typing import Any, cast
@@ -464,7 +466,13 @@ def seed_authorization_scenarios(session: Session) -> None:
                 organization_id=IDS["org"],
                 group_id=IDS["group_engineering"],
                 policy_id=policy.id,
-                capabilities=["view", "create_rule", "modify_rule", "modify_object"],
+                capabilities=[
+                    "view",
+                    "create_rule",
+                    "modify_rule",
+                    "modify_object",
+                    "approve",
+                ],
             ),
             PolicyDelegation(
                 id=_seed_id(f"datacenter-delegation-{policy.id}"),

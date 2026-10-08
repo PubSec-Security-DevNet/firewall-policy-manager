@@ -1,0 +1,33 @@
+#!/bin/sh
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
+set -eu
+
+export PGPASSWORD="$(cat /run/secrets/postgres_password)"
+
+action=${1:-backup}
+case "$action" in
+  backup)
+    target=${2:-"/backups/firewall-manager-$(date -u +%Y%m%dT%H%M%SZ).dump"}
+    case "$target" in /backups/*.dump) ;; *) echo "Backup path must be /backups/*.dump" >&2; exit 2;; esac
+    test ! -e "$target" || { echo "Refusing to overwrite $target" >&2; exit 2; }
+    pg_dump --format=custom --no-owner --file="$target"
+    test -s "$target"
+    echo "Created $target"
+    ;;
+  verify)
+    backup=${2:?usage: verify /backups/FILE.dump}
+    pg_restore --list "$backup" >/dev/null
+    echo "Verified $backup"
+    ;;
+  restore)
+    backup=${2:?usage: restore /backups/FILE.dump}
+    test "${CONFIRM_RESTORE:-}" = restore || { echo "Set CONFIRM_RESTORE=restore" >&2; exit 2; }
+    pg_restore --clean --if-exists --no-owner --dbname="$PGDATABASE" "$backup"
+    echo "Restored $backup"
+    ;;
+  *)
+    echo "usage: $0 backup [FILE] | verify FILE | restore FILE" >&2
+    exit 2
+    ;;
+esac

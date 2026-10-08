@@ -1,6 +1,10 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Authentication and application dependency adapters."""
 
+from collections.abc import Callable
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import Cookie, Depends, Header, Request, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -210,3 +214,13 @@ def get_principal(  # noqa: PLR0913, PLR0917 -- FastAPI dependency inputs
 
 
 PrincipalDependency = Annotated[Principal, Depends(get_principal)]
+
+
+def get_deployment_dispatcher() -> Callable[[UUID], object]:
+    """Composition hook for durable deployment queue publication."""
+    raise RuntimeError("deployment dispatcher is not configured")
+
+
+DeploymentDispatcherDependency = Annotated[
+    Callable[[UUID], object], Depends(get_deployment_dispatcher)
+]

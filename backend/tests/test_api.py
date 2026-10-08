@@ -1,7 +1,10 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """REST contract and safe error-envelope tests."""
 
 from uuid import UUID
 
+import pytest
 from fastapi.testclient import TestClient
 
 from firewall_manager.api.dependencies import (
@@ -94,6 +97,11 @@ def viewer() -> Principal:
         "viewer@example.test",
         "user",
     )
+
+
+def admin() -> Principal:
+    user = viewer()
+    return Principal(user.user_id, user.organization_id, user.email, "admin")
 
 
 def fake_repository() -> FakeRepository:
@@ -258,7 +266,7 @@ def test_operational_probe_paths_bypass_application_rate_limit() -> None:
 
 
 def test_overview_uses_application_service_contract() -> None:
-    app.dependency_overrides[get_principal] = viewer
+    app.dependency_overrides[get_principal] = admin
     app.dependency_overrides[get_overview_repository] = fake_repository
     app.dependency_overrides[get_provider_readers] = lambda: (FakeProvider(),)
     try:
@@ -302,7 +310,7 @@ def test_cookie_authenticated_mutation_requires_csrf_token() -> None:
 def test_inventory_pagination_is_bounded_and_organization_scoped() -> None:
     repository = FakeRepository()
     repository.requested_organization_ids = []
-    app.dependency_overrides[get_principal] = viewer
+    app.dependency_overrides[get_principal] = admin
     app.dependency_overrides[get_overview_repository] = lambda: repository
     try:
         first = TestClient(app).get("/api/v1/firewall-managers?limit=1")
@@ -341,7 +349,7 @@ def test_invalid_pagination_uses_canonical_error_envelope_and_correlation_id() -
 
 
 def test_invalid_cursor_and_unknown_route_use_canonical_error_envelopes() -> None:
-    app.dependency_overrides[get_principal] = viewer
+    app.dependency_overrides[get_principal] = admin
     app.dependency_overrides[get_overview_repository] = fake_repository
     try:
         cursor_response = TestClient(app).get(
@@ -453,3 +461,26 @@ def test_grant_revocation_is_admin_only_and_revision_checked_at_contract() -> No
             3,
         )
     ]
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/firewall-managers",
+        "/policies",
+        "/rules",
+        "/objects",
+        "/providers/status",
+        "/synchronization/discrepancies",
+    ],
+)
+def test_legacy_inventory_denies_unscoped_delegated_reads(path: str) -> None:
+    app.dependency_overrides[get_principal] = viewer
+    app.dependency_overrides[get_overview_repository] = fake_repository
+    try:
+        response = TestClient(app).get("/api/v1" + path)
+    finally:
+        app.dependency_overrides.pop(get_principal)
+        app.dependency_overrides.pop(get_overview_repository)
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "RESOURCE_OUT_OF_SCOPE"

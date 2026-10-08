@@ -1,3 +1,5 @@
+// Copyright 2026 Cisco Systems, Inc.
+// SPDX-License-Identifier: Apache-2.0
 import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
 import {
   IconAlertTriangle,
@@ -342,7 +344,9 @@ function ReadyApplication({ overview, session }: { overview: Overview; session: 
         </div>
       )}
       <Suspense fallback={<AppLoadingState label="Loading workspace" />}>
-        {route === 'home' && <Dashboard overview={overview} onNavigate={setRoute} />}
+        {route === 'home' && (
+          <Dashboard overview={overview} onNavigate={setRoute} isAdmin={session.role === 'admin'} />
+        )}
         {['policies', 'rules', 'objects', 'changes'].includes(route) && (
           <DelegatedWorkspace
             groups={session.groups}
@@ -459,12 +463,25 @@ function readStoredContext(
 }
 
 function Dashboard({
+  isAdmin,
   overview,
   onNavigate,
 }: {
   overview: Overview;
+  isAdmin: boolean;
   onNavigate: (route: AppRoute) => void;
 }) {
+  if (!isAdmin) {
+    return (
+      <AppPage
+        eyebrow="Delegated workspace"
+        title="Security posture"
+        description="Select one Group and policy to view its authorized inventory."
+      >
+        <AppButton onClick={() => onNavigate('policies')}>Browse policies</AppButton>
+      </AppPage>
+    );
+  }
   const providersReporting = overview.providers.filter((provider) => provider.sync_complete).length;
   const providerAlerts = overview.providers.flatMap((provider) => {
     if (provider.sync_status === 'FAILED') {

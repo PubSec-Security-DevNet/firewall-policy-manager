@@ -1,3 +1,5 @@
+// Copyright 2026 Cisco Systems, Inc.
+// SPDX-License-Identifier: Apache-2.0
 import { useEffect, useState } from 'react';
 import { IconAlertTriangle, IconCircleCheck, IconFileDiff, IconLoader2 } from '@tabler/icons-react';
 
@@ -119,9 +121,12 @@ export function ChangeSetPanel({
   }, [items.length, pageSize]);
 
   const retry = async (item: ChangeSet) => {
+    const recovery = item.reconciliation_retry_available;
     if (
       !window.confirm(
-        `Retry ${item.title}?\n\nCurrent authorization, provider capabilities, and revisions will be checked again before it is queued.`,
+        recovery
+          ? `Recover ${item.title}?\n\nThe recorded provider success will be revalidated and the existing provider resource will be adopted without blindly repeating the write.`
+          : `Retry ${item.title}?\n\nCurrent authorization, provider capabilities, and revisions will be checked again before it is queued.`,
       )
     )
       return;
@@ -303,7 +308,7 @@ export function ChangeSetPanel({
                               disabled={Boolean(retryingId) || Boolean(executingId)}
                               onClick={() => void retry(item)}
                             >
-                              Retry
+                              {item.reconciliation_retry_available ? 'Recover' : 'Retry'}
                             </AppActionButton>
                           )}
                         </Group>

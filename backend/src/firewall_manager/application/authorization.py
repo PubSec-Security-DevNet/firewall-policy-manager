@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Authoritative, interface-independent delegated authorization service."""
 
 from collections.abc import Mapping
@@ -43,9 +45,7 @@ _POLICY_ACTION_CAPABILITY: Mapping[Action, PolicyCapability] = {
     Action.MODIFY: PolicyCapability.MODIFY_RULE,
     Action.DELETE: PolicyCapability.DELETE_RULE,
     Action.REORDER: PolicyCapability.REORDER_RULE,
-    Action.SUBMIT: PolicyCapability.SUBMIT,
     Action.APPROVE: PolicyCapability.APPROVE,
-    Action.DEPLOY: PolicyCapability.DEPLOY,
 }
 
 _OBJECT_CREATE_CAPABILITY: Mapping[str, ProviderCapability] = {
@@ -65,6 +65,7 @@ _OBJECT_POLICY_CAPABILITY: Mapping[Action, PolicyCapability] = {
 }
 
 _USABLE_RESOURCE_STATES = frozenset({"OBSERVED", "UNMANAGED", "MANAGED"})
+_ACTIONABLE_RULE_STATES = _USABLE_RESOURCE_STATES | {"DRIFTED"}
 
 
 class AuthorizationService:
@@ -155,6 +156,18 @@ class AuthorizationService:
                 action,
                 resource,
                 AuthorizationReason.POLICY_NOT_DELEGATED,
+                revision,
+                interface,
+                correlation_id,
+            )
+        # Provider deployment is a platform/provider-connection operation. It is not a
+        # delegated policy capability and must not be granted through policy authorization.
+        if action is Action.DEPLOY:
+            return self._decision(
+                context,
+                action,
+                resource,
+                AuthorizationReason.ACTION_NOT_GRANTED,
                 revision,
                 interface,
                 correlation_id,
@@ -377,7 +390,7 @@ class AuthorizationService:
             )
             if state is None or state[0] != context.active_group_id:
                 return AuthorizationReason.NOT_OWNER, state[2] if state else 0
-            if action is not Action.READ and state[1] not in _USABLE_RESOURCE_STATES:
+            if action is not Action.READ and state[1] not in _ACTIONABLE_RULE_STATES:
                 return AuthorizationReason.STALE_AUTHORIZATION_CONTEXT, state[2]
             return AuthorizationReason.ALLOWED, state[2]
         if resource.resource_type is AuthorizationResourceType.CATEGORY and resource.resource_id:

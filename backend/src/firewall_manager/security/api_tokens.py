@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Hash-only, scoped credentials for non-browser API clients."""
 
 import hashlib
@@ -43,6 +45,8 @@ def create(
 
 
 def authenticate(session: Session, raw: str) -> tuple[ApiToken, User] | None:
+    if not raw.isascii() or not raw.startswith(TOKEN_PREFIX) or len(raw) > 256:
+        return None
     row = session.scalar(select(ApiToken).where(ApiToken.token_hash == _hash(raw)))
     if row is None or row.revoked_at is not None:
         return None

@@ -1,3 +1,5 @@
+// Copyright 2026 Cisco Systems, Inc.
+// SPDX-License-Identifier: Apache-2.0
 import type { ChangeSet } from '../../api/client';
 
 function record(value: unknown): Record<string, unknown> {
@@ -9,6 +11,11 @@ function stringValue(value: unknown): string {
 }
 
 export function retryableChangeSet(item: ChangeSet) {
+  if (
+    item.reconciliation_retry_available &&
+    !['QUEUED', 'EXECUTING'].includes(item.state)
+  )
+    return true;
   const operationKinds = new Map(
     item.operations.map((operation) => [operation.id, operation.kind]),
   );

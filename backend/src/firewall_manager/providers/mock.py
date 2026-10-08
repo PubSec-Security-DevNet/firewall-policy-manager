@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Deterministic stateful mock implementing read and transaction contracts."""
 
 # ruff: noqa: PLR0912, PLR0913, PLR0917 -- provider commands keep explicit normalized fields.

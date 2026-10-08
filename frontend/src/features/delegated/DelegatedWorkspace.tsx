@@ -1,3 +1,5 @@
+// Copyright 2026 Cisco Systems, Inc.
+// SPDX-License-Identifier: Apache-2.0
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
   IconArrowRight,
@@ -7,6 +9,7 @@ import {
   IconChevronDown,
   IconChevronRight,
   IconCloudDownload,
+  IconCircleCheck,
   IconEdit,
   IconFileDescription,
   IconFileTextShield,
@@ -687,6 +690,19 @@ function RulesWorkspace({
   const activeRuleOperations = trackedRuleOperations.filter(({ changeSet }) =>
     ['QUEUED', 'EXECUTING'].includes(changeSet.state),
   );
+  const pendingDeleteRuleIds = new Set(
+    activity
+      .filter(
+        (changeSet) =>
+          changeSet.access_policy_id === context.policy.id &&
+          !['SUCCEEDED', 'CANCELLED', 'REJECTED', 'ROLLED_BACK'].includes(changeSet.state),
+      )
+      .flatMap((changeSet) =>
+        changeSet.operations
+          .filter((operation) => operation.kind === 'DELETE_RULE')
+          .map((operation) => String(operation.payload.rule_id ?? '')),
+      ),
+  );
   const pendingRuleOperations = activity
     .filter(
       (changeSet) =>
@@ -1197,7 +1213,8 @@ function RulesWorkspace({
                     disabled={
                       !context.provider_writable ||
                       !context.capabilities.includes('delete_rule') ||
-                      deletePendingIds.includes(rule.id)
+                      deletePendingIds.includes(rule.id) ||
+                      pendingDeleteRuleIds.has(rule.id)
                     }
                     onClick={() => setDeleting(rule)}
                     onDragStart={(event) => event.preventDefault()}
@@ -1334,6 +1351,8 @@ function ResourceStateNotice({
     Boolean(firewallState) &&
     (firewallState !== 'UNKNOWN' || policyDeviceAssignment === 'ASSIGNED');
   const unverified = deploymentStatus === 'NOT_AVAILABLE' && !firewallStateVisible;
+  const confirmedDeployed =
+    !pending && firewallStateVisible && firewallState === 'DEPLOYED';
   const label = pending
     ? 'Deployment pending: this resource has an unexecuted or in-progress Changeset.'
     : firewallStateVisible && firewallState
@@ -1344,8 +1363,15 @@ function ResourceStateNotice({
   if (!pending && currentState === 'MANAGED' && !unverified && !firewallStateVisible) return null;
   return (
     <AppTooltip label={label} withArrow>
-      <span className="fm-resource-state-notice" aria-label={label}>
-        <IconAlertTriangle size={16} stroke={2} />
+      <span
+        className={`fm-resource-state-notice${confirmedDeployed ? ' fm-resource-state-deployed' : ''}`}
+        aria-label={label}
+      >
+        {confirmedDeployed ? (
+          <IconCircleCheck size={16} stroke={2} />
+        ) : (
+          <IconAlertTriangle size={16} stroke={2} />
+        )}
         <span>
           {pending
             ? 'Deployment pending'
@@ -1456,6 +1482,14 @@ function CreateRuleDialog({
   const [queued, setQueued] = useState<ChangeSet>();
   const [verificationStarted, setVerificationStarted] = useState(false);
   const delegatedCategoryId = context.categories[0]?.id ?? orderedExistingRules[0]?.category_id;
+
+  useEffect(() => {
+    if (action !== 'ALLOW') {
+      setIntrusionPolicyId(null);
+      setVariableSetId(null);
+      setFilePolicyId(null);
+    }
+  }, [action]);
 
   const sourceZones = context.zones
     .filter((zone) => zone.direction !== 'DESTINATION')
@@ -1711,7 +1745,7 @@ function CreateRuleDialog({
                   disabled={busy}
                 />
                 <Select
-                  clearable={enabled !== 'true' || !intrusionPolicyId}
+                  clearable={action !== 'ALLOW' || enabled !== 'true' || !intrusionPolicyId}
                   searchable
                   label="Intrusion policy"
                   placeholder="No intrusion policy"
@@ -1728,10 +1762,10 @@ function CreateRuleDialog({
                     }
                   }}
                   data={intrusionPolicies}
-                  disabled={busy}
+                  disabled={busy || action !== 'ALLOW'}
                 />
                 <Select
-                  clearable={enabled !== 'true' || !intrusionPolicyId}
+                  clearable={action !== 'ALLOW' || enabled !== 'true' || !intrusionPolicyId}
                   searchable
                   label="Variable set"
                   placeholder="Select variable set"
@@ -1747,7 +1781,7 @@ function CreateRuleDialog({
                     } else setVariableSetId(null);
                   }}
                   data={variableSets}
-                  disabled={busy || !intrusionPolicyId}
+                  disabled={busy || action !== 'ALLOW' || !intrusionPolicyId}
                 />
                 <Select
                   clearable
@@ -1757,7 +1791,7 @@ function CreateRuleDialog({
                   value={filePolicyId}
                   onChange={setFilePolicyId}
                   data={filePolicies}
-                  disabled={busy || enabled !== 'true'}
+                  disabled={busy || action !== 'ALLOW' || enabled !== 'true'}
                 />
               </SimpleGrid>
               {orderedExistingRules.length > 0 && (
@@ -2115,6 +2149,13 @@ function EditRuleDialog({
       ? String(correctionPayload.file_policy_id)
       : (rule?.file_policy_id ?? null),
   );
+  useEffect(() => {
+    if (action !== 'ALLOW') {
+      setIntrusionPolicyId(null);
+      setVariableSetId(null);
+      setFilePolicyId(null);
+    }
+  }, [action]);
   const [sourceZoneIds, setSourceZoneIds] = useState<string[]>(() =>
     payloadIds('source_zone_ids', rule ? idsForNames(context.zones, rule.source_zones ?? []) : []),
   );
@@ -2349,7 +2390,7 @@ function EditRuleDialog({
                   disabled={busy}
                 />
                 <Select
-                  clearable={enabled !== 'true' || !intrusionPolicyId}
+                  clearable={action !== 'ALLOW' || enabled !== 'true' || !intrusionPolicyId}
                   searchable
                   label="Intrusion policy"
                   placeholder="No intrusion policy"
@@ -2363,10 +2404,10 @@ function EditRuleDialog({
                     else setVariableSetId(null);
                   }}
                   data={intrusionPolicies}
-                  disabled={busy}
+                  disabled={busy || action !== 'ALLOW'}
                 />
                 <Select
-                  clearable={enabled !== 'true' || !intrusionPolicyId}
+                  clearable={action !== 'ALLOW' || enabled !== 'true' || !intrusionPolicyId}
                   searchable
                   label="Variable set"
                   placeholder="Select variable set"
@@ -2382,7 +2423,7 @@ function EditRuleDialog({
                     } else setVariableSetId(null);
                   }}
                   data={variableSets}
-                  disabled={busy || !intrusionPolicyId}
+                  disabled={busy || action !== 'ALLOW' || !intrusionPolicyId}
                 />
                 <Select
                   clearable
@@ -2392,7 +2433,7 @@ function EditRuleDialog({
                   value={filePolicyId}
                   onChange={setFilePolicyId}
                   data={filePolicies}
-                  disabled={busy || enabled !== 'true'}
+                  disabled={busy || action !== 'ALLOW' || enabled !== 'true'}
                 />
               </SimpleGrid>
               <SimpleGrid cols={{ base: 1, md: 2 }}>
@@ -3577,11 +3618,23 @@ function ObjectsWorkspace({
               }
               const owned = object.owner_group_id === activeGroupId;
               const usedInRule = objectReferencedByRule(object.name, context.rules);
-              const canModify = owned && context.capabilities.includes('modify_object');
-              const canDelete = owned && context.capabilities.includes('delete_object');
               const objectChange = trackedObjectOperations.find(
                 ({ operation }) => operation.payload.object_id === object.id,
               );
+              const objectDeletePending = activity.some(
+                (changeSet) =>
+                  changeSet.access_policy_id === context.policy.id &&
+                  !['SUCCEEDED', 'CANCELLED', 'REJECTED', 'ROLLED_BACK'].includes(
+                    changeSet.state,
+                  ) &&
+                  changeSet.operations.some(
+                    (operation) =>
+                      operation.kind === 'DELETE_OBJECT' &&
+                      operation.payload.object_id === object.id,
+                  ),
+              );
+              const canModify = owned && context.capabilities.includes('modify_object');
+              const canDelete = owned && context.capabilities.includes('delete_object');
               return (
                 <Table.Tr key={object.id}>
                   <Table.Td>
@@ -3630,10 +3683,12 @@ function ObjectsWorkspace({
                       {canDelete && (
                         <ActionButton
                           intent="danger"
-                          disabled={usedInRule}
+                          disabled={usedInRule || objectDeletePending}
                           title={
                             usedInRule
                               ? 'Cannot delete: this object is used by a policy rule.'
+                              : objectDeletePending
+                                ? 'Deletion is already pending for this object.'
                               : 'Delete object'
                           }
                           onClick={() => setDeleting(object)}
@@ -4360,7 +4415,7 @@ function DeleteObjectDialog({
             {queued || prepared ? 'Close' : 'Cancel'}
           </Button>
           {!prepared && !queued && (
-            <Button color="red" loading={busy} onClick={() => void prepare()}>
+            <Button color="red" loading={busy} disabled={busy} onClick={() => void prepare()}>
               Queue deletion
             </Button>
           )}
@@ -4684,7 +4739,7 @@ function capabilityGroups(capabilities: string[], objectCreate: string[]) {
   const groups = [
     {
       label: 'Policy',
-      values: ['view', 'submit', 'approve', 'deploy'].filter((value) => assigned.has(value)),
+      values: ['view', 'approve'].filter((value) => assigned.has(value)),
     },
     {
       label: 'Rules',

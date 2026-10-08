@@ -1,3 +1,5 @@
+// Copyright 2026 Cisco Systems, Inc.
+// SPDX-License-Identifier: Apache-2.0
 import {
   Alert,
   AppShell,
@@ -114,6 +116,16 @@ export function FirewallPolicyWordmark() {
         </div>
       </div>
     </div>
+  );
+}
+
+export function FirewallPolicyBrandLogo() {
+  return (
+    <img
+      className="fm-wordmark fm-wordmark-image"
+      src="/firewall-policy-manager.svg"
+      alt="Firewall Policy Manager"
+    />
   );
 }
 
@@ -493,6 +505,7 @@ export function AppIdentityNotice({ email, role }: { email: string; role: string
 const statusColors: Record<string, string> = {
   HEALTHY: 'teal',
   CONNECTED: 'teal',
+  ENABLED: 'teal',
   COMPLETED: 'teal',
   SUCCESS: 'teal',
   READY: 'teal',

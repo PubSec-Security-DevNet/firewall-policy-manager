@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Provider-connection authorization, isolation, lifecycle, and persistence regressions."""
 
 import asyncio

@@ -4,11 +4,11 @@
 
 - [ ] Approved non-production target and change window recorded.
 - [ ] PostgreSQL backup completed and copied to encrypted, access-controlled storage.
-- [ ] `make db-restore-test FILE=...` passed against the backup.
-- [ ] Secret provider configured: Vault KV v2 or platform secret injection.
+- [ ] A restore rehearsal passed against the backup using the production installation procedure.
+- [ ] Protected `app_secret_key` file or approved external secret provider is configured.
 - [ ] `make secret-check` passed with the production key source.
 - [ ] Current encryption key version and recovery material recorded separately from PostgreSQL.
-- [x] Current Entra, Duo, FMC, and SCC compatibility evidence reviewed.
+- [ ] Current Entra, Duo, FMC, and SCC compatibility evidence reviewed.
 - [ ] Dependency, SAST, secret, container, and SBOM checks passed.
 - [ ] `make sbom` produced an SBOM that was retained with the release evidence.
 - [ ] Prometheus scrape, alert rules, and Grafana dashboard are installed.

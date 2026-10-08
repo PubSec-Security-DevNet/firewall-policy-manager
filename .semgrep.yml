@@ -7,6 +7,8 @@ rules:
       - pattern-either:
           - pattern: requests.$METHOD(..., verify=False, ...)
           - pattern: httpx.$METHOD(..., verify=False, ...)
+          - pattern: $CONTEXT.check_hostname = False
+          - pattern: $CONTEXT.verify_mode = ssl.CERT_NONE
 
   - id: no-python-dynamic-execution
     message: Dynamic code execution is not allowed in application code.

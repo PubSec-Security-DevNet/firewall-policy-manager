@@ -1,3 +1,5 @@
+// Copyright 2026 Cisco Systems, Inc.
+// SPDX-License-Identifier: Apache-2.0
 import { useEffect, useState } from 'react';
 import { IconRocket, IconRefresh, IconSearch } from '@tabler/icons-react';
 import {
@@ -128,7 +130,7 @@ export function DeploymentsPage({
     active:
       items?.filter(
         (item) =>
-          ['SCHEDULED', 'READY', 'DEPLOYING'].includes(item.state) ||
+          ['SCHEDULED', 'READY', 'DEPLOYING'].includes(deploymentStatusKey(item)) ||
           item.rollback_state === 'ROLLING_BACK',
       ).length ?? 0,
     completed: 0,
@@ -183,7 +185,7 @@ export function DeploymentsPage({
       title="Deployments"
       description="Connector-level deployment batches for staged provider changes. Status refreshes automatically."
     >
-      <AppGroup justify="space-between" mb="lg">
+      <AppGroup justify="space-between" align="flex-start" mb="lg">
         <AppGroup gap="xs">
           <IconRocket size={18} />
           <AppGroup gap="sm" wrap="wrap">
@@ -206,6 +208,7 @@ export function DeploymentsPage({
           </AppGroup>
         </AppGroup>
         <AppButton
+          className="fm-deployments-refresh-button"
           variant="light"
           leftSection={<IconRefresh size={15} />}
           loading={refreshing}
@@ -311,8 +314,8 @@ export function DeploymentsPage({
                       </AppTable.Td>
                       <AppTable.Td>
                         <AppStatusBadge
-                          value={deploymentHasFailure(item) ? 'FAILED' : item.state}
-                          label={deploymentHasFailure(item) ? 'Failed' : undefined}
+                          value={deploymentStatusKey(item)}
+                          label={deploymentStatusLabel(deploymentStatusKey(item))}
                         />
                       </AppTable.Td>
                       <AppTable.Td>{item.included_change_set_ids.length}</AppTable.Td>
@@ -324,16 +327,16 @@ export function DeploymentsPage({
                           <AppActionButton intent="quiet" onClick={() => setDetailsId(item.id)}>
                             View details
                           </AppActionButton>
-                          {deploymentHasFailure(item) && (
-                            <AppActionButton
-                              intent="secondary"
-                              leftSection={<IconRefresh size={13} />}
-                              loading={retryingId === item.id}
-                              onClick={() => retry(item.id)}
-                            >
-                              Retry
-                            </AppActionButton>
-                          )}
+                          {deploymentCanRetry(item) && (
+                              <AppActionButton
+                                intent="secondary"
+                                leftSection={<IconRefresh size={13} />}
+                                loading={retryingId === item.id}
+                                onClick={() => retry(item.id)}
+                              >
+                                Retry
+                              </AppActionButton>
+                            )}
                           {item.rollback_eligible && !item.rollback_state && (
                             <AppActionButton
                               intent="secondary"
@@ -462,6 +465,7 @@ function formatRollbackError(reason: unknown): string {
 }
 
 function deploymentStatusKey(item: Deployment): string {
+  if (deploymentStartPending(item)) return 'DEPLOYING';
   return deploymentHasFailure(item) ? 'FAILED' : item.state;
 }
 
@@ -475,8 +479,34 @@ function deploymentStatusLabel(value: string): string {
 function deploymentHasFailure(item: Deployment): boolean {
   return (
     typeof item.failure_info.code === 'string' ||
-    ['FAILED', 'UNKNOWN', 'RECONCILIATION_REQUIRED'].includes(item.state)
+    ['FAILED', 'UNKNOWN'].includes(item.state) ||
+    (item.state === 'RECONCILIATION_REQUIRED' && !deploymentStartPending(item))
   );
+}
+
+function deploymentStartPending(item: Deployment): boolean {
+  return (
+    item.state === 'RECONCILIATION_REQUIRED' &&
+    item.plan_snapshot.start_intent === true &&
+    typeof item.failure_info.code !== 'string'
+  );
+}
+
+function isDefinitiveProviderRejection(item: Deployment): boolean {
+  return (
+    item.state === 'RECONCILIATION_REQUIRED' &&
+    !item.external_operation_id &&
+    !item.plan_snapshot.provider_jobs &&
+    (item.failure_info.provider_code === 'PROVIDER_VALIDATION_ERROR' ||
+      item.failure_info.code === 'PROVIDER_VALIDATION_ERROR') &&
+    [400, 422].includes(Number(item.failure_info.provider_status))
+  );
+}
+
+function deploymentCanRetry(item: Deployment): boolean {
+  if (item.external_operation_id || item.plan_snapshot.provider_jobs) return false;
+  if (isDefinitiveProviderRejection(item)) return true;
+  return item.state === 'FAILED' && !item.plan_snapshot.start_intent;
 }
 
 function formatDeploymentDevices(item: Deployment): string {
@@ -536,7 +566,7 @@ function DeploymentDetails({ item }: { item: Deployment }) {
             Provider deployment operation
           </AppText>
         </div>
-        <AppStatusBadge value={item.state} />
+        <AppStatusBadge value={deploymentStatusKey(item)} />
         {item.rollback_state && <AppStatusBadge value={item.rollback_state} />}
       </AppGroup>
       <AppPaper withBorder p="md" mb="md">
@@ -560,6 +590,20 @@ function DeploymentDetails({ item }: { item: Deployment }) {
           <DeploymentDetail label="Devices" value={formatDeploymentDevices(item)} />
         </AppGroup>
       </AppPaper>
+      {item.state === 'RECONCILIATION_REQUIRED' &&
+        !deploymentStartPending(item) &&
+        !isDefinitiveProviderRejection(item) && (
+        <AppText size="sm" mb="md">
+          The provider outcome is uncertain. Review provider state before starting another
+          deployment. FPM will not automatically repeat this request.
+        </AppText>
+      )}
+      {item.failure_info.code === 'DEPLOYMENT_SCOPE_UNPROVEN' && (
+        <AppText size="sm" mb="md">
+          This older deployment record was blocked by a previous scope rule. New deployments
+          include pending provider changes made outside FPM and record them in preflight evidence.
+        </AppText>
+      )}
       {typeof item.failure_info.code === 'string' && (
         <AppPaper withBorder p="md" mb="md">
           <AppText fw={650} c="red">

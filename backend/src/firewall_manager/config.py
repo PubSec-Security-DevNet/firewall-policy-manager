@@ -1,11 +1,14 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Centralized and validated runtime configuration."""
 
 import base64
 import binascii
 import json
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
-from urllib.parse import urlparse
+from urllib.parse import quote_plus, urlparse
 
 from pydantic import AnyHttpUrl, BaseModel, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -18,24 +21,37 @@ class Settings(BaseSettings):
 
     app_environment: Literal["development", "test", "staging", "production"]
     app_log_level: str = "INFO"
-    database_url: str
-    redis_url: str
+    database_url: str = ""
+    database_password_file: str | None = None
+    database_host: str = "db"
+    database_port: int = Field(default=5432, ge=1, le=65535)
+    database_name: str = "firewall_manager"
+    database_user: str = "firewall"
+    redis_url: str = ""
+    redis_password_file: str | None = None
+    redis_host: str = "redis"
+    redis_port: int = Field(default=6379, ge=1, le=65535)
     fmc_base_url: AnyHttpUrl
     scc_base_url: AnyHttpUrl
     cors_origins: list[str] = Field(default_factory=list)
     dev_auth_enabled: bool = False
     dev_auth_default_user: str = "viewer@example.test"
     secret_store_master_key: SecretStr | None = Field(default=None, alias="APP_SECRET_KEY")
+    secret_store_master_key_file: str | None = Field(default=None, alias="APP_SECRET_KEY_FILE")
     secret_store_key_version: int = Field(default=1, ge=1)
     secret_store_provider: Literal["environment", "vault"] = "environment"  # noqa: S105
     vault_url: str | None = None
     vault_token: SecretStr | None = None
+    vault_role_id_file: str | None = None
+    vault_secret_id_file: str | None = None
+    vault_ca_cert: str | None = None
     vault_secret_path: str = "secret/data/firewall-manager"  # noqa: S105
     scheduler_interval_seconds: int = Field(default=30, ge=5, le=3600)
     audit_retention_months: int = Field(default=6, ge=1, le=120)
     app_public_url: str = "http://localhost:5173"
     administrator_email: str | None = None
     oidc_providers: str = "[]"
+    oidc_providers_file: str | None = None
     auth_session_idle_minutes: int = Field(default=60, ge=5, le=1440)
     auth_session_absolute_hours: int = Field(default=12, ge=1, le=168)
     bootstrap_organization_name: str | None = None
@@ -61,6 +77,32 @@ class Settings(BaseSettings):
         return None if value == "" else value
 
     @model_validator(mode="after")
+    def resolve_file_settings(self) -> "Settings":
+        """Resolve Compose-mounted secret files without exposing values in rendered YAML."""
+        if self.secret_store_master_key is None and self.secret_store_master_key_file:
+            self.secret_store_master_key = SecretStr(
+                Path(self.secret_store_master_key_file).read_text(encoding="utf-8").strip()
+            )
+        if not self.database_url and self.database_password_file:
+            password = Path(self.database_password_file).read_text(encoding="utf-8").strip()
+            self.database_url = (
+                f"postgresql+psycopg://{quote_plus(self.database_user)}:{quote_plus(password)}"
+                f"@{self.database_host}:{self.database_port}/{quote_plus(self.database_name)}"
+            )
+        if not self.redis_url and self.redis_password_file:
+            password = Path(self.redis_password_file).read_text(encoding="utf-8").strip()
+            self.redis_url = (
+                f"redis://:{quote_plus(password)}@{self.redis_host}:{self.redis_port}/0"
+            )
+        if self.oidc_providers_file:
+            self.oidc_providers = Path(self.oidc_providers_file).read_text(encoding="utf-8").strip()
+        if not self.database_url:
+            raise ValueError("DATABASE_URL or DATABASE_PASSWORD_FILE is required")
+        if not self.redis_url:
+            raise ValueError("REDIS_URL or REDIS_PASSWORD_FILE is required")
+        return self
+
+    @model_validator(mode="after")
     def protect_development_auth(self) -> "Settings":
         """Prevent the local identity adapter from becoming a production bypass."""
         if self.dev_auth_enabled and self.app_environment not in {"development", "test"}:
@@ -71,10 +113,19 @@ class Settings(BaseSettings):
             and self.secret_store_master_key is None
             and self.secret_store_provider != "vault"  # noqa: S105
         ):
-            msg = "APP_SECRET_KEY is required in production unless a Vault provider is configured"
+            msg = (
+                "APP_SECRET_KEY or APP_SECRET_KEY_FILE is required in production unless "
+                "a Vault provider is configured"
+            )
             raise ValueError(msg)
-        if self.secret_store_provider == "vault" and (not self.vault_url or not self.vault_token):  # noqa: S105
-            raise ValueError("VAULT_URL and VAULT_TOKEN are required for Vault secret storage")
+        vault_approle = bool(self.vault_role_id_file and self.vault_secret_id_file)
+        if self.secret_store_provider == "vault" and (  # noqa: S105
+            not self.vault_url or (not self.vault_token and not vault_approle)
+        ):
+            raise ValueError(
+                "VAULT_URL and either VAULT_TOKEN or both Vault AppRole credential files "
+                "are required for Vault secret storage"
+            )
         if (
             self.app_environment in {"staging", "production"}
             and self.secret_store_provider == "vault"  # noqa: S105

@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Centralized normalized object equivalence and provider-safe naming."""
 
 import re
@@ -11,6 +13,11 @@ _SAFE_COMPONENT = re.compile(r"[^A-Za-z0-9_.-]+")
 _PORT = re.compile(r"^(tcp|udp)/(\d{1,5})(?:-(\d{1,5}))?$", re.IGNORECASE)
 _ICMP = re.compile(r"^(icmp|ipv6-icmp)/([A-Za-z0-9_-]+)/([A-Za-z0-9_-]+)$", re.IGNORECASE)
 _OTHER_PROTOCOL = re.compile(r"^other/([A-Za-z0-9_-]+)$", re.IGNORECASE)
+
+
+def provider_native_id_equal(left: object, right: object) -> bool:
+    """Compare provider identifiers without treating hexadecimal case as a difference."""
+    return left is not None and right is not None and str(left).casefold() == str(right).casefold()
 
 
 @dataclass(frozen=True, slots=True)

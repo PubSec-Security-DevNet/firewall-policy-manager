@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Remove all OIDC providers from one organization for access recovery."""
 
 import argparse

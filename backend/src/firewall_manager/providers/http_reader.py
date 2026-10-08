@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Shared HTTP transport adapter for normalized read-only providers."""
 
 from collections.abc import Callable

@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 set -euo pipefail
 
 if ! command -v syft >/dev/null 2>&1; then

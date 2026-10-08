@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Thin versioned REST routes."""
 
 import json
@@ -9,6 +11,7 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends, Query, Request, Response
 from fastapi.responses import PlainTextResponse, RedirectResponse
 from redis import Redis
+from redis.exceptions import RedisError
 from sqlalchemy import select
 
 from firewall_manager.api.dependencies import (
@@ -16,6 +19,7 @@ from firewall_manager.api.dependencies import (
     AuthorizationRepositoryDependency,
     ChangeSetExecutionDispatcherDependency,
     ChangeSetRepositoryDependency,
+    DeploymentDispatcherDependency,
     DevelopmentIdentityRepositoryDependency,
     HealthServiceDependency,
     InventoryRepositoryDependency,
@@ -65,6 +69,7 @@ from firewall_manager.api.schemas import (
     InitialSetupStatusResponse,
     InitialSetupTestRequest,
     InitialSetupTestResponse,
+    LegacyOwnershipConfirmationRequest,
     ManagerResponse,
     ObjectResponse,
     OidcLoginProviderResponse,
@@ -109,6 +114,7 @@ from firewall_manager.application.errors import (
     ResourceOutOfScopeError,
 )
 from firewall_manager.application.inventory import InventoryService
+from firewall_manager.application.legacy_ownership import LegacyOwnershipService
 from firewall_manager.application.oidc_admin import OidcAdministrationService
 from firewall_manager.application.overview import OverviewService
 from firewall_manager.application.ports import ProviderFactory, ProviderReader
@@ -145,6 +151,8 @@ from firewall_manager.security.oidc import (
     _verify,
     redirect_uri,
 )
+from firewall_manager.version import GIT_SHA, __version__
+from firewall_manager.worker.health_keys import SCHEDULER_HEARTBEAT_KEY, WORKER_HEARTBEAT_KEY
 
 router = APIRouter(prefix="/api/v1")
 dev_router = APIRouter(prefix="/api/v1/dev", tags=["development-auth"])
@@ -473,14 +481,25 @@ async def oidc_proxy_start(
 
 
 @router.get("/health/live", tags=["health"])
-async def live() -> HealthResponse:
-    return HealthResponse(status="ok")
+async def live() -> dict[str, str]:
+    return {"status": "ok", "version": __version__, "git_sha": GIT_SHA}
 
 
 @router.get("/metrics", include_in_schema=False)
 async def metrics() -> PlainTextResponse:
     """Expose scrapeable process metrics; keep this endpoint network-policy protected."""
-    return PlainTextResponse(render_metrics(), media_type="text/plain; version=0.0.4")
+    redis = Redis.from_url(get_settings().redis_url, decode_responses=True)
+    try:
+        worker_healthy = redis.get(WORKER_HEARTBEAT_KEY) is not None
+        scheduler_healthy = redis.get(SCHEDULER_HEARTBEAT_KEY) is not None
+    except RedisError:
+        worker_healthy = scheduler_healthy = False
+    finally:
+        redis.close()
+    return PlainTextResponse(
+        render_metrics(worker_healthy=worker_healthy, scheduler_healthy=scheduler_healthy),
+        media_type="text/plain; version=0.0.4",
+    )
 
 
 @router.get(
@@ -885,14 +904,15 @@ async def list_deployment_change_sets(
     "/admin/provider-connections/{connection_id}/deploy", status_code=202, tags=["deployments"]
 )
 async def force_connector_deployment(
-    connection_id: UUID, principal: PrincipalDependency, session: SessionDependency
+    connection_id: UUID,
+    principal: PrincipalDependency,
+    session: SessionDependency,
+    dispatch: DeploymentDispatcherDependency,
 ) -> DeploymentResponse | dict[str, object]:
     result = DeploymentService(session).queue_connector(principal, connection_id, force=True)
     session.commit()
     if result.get("id"):
-        from firewall_manager.worker.tasks import execute_deployment_batch  # noqa: PLC0415
-
-        execute_deployment_batch.send(str(result["id"]))
+        dispatch(UUID(str(result["id"])))
     if result.get("status") == "NO_PENDING_CHANGES":
         return result
     return DeploymentResponse.model_validate(result)
@@ -938,14 +958,15 @@ async def approve_deployment(
 
 @router.post("/deployments/{deployment_id}/retry", status_code=202, tags=["deployments"])
 async def retry_deployment(
-    deployment_id: UUID, principal: PrincipalDependency, session: SessionDependency
+    deployment_id: UUID,
+    principal: PrincipalDependency,
+    session: SessionDependency,
+    dispatch: DeploymentDispatcherDependency,
 ) -> DeploymentResponse | dict[str, object]:
     result = DeploymentService(session).retry(principal, deployment_id)
     session.commit()
     if result.get("id"):
-        from firewall_manager.worker.tasks import execute_deployment_batch  # noqa: PLC0415
-
-        execute_deployment_batch.send(str(result["id"]))
+        dispatch(UUID(str(result["id"])))
     if result.get("status") == "NO_PENDING_CHANGES":
         return result
     return DeploymentResponse.model_validate(result)
@@ -1763,3 +1784,28 @@ async def restore_provider_state_proposal(  # noqa: PLR0913, PLR0917 -- explicit
         inventory_repository, authorization_repository, change_set_repository
     ).restore(principal, drift_id, body.active_group_id)
     return ReconciliationActionResponse.model_validate(result)
+
+
+@router.get("/admin/legacy-ownership", tags=["administration"])
+async def legacy_ownership_reviews(
+    principal: PrincipalDependency,
+    session: SessionDependency,
+) -> list[dict[str, object]]:
+    return LegacyOwnershipService(session).list(principal)
+
+
+@router.post("/admin/legacy-ownership/{review_id}/confirm", tags=["administration"])
+async def confirm_legacy_ownership(
+    review_id: UUID,
+    body: LegacyOwnershipConfirmationRequest,
+    principal: PrincipalDependency,
+    session: SessionDependency,
+) -> dict[str, object]:
+    return LegacyOwnershipService(session).confirm(
+        principal,
+        review_id,
+        body.active_group_id,
+        body.access_policy_id,
+        body.resource_revision,
+        body.reason,
+    )

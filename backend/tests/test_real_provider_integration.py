@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Explicitly opted-in, non-production, read-only Cisco compatibility probes."""
 
 import os

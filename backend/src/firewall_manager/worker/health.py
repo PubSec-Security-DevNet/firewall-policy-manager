@@ -1,9 +1,11 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Worker health check based on a recently processed queue message."""
 
 from redis import Redis
 
 from firewall_manager.config import get_settings
-from firewall_manager.worker.tasks import WORKER_HEARTBEAT_KEY
+from firewall_manager.worker.health_keys import WORKER_HEARTBEAT_KEY
 
 
 def main() -> None:

@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Enable a short-lived operator-controlled OIDC recovery setup window."""
 
 import argparse

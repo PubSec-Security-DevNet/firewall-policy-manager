@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """One-time first-run and operator-authorized OIDC setup."""
 
 import hashlib

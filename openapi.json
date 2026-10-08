@@ -149,7 +149,7 @@
           "object_use_grants",
           "zone_grants",
           "ip_range_grants",
-          "object_create_grants",
+          "object_create_grants"
         ],
         "title": "AdministrationSnapshotResponse",
         "type": "object"
@@ -385,18 +385,6 @@
       },
       "AuthorizationResourceUpsertRequest": {
         "properties": {
-          "id": {
-            "anyOf": [
-              {
-                "format": "uuid",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Id"
-          },
           "capabilities": {
             "anyOf": [
               {
@@ -467,6 +455,18 @@
               }
             ],
             "title": "Group Id"
+          },
+          "id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Id"
           },
           "is_active": {
             "anyOf": [
@@ -1348,6 +1348,16 @@
           "policy": {
             "$ref": "#/components/schemas/DelegatedPolicySummary"
           },
+          "policy_device_assignment": {
+            "default": "UNKNOWN",
+            "enum": [
+              "ASSIGNED",
+              "UNASSIGNED",
+              "UNKNOWN"
+            ],
+            "title": "Policy Device Assignment",
+            "type": "string"
+          },
           "provider_is_mock": {
             "default": true,
             "title": "Provider Is Mock",
@@ -1460,10 +1470,8 @@
       "DelegatedObjectResponse": {
         "properties": {
           "access_permission": {
+            "const": "use",
             "default": "use",
-            "enum": [
-              "use"
-            ],
             "title": "Access Permission",
             "type": "string"
           },
@@ -1559,6 +1567,13 @@
             ],
             "title": "Owner Type",
             "type": "string"
+          },
+          "provider_metadata": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Provider Metadata",
+            "type": "object"
           }
         },
         "required": [
@@ -1610,6 +1625,14 @@
             "title": "Action",
             "type": "string"
           },
+          "application_object_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Application Object Ids",
+            "type": "array"
+          },
           "applications": {
             "items": {
               "type": "string"
@@ -1649,6 +1672,18 @@
             },
             "title": "Destination Zones",
             "type": "array"
+          },
+          "drift_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Drift Id"
           },
           "enabled": {
             "default": true,
@@ -2109,6 +2144,34 @@
           "selected_change_set_ids"
         ],
         "title": "DeploymentRollbackRequest",
+        "type": "object"
+      },
+      "DevelopmentIdentityResponse": {
+        "properties": {
+          "display_name": {
+            "title": "Display Name",
+            "type": "string"
+          },
+          "email": {
+            "title": "Email",
+            "type": "string"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "email",
+          "display_name",
+          "role",
+          "enabled"
+        ],
+        "title": "DevelopmentIdentityResponse",
         "type": "object"
       },
       "DraftCategoryOperationRequest": {
@@ -2999,6 +3062,19 @@
             ],
             "title": "Admin Issuer"
           },
+          "organization_name": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Organization Name"
+          },
           "provider_client_id": {
             "maxLength": 300,
             "minLength": 1,
@@ -3075,6 +3151,39 @@
           "login_url"
         ],
         "title": "InitialSetupTestResponse",
+        "type": "object"
+      },
+      "LegacyOwnershipConfirmationRequest": {
+        "properties": {
+          "access_policy_id": {
+            "format": "uuid",
+            "title": "Access Policy Id",
+            "type": "string"
+          },
+          "active_group_id": {
+            "format": "uuid",
+            "title": "Active Group Id",
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 1000,
+            "minLength": 10,
+            "title": "Reason",
+            "type": "string"
+          },
+          "resource_revision": {
+            "minimum": 1.0,
+            "title": "Resource Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "active_group_id",
+          "access_policy_id",
+          "resource_revision",
+          "reason"
+        ],
+        "title": "LegacyOwnershipConfirmationRequest",
         "type": "object"
       },
       "ManagerResponse": {
@@ -3877,6 +3986,13 @@
             ],
             "title": "Ca Certificate"
           },
+          "deployment_interval_minutes": {
+            "default": 15,
+            "maximum": 10080.0,
+            "minimum": 5.0,
+            "title": "Deployment Interval Minutes",
+            "type": "integer"
+          },
           "display_name": {
             "maxLength": 200,
             "minLength": 1,
@@ -4120,6 +4236,13 @@
               }
             ],
             "title": "Credential Username"
+          },
+          "deployment_interval_minutes": {
+            "default": 15,
+            "maximum": 10080.0,
+            "minimum": 5.0,
+            "title": "Deployment Interval Minutes",
+            "type": "integer"
           },
           "deployment_last_completed_at": {
             "anyOf": [
@@ -4637,6 +4760,19 @@
               }
             ],
             "title": "Base Endpoint"
+          },
+          "deployment_interval_minutes": {
+            "anyOf": [
+              {
+                "maximum": 10080.0,
+                "minimum": 5.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deployment Interval Minutes"
           },
           "deployment_schedule_enabled": {
             "anyOf": [
@@ -5825,8 +5961,8 @@
     }
   },
   "info": {
-    "title": "Firewall Manager API",
-    "version": "0.1.0"
+    "title": "Firewall Policy Manager API",
+    "version": "1.0.0-rc1"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -6853,6 +6989,313 @@
           }
         ],
         "summary": "Update Group Approval",
+        "tags": [
+          "administration"
+        ]
+      }
+    },
+    "/api/v1/admin/legacy-ownership": {
+      "get": {
+        "operationId": "legacy_ownership_reviews_api_v1_admin_legacy_ownership_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Dev-User",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dev-User"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "fm_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Fm Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "title": "Response Legacy Ownership Reviews Api V1 Admin Legacy Ownership Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Legacy Ownership Reviews",
+        "tags": [
+          "administration"
+        ]
+      }
+    },
+    "/api/v1/admin/legacy-ownership/{review_id}/confirm": {
+      "post": {
+        "operationId": "confirm_legacy_ownership_api_v1_admin_legacy_ownership__review_id__confirm_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "review_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Review Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Dev-User",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dev-User"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "fm_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Fm Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LegacyOwnershipConfirmationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Confirm Legacy Ownership Api V1 Admin Legacy Ownership  Review Id  Confirm Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Confirm Legacy Ownership",
         "tags": [
           "administration"
         ]
@@ -17207,6 +17650,112 @@
         ]
       }
     },
+    "/api/v1/dev/users": {
+      "get": {
+        "description": "Return deterministic identities; this router is never mounted in production.",
+        "operationId": "development_users_api_v1_dev_users_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/DevelopmentIdentityResponse"
+                  },
+                  "title": "Response Development Users Api V1 Dev Users Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Safe application error envelope"
+          }
+        },
+        "summary": "Development Users",
+        "tags": [
+          "development-auth"
+        ]
+      }
+    },
     "/api/v1/firewall-managers": {
       "get": {
         "operationId": "firewall_managers_api_v1_firewall_managers_get",
@@ -17383,7 +17932,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HealthResponse"
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Live Api V1 Health Live Get",
+                  "type": "object"
                 }
               }
             },
@@ -18975,6 +19528,23 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ReconciliationRestoreRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "content": {

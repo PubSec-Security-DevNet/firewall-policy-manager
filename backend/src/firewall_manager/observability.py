@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Low-overhead Prometheus text metrics for operational scraping."""
 
 import re
@@ -25,7 +27,7 @@ def job(name: str, outcome: str) -> None:
         _jobs[(name, outcome)] += 1
 
 
-def render() -> str:
+def render(*, worker_healthy: bool | None = None, scheduler_healthy: bool | None = None) -> str:
     lines = [
         "# HELP firewall_manager_http_requests_total HTTP requests handled.",
         "# TYPE firewall_manager_http_requests_total counter",
@@ -42,4 +44,21 @@ def render() -> str:
         )
         for (name, outcome), value in sorted(_jobs.items()):
             lines.append(f'firewall_manager_jobs_total{{job="{name}",outcome="{outcome}"}} {value}')
+        if worker_healthy is not None:
+            lines.extend(
+                [
+                    "# HELP firewall_manager_worker_healthy Whether a worker heartbeat is current.",
+                    "# TYPE firewall_manager_worker_healthy gauge",
+                    f"firewall_manager_worker_healthy {int(worker_healthy)}",
+                ]
+            )
+        if scheduler_healthy is not None:
+            lines.extend(
+                [
+                    "# HELP firewall_manager_scheduler_healthy "
+                    "Whether the scheduler heartbeat is current.",
+                    "# TYPE firewall_manager_scheduler_healthy gauge",
+                    f"firewall_manager_scheduler_healthy {int(scheduler_healthy)}",
+                ]
+            )
     return "\n".join(lines) + "\n"

@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """SQL persistence adapter for durable Milestone 3 ChangeSets."""
 
 # ruff: noqa: PLR0913, PLR0917 -- writes retain explicit actor and scope arguments.
@@ -5,21 +7,26 @@
 import hashlib
 import ipaddress
 import json
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from uuid import UUID, uuid4
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
 from firewall_manager.application.errors import (
+    ChangeSetConflictError,
     InvalidChangeSetStateError,
     InvalidInputError,
     ResourceOutOfScopeError,
     StaleWriteError,
 )
+from firewall_manager.application.mutation_guard import mutation_context
 from firewall_manager.domain.models import ChangeSetState, OperationStatus, Principal
+from firewall_manager.persistence.execution_fencing import ExecutionFence
+from firewall_manager.persistence.legacy_ownership import pending_review
 from firewall_manager.persistence.models import (
     AccessPolicy,
     AccessRule,
@@ -36,6 +43,7 @@ from firewall_manager.persistence.models import (
     IntrusionPolicy,
     ObjectReference,
     ObjectUseGrant,
+    PolicyDelegation,
     ProviderCapabilityEvidence,
     ProviderConnection,
     ProviderDomain,
@@ -50,6 +58,8 @@ from firewall_manager.providers.capabilities import (
     VALIDATION_WRITE_CAPABILITIES,
     effective_write_capabilities,
 )
+
+CHANGE_SET_EXECUTION_LEASE_SECONDS = 300
 
 _WRITE_CAPABILITY_BY_OPERATION = {
     "CREATE_RULE": "access_rule_create",
@@ -84,6 +94,13 @@ _EDITABLE_STATES = {
     ChangeSetState.DRAFT.value,
     ChangeSetState.VALIDATION_FAILED.value,
     ChangeSetState.READY.value,
+}
+
+_TERMINAL_CHANGE_SET_STATES = {
+    ChangeSetState.SUCCEEDED.value,
+    ChangeSetState.CANCELLED.value,
+    ChangeSetState.REJECTED.value,
+    ChangeSetState.ROLLED_BACK.value,
 }
 
 
@@ -312,6 +329,8 @@ class SqlChangeSetRepository:
     ) -> dict[str, object]:
         change_set = self._require_editable(principal, group_id, change_set_id)
         policy_id = UUID(str(payload.get("policy_id") or change_set.access_policy_id))
+        if policy_id != change_set.access_policy_id:
+            raise ResourceOutOfScopeError
         policy = self._session.scalar(
             select(AccessPolicy).where(
                 AccessPolicy.id == policy_id,
@@ -320,6 +339,35 @@ class SqlChangeSetRepository:
         )
         if policy is None:
             raise ResourceOutOfScopeError
+        delete_key = (
+            "object_id"
+            if kind == "DELETE_OBJECT"
+            else "rule_id"
+            if kind == "DELETE_RULE"
+            else None
+        )
+        if delete_key and payload.get(delete_key):
+            resource_id = UUID(str(payload[delete_key]))
+            self._lock_resource_delete(
+                principal.organization_id,
+                delete_key.removesuffix("_id"),
+                resource_id,
+            )
+            pending = (
+                self.object_delete_pending(resource_id, principal.organization_id)
+                if kind == "DELETE_OBJECT"
+                else self.rule_delete_pending(resource_id, principal.organization_id)
+            )
+            if pending:
+                raise ChangeSetConflictError(
+                    details={
+                        "code": (
+                            "OBJECT_DELETE_ALREADY_PENDING"
+                            if kind == "DELETE_OBJECT"
+                            else "RULE_DELETE_ALREADY_PENDING"
+                        )
+                    }
+                )
         sequence = (
             int(
                 self._session.scalar(
@@ -390,6 +438,8 @@ class SqlChangeSetRepository:
         return int(row) if row is not None else None
 
     def rule_management_state(self, rule_id: UUID, organization_id: UUID) -> str | None:
+        if pending_review(self._session, organization_id, resource_id=rule_id):
+            return "CONFLICT"
         return self._session.scalar(
             select(AccessRule.management_state).where(
                 AccessRule.id == rule_id,
@@ -398,6 +448,8 @@ class SqlChangeSetRepository:
         )
 
     def object_management_state(self, object_id: UUID, organization_id: UUID) -> str | None:
+        if pending_review(self._session, organization_id, resource_id=object_id):
+            return "CONFLICT"
         return self._session.scalar(
             select(FirewallObject.management_state).where(
                 FirewallObject.id == object_id,
@@ -486,6 +538,7 @@ class SqlChangeSetRepository:
             operation.expected_revisions = _as_str_dict(result.get("expected_revisions", {}))
             operation.status = str(result.get("status", OperationStatus.INVALID.value))
             operation.revision += 1
+        self._clear_approval(row)
         row.validation_results = operation_results
         row.provider_revision_snapshot = provider_snapshot
         row.failure_info = {}
@@ -536,7 +589,8 @@ class SqlChangeSetRepository:
                                     f"Group: {group.name}\n"
                                     f"Submitted by: {principal.email}\n"
                                     f"Revision: {row.revision}\n\n"
-                                    "Open the Approvals page in Firewall Manager to review it."
+                                    "Open the Approvals page in Firewall Policy Manager "
+                                    "to review it."
                                 ),
                             )
                         )
@@ -729,6 +783,63 @@ class SqlChangeSetRepository:
             "policy_id": policy.id,
         }
 
+    def object_delete_pending(
+        self,
+        object_id: UUID,
+        organization_id: UUID,
+        *,
+        exclude_change_set_id: UUID | None = None,
+    ) -> bool:
+        query = (
+            select(ChangeSetOperation.id)
+            .join(ChangeSet, ChangeSet.id == ChangeSetOperation.change_set_id)
+            .where(
+                ChangeSetOperation.organization_id == organization_id,
+                ChangeSetOperation.kind == "DELETE_OBJECT",
+                ChangeSet.state.notin_(_TERMINAL_CHANGE_SET_STATES),
+                ChangeSetOperation.payload["object_id"].astext == str(object_id),
+            )
+            .limit(1)
+        )
+        if exclude_change_set_id is not None:
+            query = query.where(ChangeSet.id != exclude_change_set_id)
+        return self._session.scalar(query) is not None
+
+    def rule_delete_pending(
+        self,
+        rule_id: UUID,
+        organization_id: UUID,
+        *,
+        exclude_change_set_id: UUID | None = None,
+    ) -> bool:
+        query = (
+            select(ChangeSetOperation.id)
+            .join(ChangeSet, ChangeSet.id == ChangeSetOperation.change_set_id)
+            .where(
+                ChangeSetOperation.organization_id == organization_id,
+                ChangeSetOperation.kind == "DELETE_RULE",
+                ChangeSet.state.notin_(_TERMINAL_CHANGE_SET_STATES),
+                ChangeSetOperation.payload["rule_id"].astext == str(rule_id),
+            )
+            .limit(1)
+        )
+        if exclude_change_set_id is not None:
+            query = query.where(ChangeSet.id != exclude_change_set_id)
+        return self._session.scalar(query) is not None
+
+    def _lock_resource_delete(
+        self, organization_id: UUID, resource_type: str, resource_id: UUID
+    ) -> None:
+        """Serialize delete reservations for one managed resource across requests."""
+        self._session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+            {
+                "lock_key": (
+                    f"firewall-manager:{resource_type}-delete:{organization_id}:{resource_id}"
+                )
+            },
+        )
+
     def object_equivalent_id(
         self,
         manager_id: UUID,
@@ -821,9 +932,21 @@ class SqlChangeSetRepository:
         row = self._owned_row(principal, group_id, change_set_id)
         if row is None:
             raise ResourceOutOfScopeError
+        preserve_reconciliation_receipt = self._reconciliation_retry_available(
+            row, self._operations(row.id)
+        )
         row.state = state
         row.execution_results = cast("dict[str, object]", _json_safe(execution_results))
         row.failure_info = cast("dict[str, object]", _json_safe(failure_info))
+        if state == ChangeSetState.DRAFT.value:
+            # A retry is only permitted after a known non-mutating provider result. Clear the
+            # prior attempt's durable dispatch intent so the revalidated submission can create
+            # a fresh fenced intent instead of being mistaken for a stale replay.
+            if not preserve_reconciliation_receipt:
+                row.mutation_intent = {}
+            row.execution_owner = None
+            row.execution_lease_until = None
+            row.execution_heartbeat_at = None
         row.revision += 1
         transactions = _as_dict_list(execution_results.get("transactions", []))
         operation_results: dict[UUID, dict[str, object]] = {}
@@ -839,6 +962,52 @@ class SqlChangeSetRepository:
                 operation.revision += 1
         self._session.flush()
         return self._change_set_dict(row)
+
+    @staticmethod
+    def _reconciliation_retry_available(
+        row: ChangeSet, operations: list[ChangeSetOperation]
+    ) -> bool:
+        """Expose recovery only for receipt-backed create-only executions."""
+        if row.state not in {
+            ChangeSetState.RECONCILIATION_REQUIRED.value,
+            ChangeSetState.FAILED.value,
+            ChangeSetState.DRAFT.value,
+            ChangeSetState.READY.value,
+            ChangeSetState.QUEUED.value,
+            ChangeSetState.EXECUTING.value,
+        }:
+            return False
+        allowed_kinds = {"CREATE_RULE", "CREATE_OBJECT", "ENSURE_RULE_CATEGORY"}
+        if not operations or any(operation.kind not in allowed_kinds for operation in operations):
+            return False
+        entries = row.mutation_intent.get("entries", []) if row.mutation_intent else []
+        if not isinstance(entries, list) or not entries:
+            return False
+        operation_ids = {str(operation.id) for operation in operations}
+        receipt_ids: set[str] = set()
+        for entry in entries:
+            if not isinstance(entry, dict):
+                return False
+            context = entry.get("context")
+            response = entry.get("response")
+            body = response.get("body") if isinstance(response, dict) else None
+            status = response.get("status") if isinstance(response, dict) else None
+            operation_id = context.get("operation_id") if isinstance(context, dict) else None
+            native_id = body.get("id") if isinstance(body, dict) else None
+            if (
+                entry.get("method") != "POST"
+                or not isinstance(status, int)
+                or not 200 <= status < 300
+                or not operation_id
+                or str(operation_id) not in operation_ids
+                or not native_id
+            ):
+                return False
+            receipt_ids.add(str(operation_id))
+        return all(
+            operation.kind == "ENSURE_RULE_CATEGORY" or str(operation.id) in receipt_ids
+            for operation in operations
+        )
 
     def upsert_provider_transaction(
         self,
@@ -879,6 +1048,15 @@ class SqlChangeSetRepository:
         """Durably record a real transaction before any external mutation can occur."""
         self._session.commit()
 
+    def lock_provider_mutations(self, organization_id: UUID, provider_key: UUID) -> None:
+        """Serialize provider writes sharing one connection without holding row locks."""
+        self._session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+            {
+                "lock_key": f"firewall-manager:provider-mutation:{organization_id}:{provider_key}"
+            },
+        )
+
     def queue_execution(
         self, principal: Principal, group_id: UUID, change_set_id: UUID
     ) -> dict[str, object]:
@@ -888,20 +1066,14 @@ class SqlChangeSetRepository:
             row is None
             or row.state
             not in (
-                {
-                    ChangeSetState.APPROVED.value,
-                    *(
-                        {ChangeSetState.READY.value}
-                        if row.approved_revision is not None and row.approval_invalidated_at is None
-                        else set()
-                    ),
-                }
+                {ChangeSetState.APPROVED.value}
                 if bool(self._change_set_dict(row).get("approval_required"))
                 else {ChangeSetState.READY.value, ChangeSetState.APPROVED.value}
             )
             or row.validated_revision != row.revision
         ):
             raise InvalidChangeSetStateError
+        self._require_current_approval(row, revision_offset=1)
         row.state = ChangeSetState.QUEUED.value
         row.submitted_at = datetime.now(UTC)
         row.submitted_by_user_id = principal.user_id
@@ -909,6 +1081,55 @@ class SqlChangeSetRepository:
         row.validated_revision = row.revision
         self._session.flush()
         return self._change_set_dict(row)
+
+    def _require_current_approval(self, row: ChangeSet, *, revision_offset: int) -> None:
+        group = self._session.scalar(
+            select(Group)
+            .where(Group.id == row.acting_group_id)
+            .execution_options(populate_existing=True)
+        )
+        if group is None or not group.is_active:
+            raise ResourceOutOfScopeError
+        if not group.approval_required:
+            return
+        approver = (
+            self._session.scalar(
+                select(User)
+                .where(User.id == row.approved_by_user_id)
+                .execution_options(populate_existing=True)
+            )
+            if row.approved_by_user_id
+            else None
+        )
+        if (
+            row.approved_revision != row.revision - revision_offset
+            or row.approval_invalidated_at is not None
+            or approver is None
+            or not approver.is_active
+            or approver.organization_id != row.organization_id
+            or approver.role not in {"admin", "firewall_operator", "approver"}
+        ):
+            raise InvalidChangeSetStateError(details={"code": "APPROVAL_NO_LONGER_VALID"})
+        if approver.role in {"admin", "firewall_operator"}:
+            return
+        member = self._session.scalar(
+            select(GroupMembership.id).where(
+                GroupMembership.organization_id == row.organization_id,
+                GroupMembership.group_id == row.acting_group_id,
+                GroupMembership.user_id == approver.id,
+                GroupMembership.status == "ACTIVE",
+            )
+        )
+        grant = self._session.scalar(
+            select(PolicyDelegation).where(
+                PolicyDelegation.organization_id == row.organization_id,
+                PolicyDelegation.group_id == row.acting_group_id,
+                PolicyDelegation.policy_id == row.access_policy_id,
+                PolicyDelegation.is_active.is_(True),
+            )
+        )
+        if member is None or grant is None or "approve" not in grant.capabilities:
+            raise ResourceOutOfScopeError
 
     def approve_change_set(
         self, principal: Principal, group_id: UUID, change_set_id: UUID
@@ -928,12 +1149,13 @@ class SqlChangeSetRepository:
             )
             if member is None:
                 raise ResourceOutOfScopeError
-        if row.principal_id == principal.user_id and not global_approver:
+        if row.principal_id in {principal.user_id, principal.audit_user_id}:
             raise InvalidChangeSetStateError(details={"code": "SEPARATION_OF_DUTY"})
         row.state = ChangeSetState.APPROVED.value
         row.approved_at = datetime.now(UTC)
         row.approved_by_user_id = principal.user_id
         row.approved_revision = row.revision
+        row.approval_invalidated_at = None
         row.revision += 1
         row.validated_revision = row.revision
         self._session.flush()
@@ -1005,10 +1227,11 @@ class SqlChangeSetRepository:
                     )
                 )
             )
+            row.execution_epoch += 1
             row.execution_owner = None
             row.execution_lease_until = None
             row.execution_heartbeat_at = current
-            if transactions:
+            if transactions or row.mutation_intent:
                 row.failure_info = {
                     "code": "EXECUTION_LEASE_EXPIRED",
                     "recovery": "RECONCILIATION_REQUIRED",
@@ -1030,7 +1253,11 @@ class SqlChangeSetRepository:
         return recovered
 
     def acquire_execution_lease(
-        self, change_set_id: UUID, owner: str, *, lease_seconds: int = 120
+        self,
+        change_set_id: UUID,
+        owner: str,
+        *,
+        lease_seconds: int = CHANGE_SET_EXECUTION_LEASE_SECONDS,
     ) -> bool:
         now = datetime.now(UTC)
         result = self._session.execute(
@@ -1044,6 +1271,7 @@ class SqlChangeSetRepository:
                 ),
             )
             .values(
+                execution_epoch=ChangeSet.execution_epoch + 1,
                 execution_owner=owner,
                 execution_lease_until=now + timedelta(seconds=lease_seconds),
                 execution_heartbeat_at=now,
@@ -1053,7 +1281,11 @@ class SqlChangeSetRepository:
         return bool(cast("CursorResult[Any]", result).rowcount)
 
     def heartbeat_execution_lease(
-        self, change_set_id: UUID, owner: str, *, lease_seconds: int = 120
+        self,
+        change_set_id: UUID,
+        owner: str,
+        *,
+        lease_seconds: int = CHANGE_SET_EXECUTION_LEASE_SECONDS,
     ) -> bool:
         now = datetime.now(UTC)
         result = self._session.execute(
@@ -1061,6 +1293,8 @@ class SqlChangeSetRepository:
             .where(
                 ChangeSet.id == change_set_id,
                 ChangeSet.execution_owner == owner,
+                ChangeSet.execution_lease_until > now,
+                ChangeSet.state == ChangeSetState.EXECUTING.value,
             )
             .values(
                 execution_lease_until=now + timedelta(seconds=lease_seconds),
@@ -1090,19 +1324,92 @@ class SqlChangeSetRepository:
             .values(
                 state=ChangeSetState.EXECUTING.value,
                 updated_at=datetime.now(UTC),
+                execution_epoch=ChangeSet.execution_epoch + 1,
                 execution_owner=owner,
-                execution_lease_until=(datetime.now(UTC) + timedelta(seconds=120))
+                execution_lease_until=(
+                    datetime.now(UTC) + timedelta(seconds=CHANGE_SET_EXECUTION_LEASE_SECONDS)
+                )
                 if owner
                 else None,
                 execution_heartbeat_at=datetime.now(UTC) if owner else None,
             )
             .execution_options(synchronize_session=False)
         )
+        if cast("CursorResult[Any]", claimed).rowcount:
+            row = self._owned_row(principal, group_id, change_set_id)
+            if row is None:
+                raise ResourceOutOfScopeError
+            self._require_current_approval(row, revision_offset=2)
         self._session.commit()
         # The worker preloads the ChangeSet for scope validation. Refresh that
         # identity-map entry so subsequent reads see the atomically claimed state.
         self._session.expire_all()
+        if cast("CursorResult[Any]", claimed).rowcount and owner:
+            current = self._session.get(ChangeSet, change_set_id)
+            if current is not None:
+                ExecutionFence(
+                    self._session, ChangeSet, change_set_id, current.execution_epoch, owner
+                )
         return bool(cast("CursorResult[Any]", claimed).rowcount)
+
+    def set_execution_authorizer(
+        self,
+        principal: Principal,
+        group_id: UUID,
+        change_set_id: UUID,
+        callback: Callable[[], None],
+    ) -> None:
+        fence = self._session.info.get("execution_fence")
+        if not isinstance(fence, ExecutionFence):
+            return
+
+        def authorize() -> None:
+            row = self._owned_row(principal, group_id, change_set_id)
+            user = self._session.get(User, principal.user_id, populate_existing=True)
+            if (
+                row is None
+                or user is None
+                or not user.is_active
+                or user.role != principal.role
+                or row.state != "EXECUTING"
+                or row.validated_revision != row.revision
+            ):
+                raise ResourceOutOfScopeError
+            self._require_current_approval(row, revision_offset=2)
+            context = mutation_context.get() or {}
+            for operation in self._operations(change_set_id):
+                target = self.manager_execution_target(
+                    operation.manager_id, principal.organization_id
+                )
+                if (
+                    target is not None
+                    and str(operation.manager_id) == context.get("manager_id")
+                    and str(target.get("provider_connection_id"))
+                    != context.get("provider_connection_id")
+                ):
+                    raise ResourceOutOfScopeError(details={"code": "PROVIDER_CONTEXT_CHANGED"})
+                if target is None or (
+                    not target.get("is_mock")
+                    and (
+                        not target.get("write_enabled")
+                        or target.get("read_only") is not False
+                        or target.get("lifecycle") != "ACTIVE"
+                        or target.get("connection_status") != "CONNECTED"
+                    )
+                ):
+                    raise ResourceOutOfScopeError
+            context = mutation_context.get() or {}
+            if context.get("provider_connection_id"):
+                connection = self._session.get(
+                    ProviderConnection,
+                    UUID(str(context["provider_connection_id"])),
+                    populate_existing=True,
+                )
+                if connection is None or context.get("connection_revision") != connection.revision:
+                    raise ResourceOutOfScopeError(details={"code": "PROVIDER_CONTEXT_CHANGED"})
+            callback()
+
+        fence.authorize = authorize
 
     def manager_execution_target(
         self, manager_id: UUID, organization_id: UUID
@@ -1113,7 +1420,7 @@ class SqlChangeSetRepository:
                 FirewallManager.id == manager_id,
                 FirewallManager.organization_id == organization_id,
             )
-            .with_for_update()
+            .execution_options(populate_existing=True)
         )
         if manager is None:
             return None
@@ -1125,7 +1432,7 @@ class SqlChangeSetRepository:
                     ProviderConnection.id == manager.provider_connection_id,
                     ProviderConnection.organization_id == organization_id,
                 )
-                .with_for_update()
+                .execution_options(populate_existing=True)
             )
         return {
             "id": manager.id,
@@ -1137,6 +1444,7 @@ class SqlChangeSetRepository:
             "read_only": manager.read_only,
             "provider_type": connection.provider_type if connection else manager.provider,
             "provider_connection_id": connection.id if connection else None,
+            "connection_revision": connection.revision if connection else None,
             "credential_reference": connection.credential_reference if connection else None,
             "display_name": connection.display_name if connection else manager.display_name,
             "region": connection.region if connection else None,
@@ -1434,6 +1742,147 @@ class SqlChangeSetRepository:
                 reference["normalized_value"] = str(row.normalized_value)
         return reference
 
+    def _shift_application_rule_siblings(
+        self,
+        organization_id: UUID,
+        manager_id: UUID,
+        policy_id: UUID,
+        category_id: UUID | None,
+        excluded_rule_id: UUID,
+        minimum_position: int,
+        maximum_position: int | None,
+        delta: int,
+    ) -> None:
+        """Carry an application-created order mutation through local baselines."""
+        position_filters = [AccessRule.position >= minimum_position]
+        if maximum_position is not None:
+            position_filters.append(AccessRule.position <= maximum_position)
+        siblings = list(
+            self._session.scalars(
+                select(AccessRule)
+                .where(
+                    AccessRule.organization_id == organization_id,
+                    AccessRule.manager_id == manager_id,
+                    AccessRule.policy_id == policy_id,
+                    AccessRule.category_id == category_id,
+                    AccessRule.id != excluded_rule_id,
+                    *position_filters,
+                    AccessRule.management_state != "MISSING",
+                )
+                .order_by(
+                    AccessRule.position.desc() if delta > 0 else AccessRule.position,
+                    AccessRule.id.desc() if delta > 0 else AccessRule.id,
+                )
+            )
+        )
+        for sibling in siblings:
+            sibling.position += delta
+            if sibling.application_snapshot:
+                snapshot = dict(sibling.application_snapshot)
+                snapshot["position"] = sibling.position
+                sibling.application_snapshot = snapshot
+            sibling.revision += 1
+
+    def _shift_application_rule_order_after_create(
+        self,
+        organization_id: UUID,
+        manager_id: UUID,
+        policy_id: UUID,
+        category_id: UUID | None,
+        inserted_rule_id: UUID,
+        position: int,
+    ) -> None:
+        """Carry an application-created insertion through local order baselines."""
+        self._shift_application_rule_siblings(
+            organization_id,
+            manager_id,
+            policy_id,
+            category_id,
+            inserted_rule_id,
+            position,
+            None,
+            1,
+        )
+
+    def _shift_application_rule_order_after_move(
+        self,
+        organization_id: UUID,
+        manager_id: UUID,
+        policy_id: UUID,
+        old_category_id: UUID | None,
+        new_category_id: UUID | None,
+        moved_rule_id: UUID,
+        old_position: int,
+        new_position: int,
+    ) -> None:
+        """Carry an application-created move through local order baselines."""
+        if old_category_id == new_category_id:
+            if new_position < old_position:
+                self._shift_application_rule_siblings(
+                    organization_id,
+                    manager_id,
+                    policy_id,
+                    new_category_id,
+                    moved_rule_id,
+                    new_position,
+                    old_position - 1,
+                    1,
+                )
+            elif new_position > old_position:
+                self._shift_application_rule_siblings(
+                    organization_id,
+                    manager_id,
+                    policy_id,
+                    new_category_id,
+                    moved_rule_id,
+                    old_position + 1,
+                    new_position,
+                    -1,
+                )
+            return
+
+        self._shift_application_rule_siblings(
+            organization_id,
+            manager_id,
+            policy_id,
+            old_category_id,
+            moved_rule_id,
+            old_position + 1,
+            None,
+            -1,
+        )
+        self._shift_application_rule_siblings(
+            organization_id,
+            manager_id,
+            policy_id,
+            new_category_id,
+            moved_rule_id,
+            new_position,
+            None,
+            1,
+        )
+
+    def _shift_application_rule_order_after_delete(
+        self,
+        organization_id: UUID,
+        manager_id: UUID,
+        policy_id: UUID,
+        category_id: UUID | None,
+        deleted_rule_id: UUID,
+        position: int,
+    ) -> None:
+        """Carry an application-created deletion through local order baselines."""
+        self._shift_application_rule_siblings(
+            organization_id,
+            manager_id,
+            policy_id,
+            category_id,
+            deleted_rule_id,
+            position + 1,
+            None,
+            -1,
+        )
+
     def reconcile_successful_operations(  # noqa: PLR0912, PLR0915 -- typed operation reducer
         self,
         change_set: dict[str, object],
@@ -1527,22 +1976,40 @@ class SqlChangeSetRepository:
                 row.management_state = "MISSING"
                 row.modified_by_user_id = principal.user_id
                 row.revision += 1
-            elif kind == "ENSURE_RULE_CATEGORY" and result.get("mutated") is True:
-                category = RuleCategory(
-                    organization_id=principal.organization_id,
-                    manager_id=policy.manager_id,
-                    policy_id=policy.id,
-                    native_id=str(result["provider_resource_id"]),
-                    name=str(resolution["provider_name"]),
-                    provider_version=str(provider_resource.get("native_version", "1")),
-                    provider_fingerprint=str(provider_resource["fingerprint"]),
-                    native_metadata={},
-                    management_state="MANAGED",
-                    revision=1,
-                    position=int(str(provider_resource["position"])),
+            elif kind == "ENSURE_RULE_CATEGORY" and (
+                result.get("mutated") is True or result.get("receipt_recovered") is True
+            ):
+                native_id = str(result["provider_resource_id"])
+                category = self._session.scalar(
+                    select(RuleCategory).where(
+                        RuleCategory.organization_id == principal.organization_id,
+                        RuleCategory.policy_id == policy.id,
+                        func.lower(RuleCategory.native_id) == native_id.casefold(),
+                    )
                 )
-                self._session.add(category)
-                self._session.flush()
+                if category is None:
+                    category = RuleCategory(
+                        organization_id=principal.organization_id,
+                        manager_id=policy.manager_id,
+                        policy_id=policy.id,
+                        native_id=native_id,
+                        name=str(resolution["provider_name"]),
+                        provider_version=str(provider_resource.get("native_version", "1")),
+                        provider_fingerprint=str(provider_resource["fingerprint"]),
+                        native_metadata={},
+                        management_state="MANAGED",
+                        revision=1,
+                        position=int(str(provider_resource["position"])),
+                    )
+                    self._session.add(category)
+                    self._session.flush()
+                else:
+                    category.name = str(resolution["provider_name"])
+                    category.provider_version = str(provider_resource.get("native_version", "1"))
+                    category.provider_fingerprint = str(provider_resource["fingerprint"])
+                    category.management_state = "MANAGED"
+                    category.position = int(str(provider_resource["position"]))
+                    category.revision += 1
                 mapping = self._session.scalar(
                     select(GroupPolicyCategoryMapping).where(
                         GroupPolicyCategoryMapping.organization_id == principal.organization_id,
@@ -1598,7 +2065,14 @@ class SqlChangeSetRepository:
                 if rule is not None and (
                     rule.owner_group_id != group_id or rule.name != provider_name
                 ):
-                    raise StaleWriteError
+                    receipt_recovered = result.get("receipt_recovered") is True
+                    if not (
+                        receipt_recovered
+                        and rule.owner_group_id is None
+                        and rule.name == provider_name
+                        and rule.management_state in {"OBSERVED", "UNMANAGED"}
+                    ):
+                        raise StaleWriteError
                 if rule is None:
                     rule = AccessRule(
                         organization_id=principal.organization_id,
@@ -1622,34 +2096,60 @@ class SqlChangeSetRepository:
                 logging_mode = str(payload.get("logging", "NONE")).upper()
                 rule.log_begin = logging_mode == "BEGIN"
                 rule.log_end = logging_mode == "END"
-                rule.intrusion_policy_id = self._native_resource_id_from_payload(
-                    IntrusionPolicy, payload.get("intrusion_policy_id"), principal.organization_id
-                )
-                rule.variable_set_id = self._rule_variable_set_id(
-                    payload, principal.organization_id, rule.manager_id, rule.enabled
-                )
-                rule.file_policy_id = self._native_resource_id_from_payload(
-                    FilePolicy, payload.get("file_policy_id"), principal.organization_id
-                )
+                # These lookups query the session. A newly-created rule must have a
+                # non-null position before any such query can trigger autoflush.
+                with self._session.no_autoflush:
+                    rule.intrusion_policy_id = self._native_resource_id_from_payload(
+                        IntrusionPolicy,
+                        payload.get("intrusion_policy_id"),
+                        principal.organization_id,
+                    )
+                    rule.variable_set_id = self._rule_variable_set_id(
+                        payload, principal.organization_id, rule.manager_id, rule.enabled
+                    )
+                    rule.file_policy_id = self._native_resource_id_from_payload(
+                        FilePolicy, payload.get("file_policy_id"), principal.organization_id
+                    )
                 # The submitted position is the anchor position for BEFORE/AFTER
                 # placement. The provider returns the resource's final position;
                 # persist that value so an append-after operation is not later
                 # reported as drift (for example, anchor 3 becomes new position 4).
                 provider_position = provider_resource.get("position")
-                rule.position = int(
-                    str(
-                        provider_position
-                        if provider_position is not None
-                        else payload.get("position", 0)
+                if provider_position is not None:
+                    rule.position = int(str(provider_position))
+                elif payload.get("position") is not None:
+                    rule.position = int(str(payload["position"]))
+                else:
+                    # FMC/SCC may return a successful create response without ordering
+                    # metadata.  A missing provider position must never become NULL in the
+                    # normalized inventory; use the next local position for append creates.
+                    max_position = self._session.scalar(
+                        select(func.max(AccessRule.position)).where(
+                            AccessRule.organization_id == principal.organization_id,
+                            AccessRule.policy_id == policy.id,
+                            AccessRule.category_id == rule.category_id,
+                            AccessRule.management_state != "MISSING",
+                        )
                     )
-                )
+                    rule.position = int(max_position) + 1 if max_position is not None else 1
                 self._session.flush()
                 self._replace_rule_references(rule, payload, principal.organization_id)
+                if result.get("mutated") is True:
+                    self._shift_application_rule_order_after_create(
+                        principal.organization_id,
+                        policy.manager_id,
+                        policy.id,
+                        rule.category_id,
+                        rule.id,
+                        rule.position,
+                    )
                 rule.application_snapshot = self._rule_application_snapshot(rule)
             elif kind in {"MODIFY_RULE", "MOVE_RULE"}:
                 rule = self._native_resource(
                     AccessRule, UUID(str(payload["rule_id"])), principal.organization_id
                 )
+                old_category_id = rule.category_id
+                old_position = rule.position
                 if payload.get("category_id"):
                     category = self._native_resource(
                         RuleCategory,
@@ -1680,6 +2180,21 @@ class SqlChangeSetRepository:
                     rule.native_id = str(result["provider_resource_id"])
                 if payload.get("position") is not None:
                     rule.position = int(str(payload["position"]))
+                if (
+                    kind == "MOVE_RULE"
+                    and result.get("mutated") is True
+                    and payload.get("position") is not None
+                ):
+                    self._shift_application_rule_order_after_move(
+                        principal.organization_id,
+                        policy.manager_id,
+                        policy.id,
+                        old_category_id,
+                        rule.category_id,
+                        rule.id,
+                        old_position,
+                        rule.position,
+                    )
                 rule.provider_version = str(provider_resource.get("native_version", ""))
                 rule.provider_fingerprint = str(provider_resource["fingerprint"])
                 rule.modified_by_user_id = principal.user_id
@@ -1689,6 +2204,14 @@ class SqlChangeSetRepository:
             elif kind == "DELETE_RULE":
                 rule = self._native_resource(
                     AccessRule, UUID(str(payload["rule_id"])), principal.organization_id
+                )
+                self._shift_application_rule_order_after_delete(
+                    principal.organization_id,
+                    policy.manager_id,
+                    policy.id,
+                    rule.category_id,
+                    rule.id,
+                    rule.position,
                 )
                 self._session.execute(
                     delete(ObjectReference).where(ObjectReference.source_rule_id == rule.id)
@@ -2016,11 +2539,14 @@ class SqlChangeSetRepository:
         self, principal: Principal, group_id: UUID, change_set_id: UUID
     ) -> ChangeSet | None:
         return self._session.scalar(
-            select(ChangeSet).where(
+            select(ChangeSet)
+            .where(
                 ChangeSet.id == change_set_id,
                 ChangeSet.organization_id == principal.organization_id,
                 ChangeSet.acting_group_id == group_id,
             )
+            .with_for_update()
+            .execution_options(populate_existing=True)
         )
 
     def _require_editable(
@@ -2033,7 +2559,16 @@ class SqlChangeSetRepository:
             raise InvalidChangeSetStateError
         return row
 
+    @staticmethod
+    def _clear_approval(row: ChangeSet) -> None:
+        if row.approved_revision is not None:
+            row.approval_invalidated_at = datetime.now(UTC)
+        row.approved_revision = None
+        row.approved_by_user_id = None
+        row.approved_at = None
+
     def _invalidate(self, row: ChangeSet) -> None:
+        self._clear_approval(row)
         row.state = ChangeSetState.DRAFT.value
         row.validation_results = []
         row.provider_revision_snapshot = {}
@@ -2067,6 +2602,7 @@ class SqlChangeSetRepository:
             else None
         )
         group = self._session.get(Group, row.acting_group_id) if row.acting_group_id else None
+        operations = self._operations(row.id)
         return {
             "id": row.id,
             "organization_id": row.organization_id,
@@ -2103,10 +2639,11 @@ class SqlChangeSetRepository:
             "validation_results": row.validation_results,
             "execution_results": row.execution_results,
             "failure_info": row.failure_info,
+            "reconciliation_retry_available": self._reconciliation_retry_available(row, operations),
             "audit_metadata": row.audit_metadata,
             "created_at": row.created_at,
             "updated_at": row.updated_at,
-            "operations": [self._operation_dict(item) for item in self._operations(row.id)],
+            "operations": [self._operation_dict(item) for item in operations],
             "transactions": [
                 self._transaction_dict(item)
                 for item in self._session.scalars(

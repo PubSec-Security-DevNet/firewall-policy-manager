@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """ChangeSet orchestration: authorization, drift checks, and guarded execution."""
 
 # ruff: noqa: PLR0913, PLR0917 -- orchestration retains explicit security context.
@@ -181,6 +183,39 @@ class ChangeSetService:
         payload: dict[str, object],
     ) -> dict[str, object]:
         current = self._load(principal, active_group_id, change_set_id)
+        delete_key = (
+            "object_id"
+            if kind is ChangeOperationKind.DELETE_OBJECT
+            else "rule_id"
+            if kind is ChangeOperationKind.DELETE_RULE
+            else None
+        )
+        if delete_key and payload.get(delete_key):
+            resource_id = UUID(str(payload[delete_key]))
+            pending = (
+                self._repository.object_delete_pending(resource_id, principal.organization_id)
+                if kind is ChangeOperationKind.DELETE_OBJECT
+                else self._repository.rule_delete_pending(resource_id, principal.organization_id)
+            )
+            if pending:
+                # The delegated UI creates an empty ChangeSet before posting its first
+                # operation. Do not leave that transport envelope behind when this delete
+                # is rejected as a duplicate.
+                if current.get("state") == ChangeSetState.DRAFT.value and not current.get(
+                    "operations"
+                ):
+                    self._repository.delete_change_set(
+                        principal, active_group_id, change_set_id
+                    )
+                raise ChangeSetConflictError(
+                    details={
+                        "code": (
+                            "OBJECT_DELETE_ALREADY_PENDING"
+                            if kind is ChangeOperationKind.DELETE_OBJECT
+                            else "RULE_DELETE_ALREADY_PENDING"
+                        )
+                    }
+                )
         self._repository.add_operation(
             principal, active_group_id, change_set_id, kind.value, payload
         )
@@ -218,7 +253,7 @@ class ChangeSetService:
                     UUID(str(resource_id)), principal.organization_id
                 )
             )
-            if current != int(expected) + 1 and management_state != "MANAGED":
+            if current != int(expected) + 1 or management_state != "MANAGED":
                 raise InvalidChangeSetStateError(
                     details={
                         "code": "ROLLBACK_CONFLICT",
@@ -256,13 +291,10 @@ class ChangeSetService:
                             "operation": str(operation["id"]),
                         }
                     )
-                # A CREATE_RULE rollback remains safe after provider synchronization has
-                # advanced the local observation revision.  The resource must still be
-                # manager-owned; revision 1 is only the pre-sync revision and is not a
-                # reliable conflict check after repeated successful syncs.
+                # A compensating delete must not remove a resource modified since creation.
                 if (
                     self._repository.rule_revision(rule_id, principal.organization_id) != 1
-                    and self._repository.rule_management_state(rule_id, principal.organization_id)
+                    or self._repository.rule_management_state(rule_id, principal.organization_id)
                     != "MANAGED"
                 ):
                     raise InvalidChangeSetStateError(
@@ -477,6 +509,14 @@ class ChangeSetService:
         """Approve exactly the validated revision; edits invalidate this evidence."""
         require_action(principal, Action.APPROVE)
         current = self._load_for_approval(principal, active_group_id, change_set_id)
+        if principal.role not in {"admin", "firewall_operator"}:
+            self._authorization.require(
+                DelegatedPolicyContext(
+                    principal, active_group_id, UUID(str(current["access_policy_id"]))
+                ),
+                Action.APPROVE,
+                AuthorizationResource(AuthorizationResourceType.POLICY),
+            )
         if current["state"] != ChangeSetState.READY.value:
             raise InvalidChangeSetStateError
         result = self._repository.approve_change_set(principal, active_group_id, change_set_id)
@@ -497,6 +537,14 @@ class ChangeSetService:
         """Reject a validated ChangeSet without applying any provider operations."""
         require_action(principal, Action.REJECT)
         current = self._load_for_approval(principal, active_group_id, change_set_id)
+        if principal.role not in {"admin", "firewall_operator"}:
+            self._authorization.require(
+                DelegatedPolicyContext(
+                    principal, active_group_id, UUID(str(current["access_policy_id"]))
+                ),
+                Action.APPROVE,
+                AuthorizationResource(AuthorizationResourceType.POLICY),
+            )
         if current["state"] != ChangeSetState.READY.value:
             raise InvalidChangeSetStateError
         result = self._repository.reject_change_set(
@@ -550,16 +598,10 @@ class ChangeSetService:
     ) -> dict[str, object]:
         """Durably claim a validated ChangeSet and publish its security context."""
         change_set = self._load_for_approval(principal, active_group_id, change_set_id)
+        if principal.role not in {"admin", "firewall_operator", "approver"}:
+            self._require_current_operation_authority(principal, active_group_id, change_set)
         executable_states = (
-            {
-                ChangeSetState.APPROVED.value,
-                *(
-                    {ChangeSetState.READY.value}
-                    if change_set.get("approved_revision") is not None
-                    and change_set.get("approval_invalidated_at") is None
-                    else set()
-                ),
-            }
+            {ChangeSetState.APPROVED.value}
             if bool(change_set.get("approval_required"))
             else {ChangeSetState.READY.value, ChangeSetState.APPROVED.value}
         )
@@ -610,6 +652,10 @@ class ChangeSetService:
             ChangeSetState.FAILED.value,
             ChangeSetState.CONFLICT.value,
         }
+        receipt_backed_recovery = change_set["state"] in {
+            ChangeSetState.RECONCILIATION_REQUIRED.value,
+            ChangeSetState.FAILED.value,
+        } and bool(change_set.get("reconciliation_retry_available"))
         transactions = _as_dict_list(change_set.get("transactions", []))
         provider_attempted = bool(transactions)
         retry_safe = not provider_attempted or all(
@@ -622,27 +668,11 @@ class ChangeSetService:
             )
             for transaction in transactions
         )
-        operation_kinds = {
-            str(operation["kind"]) for operation in _as_dict_list(change_set.get("operations", []))
-        }
-        interrupted_idempotent_create = (
-            change_set["state"] == ChangeSetState.FAILED.value
-            and _as_dict(change_set.get("failure_info", {})).get("code")
-            == "CHANGE_SET_EXECUTION_ERROR"
-            and bool(transactions)
-            and operation_kinds
-            <= {
-                ChangeOperationKind.CREATE_OBJECT.value,
-                ChangeOperationKind.ENSURE_RULE_CATEGORY.value,
-                ChangeOperationKind.CREATE_RULE.value,
-            }
-            and all(
-                transaction.get("state") == ProviderTransactionState.EXECUTING.value
-                and not _as_dict_list(transaction.get("operation_results", []))
-                for transaction in transactions
-            )
-        )
-        if interrupted_idempotent_create:
+        if receipt_backed_recovery:
+            # The durable POST receipt proves the provider accepted the create. The
+            # provider adapter will re-read and treat the existing resource as an
+            # idempotent no-op before local ownership is finalized.
+            retryable_state = True
             retry_safe = True
         # A category followed by a rejected rule is recoverable. Re-preflight resolves
         # the now-existing authoritative category, so the successful category operation
@@ -749,6 +779,19 @@ class ChangeSetService:
             else self._repository.claim_queued_execution(principal, active_group_id, change_set_id)
         ):
             raise InvalidChangeSetStateError(details={"code": "CHANGE_SET_ALREADY_CLAIMED"})
+        install_authorizer = getattr(self._repository, "set_execution_authorizer", None)
+        if install_authorizer is not None:
+
+            def authorize_operations() -> None:
+                current = self._load(principal, active_group_id, change_set_id)
+                for operation in _as_dict_list(current["operations"]):
+                    result = self._evaluate_operation(principal, active_group_id, operation)
+                    if result["status"] != OperationStatus.READY.value:
+                        raise ResourceOutOfScopeError(
+                            details={"code": "EXECUTION_REAUTHORIZATION_FAILED"}
+                        )
+
+            install_authorizer(principal, active_group_id, change_set_id, authorize_operations)
         change_set = self._load(principal, active_group_id, change_set_id)
         if (
             change_set["state"]
@@ -761,7 +804,13 @@ class ChangeSetService:
                     "revalidation_required": True,
                 }
             )
-        conflicts = self._revision_conflicts(change_set, principal.organization_id)
+        operations = _as_dict_list(change_set["operations"])
+        receipt_backed_recovery = bool(change_set.get("reconciliation_retry_available"))
+        conflicts = self._revision_conflicts(
+            change_set,
+            principal.organization_id,
+            skip_create_only=receipt_backed_recovery,
+        )
         if conflicts:
             self._repository.set_execution_state(
                 principal,
@@ -781,7 +830,6 @@ class ChangeSetService:
             raise ChangeSetConflictError(details={"conflicts": conflicts})
 
         # Grants and every element are re-evaluated immediately before the first mutation.
-        operations = _as_dict_list(change_set["operations"])
         authorization_results = [
             self._evaluate_operation(principal, active_group_id, item) for item in operations
         ]
@@ -849,6 +897,25 @@ class ChangeSetService:
             provider_operations = self._repository.prepare_provider_operations(
                 operations, principal.organization_id
             )
+            if receipt_backed_recovery:
+                provider_operations = [
+                    {
+                        **operation,
+                        "provider_payload": {
+                            **_as_dict(operation["provider_payload"]),
+                            "expected_policy_version": None,
+                            "expected_category_version": None,
+                        },
+                    }
+                    if str(operation.get("kind"))
+                    in {
+                        ChangeOperationKind.CREATE_RULE.value,
+                        ChangeOperationKind.CREATE_OBJECT.value,
+                        ChangeOperationKind.ENSURE_RULE_CATEGORY.value,
+                    }
+                    else operation
+                    for operation in provider_operations
+                ]
             if targets[manager_id].get("is_mock") is not True:
                 pending = self._repository.upsert_provider_transaction(
                     change_set,
@@ -870,6 +937,10 @@ class ChangeSetService:
                     },
                 )
                 self._repository.commit_provider_transaction_intent()
+                provider_key = targets[manager_id].get("provider_connection_id") or manager_id
+                self._repository.lock_provider_mutations(
+                    principal.organization_id, UUID(str(provider_key))
+                )
                 current_target = self._repository.manager_execution_target(
                     manager_id, principal.organization_id
                 )
@@ -881,15 +952,22 @@ class ChangeSetService:
                 ):
                     raise ProductionWriteDisabledError
                 targets[manager_id] = current_target
+                # Release target-row locks before provider reads/HTTP. The intent guard
+                # checks current authority again under short-lived locks at dispatch.
+                self._repository.commit_provider_transaction_intent()
             outcome = await self._executor.execute(
                 targets[manager_id], change_set_id, manager_id, provider_operations
             )
+            operation_results = [
+                {**result, "receipt_recovered": True} if receipt_backed_recovery else result
+                for result in outcome.operation_results
+            ]
             self._repository.reconcile_successful_operations(
                 change_set,
                 principal,
                 active_group_id,
                 operations,
-                outcome.operation_results,
+                operation_results,
             )
             if targets[manager_id].get("is_mock") is not True:
                 self._repository.record_successful_write_evidence(
@@ -897,13 +975,13 @@ class ChangeSetService:
                     principal,
                     manager_id,
                     operations,
-                    outcome.operation_results,
+                    operation_results,
                 )
             transaction = self._repository.upsert_provider_transaction(
                 change_set,
                 manager_id,
                 outcome.state.value,
-                outcome.operation_results,
+                operation_results,
                 outcome.failure_info,
                 outcome.reconciliation_required,
                 outcome.external_operation_id,
@@ -922,7 +1000,7 @@ class ChangeSetService:
                 },
             )
             operation_kinds = {str(item["id"]): str(item["kind"]) for item in operations}
-            for operation_result in outcome.operation_results:
+            for operation_result in operation_results:
                 operation_id = str(operation_result.get("operation_id", ""))
                 kind = operation_kinds.get(operation_id, "UNKNOWN")
                 lifecycle_event = {
@@ -976,6 +1054,27 @@ class ChangeSetService:
         )
         self._audit_for(change_set, principal, "change_set_execution", overall.value)
         return result
+
+    def _require_current_operation_authority(
+        self,
+        principal: Principal,
+        active_group_id: UUID,
+        change_set: dict[str, object],
+    ) -> None:
+        """Require the existing operation grants before automatic submission."""
+        operations = _as_dict_list(change_set.get("operations"))
+        if not operations:
+            raise ResourceOutOfScopeError(details={"code": "CHANGE_SET_SUBMISSION_UNAUTHORIZED"})
+        denied = [
+            result
+            for operation in operations
+            if (result := self._evaluate_operation(principal, active_group_id, operation))["status"]
+            != OperationStatus.READY.value
+        ]
+        if denied:
+            raise ResourceOutOfScopeError(
+                details={"code": "CHANGE_SET_SUBMISSION_UNAUTHORIZED", "operations": denied}
+            )
 
     def cancel(
         self, principal: Principal, active_group_id: UUID, change_set_id: UUID
@@ -1092,7 +1191,13 @@ class ChangeSetService:
             ChangeOperationKind.MODIFY_OBJECT,
             ChangeOperationKind.DELETE_OBJECT,
         }:
-            resolution = self._evaluate_object(context, kind, payload, checks)
+            resolution = self._evaluate_object(
+                context,
+                kind,
+                payload,
+                checks,
+                UUID(str(operation["change_set_id"])),
+            )
         elif kind is ChangeOperationKind.ENSURE_RULE_CATEGORY:
             resolution = self._evaluate_category(context, kind, checks)
         else:
@@ -1107,7 +1212,13 @@ class ChangeSetService:
                     AuthorizationResource(AuthorizationResourceType.POLICY, policy_id),
                 ),
             )
-            resolution = self._evaluate_rule(context, kind, payload, checks)
+            resolution = self._evaluate_rule(
+                context,
+                kind,
+                payload,
+                checks,
+                UUID(str(operation["change_set_id"])),
+            )
         expected = self._repository.current_revision_snapshot(operation, principal.organization_id)
         valid = bool(checks) and all(bool(item["allowed"]) for item in checks)
         if resolution and resolution.get("kind") in {
@@ -1129,6 +1240,7 @@ class ChangeSetService:
         kind: ChangeOperationKind,
         payload: dict[str, object],
         checks: list[dict[str, object]],
+        change_set_id: UUID | None = None,
     ) -> dict[str, object]:
         if kind in {
             ChangeOperationKind.MODIFY_RULE,
@@ -1152,6 +1264,21 @@ class ChangeSetService:
                     AuthorizationResource(AuthorizationResourceType.RULE, rule_id),
                 ),
             )
+            if kind is ChangeOperationKind.DELETE_RULE and self._repository.rule_delete_pending(
+                rule_id,
+                context.principal.organization_id,
+                exclude_change_set_id=change_set_id,
+            ):
+                checks.append(
+                    {
+                        "operation": kind.value,
+                        "element_type": "rule_delete_reservation",
+                        "element": "NOT_DISCLOSED",
+                        "permission": "one_pending_delete_per_rule",
+                        "allowed": False,
+                        "reason": "RULE_DELETE_ALREADY_PENDING",
+                    }
+                )
         if kind is ChangeOperationKind.DELETE_RULE:
             return {}
         resolution: dict[str, object] = {}
@@ -1333,9 +1460,12 @@ class ChangeSetService:
         kind: ChangeOperationKind,
         payload: dict[str, object],
         checks: list[dict[str, object]],
+        change_set_id: UUID | None = None,
     ) -> dict[str, object]:
         if kind is not ChangeOperationKind.CREATE_OBJECT:
-            return self._evaluate_object_mutation(context, kind, payload, checks)
+            return self._evaluate_object_mutation(
+                context, kind, payload, checks, change_set_id
+            )
         object_type = str(payload.get("object_type", ""))
         requested_name = str(payload.get("name", ""))
         value = str(payload.get("value", ""))
@@ -1556,6 +1686,7 @@ class ChangeSetService:
         kind: ChangeOperationKind,
         payload: dict[str, object],
         checks: list[dict[str, object]],
+        change_set_id: UUID | None = None,
     ) -> dict[str, object]:
         object_id = self._required_uuid(payload, "object_id")
         action = Action.MODIFY if kind is ChangeOperationKind.MODIFY_OBJECT else Action.DELETE
@@ -1604,6 +1735,21 @@ class ChangeSetService:
             "object_type": current["object_type"],
         }
         if kind is ChangeOperationKind.DELETE_OBJECT:
+            if self._repository.object_delete_pending(
+                object_id,
+                context.principal.organization_id,
+                exclude_change_set_id=change_set_id,
+            ):
+                checks.append(
+                    {
+                        "operation": kind.value,
+                        "element_type": "object_delete_reservation",
+                        "element": "NOT_DISCLOSED",
+                        "permission": "one_pending_delete_per_object",
+                        "allowed": False,
+                        "reason": "OBJECT_DELETE_ALREADY_PENDING",
+                    }
+                )
             return resolution
         try:
             normalized = self._naming.normalize_value(object_type, str(payload.get("value", "")))
@@ -1733,18 +1879,34 @@ class ChangeSetService:
         return {"kind": "NEW_CATEGORY_REQUIRED", "provider_name": provider_name}
 
     def _revision_conflicts(
-        self, change_set: dict[str, object], organization_id: UUID
+        self,
+        change_set: dict[str, object],
+        organization_id: UUID,
+        *,
+        skip_create_only: bool = False,
     ) -> list[dict[str, object]]:
         conflicts: list[dict[str, object]] = []
         for operation in _as_dict_list(change_set["operations"]):
+            operation_kind = str(operation.get("kind"))
             # Create operations do not overwrite an existing provider resource. A
-            # provider inventory revision may advance while approval is pending,
-            # but that must not force a user to manually retry a create-only request.
-            if str(operation.get("kind")) == ChangeOperationKind.CREATE_OBJECT.value:
+            # provider inventory revision may advance while another application
+            # changeset is creating a different object, so that inventory token must
+            # not force a user to manually retry this create-only request. The
+            # provider still enforces name/value uniqueness during the actual create.
+            if skip_create_only and operation_kind in {
+                ChangeOperationKind.CREATE_OBJECT.value,
+                ChangeOperationKind.CREATE_RULE.value,
+                ChangeOperationKind.ENSURE_RULE_CATEGORY.value,
+            }:
                 continue
             expected = cast("dict[str, str]", _as_dict(operation["expected_revisions"]))
             current = self._repository.current_revision_snapshot(operation, organization_id)
             for resource, expected_revision in expected.items():
+                if (
+                    operation_kind == ChangeOperationKind.CREATE_OBJECT.value
+                    and resource == "object_inventory"
+                ):
+                    continue
                 current_revision = current.get(resource, "MISSING")
                 if current_revision != expected_revision:
                     conflicts.append(

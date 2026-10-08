@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Durable deployment planning and approval; execution remains provider-job based."""
 
 from datetime import UTC, datetime
@@ -6,10 +8,22 @@ from uuid import UUID, uuid4
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from firewall_manager.application.authorization import require_action
+from firewall_manager.application.authorization import AuthorizationService, require_action
 from firewall_manager.application.errors import InvalidChangeSetStateError, ResourceOutOfScopeError
-from firewall_manager.domain.models import Action, DeploymentState, Principal
+from firewall_manager.application.mutation_guard import mutation_context
+from firewall_manager.application.naming import provider_native_id_equal
+from firewall_manager.domain.models import (
+    Action,
+    AuthorizationResource,
+    AuthorizationResourceType,
+    DelegatedPolicyContext,
+    DeploymentState,
+    Principal,
+)
+from firewall_manager.persistence.changesets import SqlChangeSetRepository
+from firewall_manager.persistence.legacy_ownership import pending_review
 from firewall_manager.persistence.models import (
+    AccessPolicy,
     AccessRule,
     AuditEvent,
     ChangeSet,
@@ -19,18 +33,229 @@ from firewall_manager.persistence.models import (
     FirewallManager,
     FirewallObject,
     ProviderConnection,
+    ProviderDomain,
     ProviderTransaction,
+    User,
 )
+from firewall_manager.persistence.repositories import SqlAuthorizationRepository
+
+
+def is_definitive_provider_rejection(failure_info: object) -> bool:
+    """Return whether a provider response proves no deployment job was accepted."""
+    if not isinstance(failure_info, dict):
+        return False
+    if (
+        failure_info.get("provider_code") != "PROVIDER_VALIDATION_ERROR"
+        and failure_info.get("code") != "PROVIDER_VALIDATION_ERROR"
+    ):
+        return False
+    try:
+        status = int(str(failure_info.get("provider_status", "")))
+    except (TypeError, ValueError):
+        return False
+    return status in {400, 422}
+
+
+def resolve_device_names(devices: list[Device], device_ids: set[str]) -> dict[str, str]:
+    """Resolve deployment IDs through both local and provider-native device aliases."""
+    aliases: dict[str, str] = {}
+    for device in devices:
+        name = str(device.name)
+        candidates = {str(device.native_id)}
+        candidates.update(
+            str(value)
+            for key in ("provider_native_id", "fmc_native_id")
+            if (value := device.native_metadata.get(key))
+        )
+        for candidate in candidates:
+            aliases[candidate.casefold()] = name
+    return {
+        device_id: aliases[device_id.casefold()]
+        for device_id in device_ids
+        if device_id.casefold() in aliases
+    }
 
 
 class DeploymentService:
     def __init__(self, session: Session) -> None:
         self._session = session
 
+    def authorize_execution(self, deployment_id: UUID) -> None:  # noqa: PLR0912 -- independent authority checks
+        """Check current original actor, approval, policy and connector authority at dispatch."""
+        row = self._session.get(Deployment, deployment_id, populate_existing=True)
+        if row is None:
+            raise ResourceOutOfScopeError
+        connection = self._session.get(
+            ProviderConnection, row.provider_connection_id, populate_existing=True
+        )
+        if (
+            connection is None
+            or not connection.write_enabled
+            or connection.lifecycle != "ACTIVE"
+            or connection.deployment_paused
+            or connection.connection_status != "CONNECTED"
+            or pending_review(self._session, row.organization_id)
+        ):
+            raise ResourceOutOfScopeError
+        requester = row.rollback_requested_by_user_id or row.requested_by_user_id
+        if requester is not None:
+            user = self._session.get(User, requester, populate_existing=True)
+            if user is None or not user.is_active or user.organization_id != row.organization_id:
+                raise ResourceOutOfScopeError
+            require_action(
+                Principal(user.id, user.organization_id, user.email, user.role), Action.DEPLOY
+            )
+        if row.approved_by_user_id is not None:
+            approver = self._session.get(User, row.approved_by_user_id, populate_existing=True)
+            if (
+                approver is None
+                or not approver.is_active
+                or approver.organization_id != row.organization_id
+                or row.approved_by_user_id == row.requested_by_user_id
+                or row.plan_snapshot.get("approved_plan_revision") != row.revision
+            ):
+                raise ResourceOutOfScopeError
+            require_action(
+                Principal(approver.id, approver.organization_id, approver.email, approver.role),
+                Action.APPROVE,
+            )
+        if not row.included_change_set_ids:
+            raise ResourceOutOfScopeError
+        auth = AuthorizationService(SqlAuthorizationRepository(self._session))
+        for change_id in row.included_change_set_ids:
+            change = self._session.get(ChangeSet, UUID(str(change_id)), populate_existing=True)
+            if (
+                change is None
+                or change.organization_id != row.organization_id
+                or change.state != "SUCCEEDED"
+                or change.acting_group_id is None
+                or change.access_policy_id is None
+            ):
+                raise ResourceOutOfScopeError
+            actor = self._session.get(User, change.principal_id, populate_existing=True)
+            if actor is None or not actor.is_active or actor.organization_id != row.organization_id:
+                raise ResourceOutOfScopeError
+            principal = Principal(actor.id, actor.organization_id, actor.email, actor.role)
+            context = DelegatedPolicyContext(
+                principal, change.acting_group_id, change.access_policy_id
+            )
+            # Connector deployment is an application/admin operation. The delegated actor
+            # must still be active and retain policy visibility, but no separate submission
+            # or deployment grant is required for a scheduled batch.
+            if not auth.authorize(
+                context,
+                Action.READ,
+                AuthorizationResource(AuthorizationResourceType.POLICY, change.access_policy_id),
+            ).allowed:
+                raise ResourceOutOfScopeError
+            SqlChangeSetRepository(self._session)._require_current_approval(
+                change, revision_offset=3
+            )
+            policy = self._session.scalar(
+                select(AccessPolicy)
+                .where(AccessPolicy.id == change.access_policy_id)
+                .execution_options(populate_existing=True)
+            )
+            if policy is None or policy.manager_id != row.manager_id:
+                raise ResourceOutOfScopeError
+            approved = row.plan_snapshot.get("approved_changes", {})
+            if (
+                row.approved_by_user_id is not None
+                and approved.get(str(change.id)) != change.revision
+            ):
+                raise ResourceOutOfScopeError
+
+    def dispatch_scope(self, deployment_id: UUID) -> list[dict[str, object]]:
+        """Build targets from current explicit policy assignments, never an entire domain."""
+        self.authorize_execution(deployment_id)
+        row = self._session.get(Deployment, deployment_id)
+        if row is None:
+            raise ResourceOutOfScopeError
+        grouped: dict[UUID, dict[str, object]] = {}
+        for change_id in row.included_change_set_ids:
+            change = self._session.get(ChangeSet, UUID(str(change_id)))
+            if change is None:
+                raise ResourceOutOfScopeError
+            policy = self._session.get(AccessPolicy, change.access_policy_id)
+            if policy is None:
+                raise ResourceOutOfScopeError
+            domain = self._session.get(ProviderDomain, policy.domain_id)
+            if domain is None:
+                raise ResourceOutOfScopeError
+            work = grouped.setdefault(
+                domain.id,
+                {
+                    "domain_id": domain.native_id,
+                    "policy_ids": [],
+                    "device_ids": [],
+                    "expected_mutations": [],
+                    "actors": [],
+                },
+            )
+            work["policy_ids"].append(policy.native_id)
+            work["expected_mutations"].extend((change.mutation_intent or {}).get("entries", []))
+            work["actors"].append(
+                {
+                    "user_id": str(change.principal_id),
+                    "group_id": str(change.acting_group_id),
+                    "policy_id": str(change.access_policy_id),
+                    "revision": change.revision,
+                    "approved_revision": change.approved_revision,
+                }
+            )
+            devices = self._session.scalars(
+                select(Device)
+                .where(
+                    Device.organization_id == row.organization_id,
+                    Device.manager_id == policy.manager_id,
+                    Device.domain_id == domain.id,
+                    Device.management_state != "MISSING",
+                )
+                .execution_options(populate_existing=True)
+            ).all()
+            work["device_ids"].extend(
+                device.native_id
+                for device in devices
+                if provider_native_id_equal(
+                    device.native_metadata.get("access_policy_id"), policy.native_id
+                )
+            )
+        allowed = {device for work in grouped.values() for device in work["device_ids"]}
+        if not allowed or (
+            row.target_device_ids and not set(row.target_device_ids).issubset(allowed)
+        ):
+            raise ResourceOutOfScopeError(details={"code": "DEPLOYMENT_TARGET_UNAUTHORIZED"})
+        for work in grouped.values():
+            work["device_ids"] = sorted(
+                set(work["device_ids"]) & (set(row.target_device_ids) or allowed)
+            )
+        return [work for work in grouped.values() if work["device_ids"]]
+
+    def authorize_dispatch(self, deployment_id: UUID) -> None:
+        """Revalidate the exact scope used for preflight at the durable intent boundary."""
+        scopes = self.dispatch_scope(deployment_id)
+        context = mutation_context.get() or {}
+        row = self._session.get(Deployment, deployment_id)
+        connection = self._session.get(ProviderConnection, row.provider_connection_id)
+        if str(connection.id) != context.get(
+            "provider_connection_id"
+        ) or connection.revision != context.get("connection_revision"):
+            raise ResourceOutOfScopeError(details={"code": "PROVIDER_CONTEXT_CHANGED"})
+        prepared = context.get("scope")
+        if prepared is not None and prepared not in scopes:
+            raise ResourceOutOfScopeError(details={"code": "DEPLOYMENT_SCOPE_CHANGED"})
+        rollback = context.get("rollback_devices")
+        if rollback is not None:
+            allowed = {device for scope in scopes for device in scope["device_ids"]}
+            if not rollback or not set(rollback).issubset(allowed):
+                raise ResourceOutOfScopeError(details={"code": "DEPLOYMENT_TARGET_UNAUTHORIZED"})
+
     def plan(
         self, principal: Principal, change_set_id: UUID, device_ids: list[str]
     ) -> dict[str, object]:
         require_action(principal, Action.DEPLOY)
+        if pending_review(self._session, principal.organization_id):
+            raise InvalidChangeSetStateError(details={"code": "LEGACY_AUTHORITY_REVIEW_REQUIRED"})
         change_set = self._session.scalar(
             select(ChangeSet).where(
                 ChangeSet.id == change_set_id,
@@ -101,7 +326,7 @@ class DeploymentService:
         self, principal: Principal, connection_id: UUID, force: bool = False
     ) -> dict[str, object]:
         """Create one batch for all staged changes not already in an active deployment."""
-        if principal.role != "admin":
+        if principal.role != "admin" or pending_review(self._session, principal.organization_id):
             raise ResourceOutOfScopeError
         connection = self._session.scalar(
             select(ProviderConnection)
@@ -391,6 +616,14 @@ class DeploymentService:
             DeploymentState.RECONCILIATION_REQUIRED.value,
         ):
             raise InvalidChangeSetStateError(details={"code": "DEPLOYMENT_NOT_RETRYABLE"})
+        definitive_rejection = is_definitive_provider_rejection(failed.failure_info)
+        if (
+            (failed.state != DeploymentState.FAILED.value and not definitive_rejection)
+            or failed.external_operation_id
+            or failed.plan_snapshot.get("provider_jobs")
+            or (failed.plan_snapshot.get("start_intent") and not definitive_rejection)
+        ):
+            raise InvalidChangeSetStateError(details={"code": "DEPLOYMENT_RECONCILIATION_REQUIRED"})
         if failed.provider_connection_id is None:
             raise InvalidChangeSetStateError(details={"code": "DEPLOYMENT_CONNECTOR_MISSING"})
         connection = self._session.get(ProviderConnection, failed.provider_connection_id)
@@ -400,7 +633,15 @@ class DeploymentService:
         failed.external_operation_id = None
         failed.failure_info = {}
         failed.device_results = []
-        failed.plan_snapshot = {**failed.plan_snapshot, "retry": True}
+        if definitive_rejection:
+            # HTTP 400/422 is a durable non-acceptance, not an uncertain request.
+            # Drop only that rejected deployment intent so a fresh request can be fenced.
+            failed.mutation_intent = {}
+        failed.plan_snapshot = {
+            key: value
+            for key, value in {**failed.plan_snapshot, "retry": True}.items()
+            if key != "start_intent"
+        }
         connection.deployment_status = "QUEUED"
         self._session.flush()
         return self._view(failed)
@@ -462,6 +703,18 @@ class DeploymentService:
         if row.state != DeploymentState.APPROVAL_REQUIRED.value:
             raise InvalidChangeSetStateError
         row.approved_by_user_id = principal.user_id
+        row.plan_snapshot = {
+            **row.plan_snapshot,
+            "approved_plan_revision": row.revision,
+            "approved_changes": {
+                str(change.id): change.revision
+                for change in self._session.scalars(
+                    select(ChangeSet).where(
+                        ChangeSet.id.in_([UUID(str(i)) for i in row.included_change_set_ids])
+                    )
+                )
+            },
+        }
         row.state = DeploymentState.READY.value
         self._session.add(
             AuditEvent(
@@ -481,10 +734,15 @@ class DeploymentService:
     def _view(self, row: Deployment) -> dict[str, object]:
         rollback_eligible, rollback_reason = self._rollback_eligibility(row)
         device_ids = self._device_ids(row)
-        device_names = dict(
-            self._session.execute(
-                select(Device.native_id, Device.name).where(Device.native_id.in_(device_ids))
-            ).all()
+        devices = self._session.scalars(
+            select(Device).where(
+                Device.organization_id == row.organization_id,
+                Device.manager_id == row.manager_id,
+            )
+        ).all()
+        device_names = resolve_device_names(
+            devices,
+            device_ids,
         )
         return {
             "id": row.id,
@@ -517,9 +775,13 @@ class DeploymentService:
             "updated_at": row.updated_at,
         }
 
-    def _rollback_eligibility(self, row: Deployment) -> tuple[bool, str | None]:
+    def _rollback_eligibility(  # noqa: PLR0911 -- explicit eligibility reasons
+        self, row: Deployment
+    ) -> tuple[bool, str | None]:
         if row.state != DeploymentState.DEPLOYED.value:
             return False, "Deployment is not complete."
+        if not row.external_operation_id:
+            return False, "The provider deployment task is unavailable."
         operations = self._session.scalars(
             select(ChangeSetOperation).where(
                 ChangeSetOperation.change_set_id.in_(

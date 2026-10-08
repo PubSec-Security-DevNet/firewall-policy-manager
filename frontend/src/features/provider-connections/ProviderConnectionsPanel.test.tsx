@@ -1,3 +1,5 @@
+// Copyright 2026 Cisco Systems, Inc.
+// SPDX-License-Identifier: Apache-2.0
 import { MantineProvider } from '@mantine/core';
 import axe from 'axe-core';
 import { render, screen, waitFor } from '@testing-library/react';

@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Provider transaction adapters used by the ChangeSet application service."""
 
 from collections.abc import Callable
@@ -12,6 +14,7 @@ from firewall_manager.application.errors import (
     ProviderContractError,
     ProviderUnavailableError,
 )
+from firewall_manager.application.mutation_guard import current_mutation_guard, mutation_context
 from firewall_manager.application.ports import ConnectionTestProvider
 from firewall_manager.domain.models import ProviderKind, ProviderTransactionState
 
@@ -112,7 +115,11 @@ class ProviderDeploymentAdapter(Protocol):
     ) -> dict[str, object]: ...
 
     async def start_deployment(
-        self, domain_id: str, policy_ids: list[str], device_ids: list[str]
+        self,
+        domain_id: str,
+        policy_ids: list[str],
+        device_ids: list[str],
+        expected_mutations: list[dict[str, object]] | None = None,
     ) -> dict[str, object]: ...
 
     async def deployment_status(self, external_operation_id: str) -> dict[str, object]: ...
@@ -159,6 +166,17 @@ class HttpMockTransactionExecutor:
             raise ProviderContractError(details={"code": "MOCK_PROVIDER_URL_MISSING"})
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
+                guard = current_mutation_guard.get()
+                if guard is not None:
+                    guard.before_mutation(
+                        "POST",
+                        "/api/v1/transactions",
+                        {
+                            "change_set_id": str(change_set_id),
+                            "manager_id": str(manager_id),
+                            "operations": operations,
+                        },
+                    )
                 response = await client.post(
                     f"{base_url.rstrip('/')}/api/v1/transactions",
                     json={
@@ -167,6 +185,8 @@ class HttpMockTransactionExecutor:
                         "operations": operations,
                     },
                 )
+                if guard is not None:
+                    guard.after_mutation({"status": response.status_code, "body": response.json()})
                 response.raise_for_status()
                 return ProviderExecutionResult.from_dict(response.json())
         except httpx.HTTPStatusError as exc:
@@ -223,7 +243,16 @@ class GuardedProviderTransactionExecutor:
             for key, value in cast("dict[object, object]", raw_capabilities).items()
         }
         provider = self._provider_factory(target, credential, capabilities)
+        token = mutation_context.set(
+            {
+                "provider_connection_id": str(connection_id),
+                "connection_revision": target.get("connection_revision"),
+                "provider_endpoint": target.get("base_endpoint"),
+                "provider_region": target.get("region"),
+            }
+        )
         try:
             return await provider.execute_transaction(change_set_id, manager_id, operations)
         finally:
+            mutation_context.reset(token)
             await provider.aclose()

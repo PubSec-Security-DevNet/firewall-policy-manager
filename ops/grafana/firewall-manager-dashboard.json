@@ -15,8 +15,11 @@
     },
     {
       "type": "timeseries",
-      "title": "Background jobs",
-      "targets": [{"expr": "sum by (job, outcome) (rate(firewall_manager_jobs_total[5m]))"}]
+      "title": "Worker and scheduler health",
+      "targets": [
+        {"expr": "firewall_manager_worker_healthy", "legendFormat": "worker"},
+        {"expr": "firewall_manager_scheduler_healthy", "legendFormat": "scheduler"}
+      ]
     }
   ]
 }

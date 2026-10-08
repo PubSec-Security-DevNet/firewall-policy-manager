@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Runtime configuration safety behavior."""
 
 import base64
@@ -8,6 +10,7 @@ import pytest
 from pydantic import ValidationError
 
 from firewall_manager import main
+from firewall_manager.api.schemas import InitialSetupTestRequest
 from firewall_manager.config import Settings
 from firewall_manager.domain.models import (
     CapabilityStatus,
@@ -57,13 +60,81 @@ def test_audit_retention_subtracts_calendar_months() -> None:
     )
 
 
+def test_initial_setup_oidc_test_request_preserves_organization_name() -> None:
+    request = InitialSetupTestRequest(
+        organization_name="Example Organization",
+        admin_email="admin@example.test",
+        admin_display_name="Example Admin",
+        provider_id="primary",
+        provider_kind="generic",
+        provider_display_name="Example OIDC",
+        provider_issuer_url="https://issuer.example.test",
+        provider_client_id="client-id",
+        provider_client_secret="client-secret",  # noqa: S106
+    )
+
+    assert request.organization_name == "Example Organization"
+
+
 def test_production_requires_a_valid_external_secret_store_key() -> None:
     without_key = _production_values()
     without_key["APP_SECRET_KEY"] = None
-    with pytest.raises(ValidationError, match="APP_SECRET_KEY is required"):
+    with pytest.raises(ValidationError, match="APP_SECRET_KEY or APP_SECRET_KEY_FILE is required"):
         Settings.model_validate(without_key)
     with pytest.raises(ValidationError, match="base64-encoded 32-byte key"):
         Settings.model_validate({**_production_values(), "APP_SECRET_KEY": "not-a-key"})
+
+
+def test_production_builds_database_and_redis_urls_from_secret_files(tmp_path) -> None:
+    database_password = tmp_path / "postgres_password"
+    redis_password = tmp_path / "redis_password"
+    database_password.write_text("db+/password\n", encoding="utf-8")
+    redis_password.write_text("redis+/password\n", encoding="utf-8")
+    values = _production_values()
+    values.update(
+        {
+            "database_url": "",
+            "database_password_file": str(database_password),
+            "database_host": "db",
+            "database_name": "firewall_manager",
+            "database_user": "firewall",
+            "redis_url": "",
+            "redis_password_file": str(redis_password),
+            "redis_host": "redis",
+        }
+    )
+
+    settings = Settings.model_validate(values)
+
+    assert settings.database_url == (
+        "postgresql+psycopg://firewall:db%2B%2Fpassword@db:5432/firewall_manager"
+    )
+    assert settings.redis_url == "redis://:redis%2B%2Fpassword@redis:6379/0"
+
+
+def test_production_loads_master_key_from_secret_file(tmp_path) -> None:
+    encoded_key = base64.b64encode(os.urandom(32)).decode()
+    master_key = tmp_path / "app_secret_key"
+    master_key.write_text(f"{encoded_key}\n", encoding="utf-8")
+    values = _production_values()
+    values["APP_SECRET_KEY"] = None
+    values["APP_SECRET_KEY_FILE"] = str(master_key)
+
+    settings = Settings.model_validate(values)
+
+    assert settings.secret_store_master_key is not None
+    assert settings.secret_store_master_key.get_secret_value() == encoded_key
+
+
+def test_oidc_bootstrap_catalog_can_be_loaded_from_a_secret_file(tmp_path) -> None:
+    catalog = tmp_path / "oidc.json"
+    catalog.write_text(str(_production_values()["oidc_providers"]), encoding="utf-8")
+
+    settings = Settings.model_validate(
+        {**_production_values(), "oidc_providers": "[]", "oidc_providers_file": str(catalog)}
+    )
+
+    assert settings.oidc_provider_configs()[0].id == "entra-main"
 
 
 def test_development_identity_endpoint_is_not_registered_when_disabled(

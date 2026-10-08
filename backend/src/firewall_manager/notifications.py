@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Durable SMTP notification delivery for approval workflow events."""
 
 import logging

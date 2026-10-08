@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Authenticated encrypted database SecretStore for local/container deployments."""
 
 import base64

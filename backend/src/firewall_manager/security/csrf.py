@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Double-submit CSRF protection for cookie-authenticated state changes."""
 
 import hmac

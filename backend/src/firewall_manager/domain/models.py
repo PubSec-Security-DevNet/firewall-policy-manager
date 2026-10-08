@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Provider-neutral domain types shared across application services."""
 
 from dataclasses import dataclass, field
@@ -125,7 +127,7 @@ class SyncStatus(StrEnum):
 
 
 class Action(StrEnum):
-    """Canonical authorization actions from ``config/permissions.yaml``."""
+    """Canonical authorization actions enforced by the application."""
 
     READ = "read"
     USE = "use"
@@ -133,7 +135,6 @@ class Action(StrEnum):
     MODIFY = "modify"
     DELETE = "delete"
     REORDER = "reorder"
-    SUBMIT = "submit"
     APPROVE = "approve"
     REJECT = "reject"
     DEPLOY = "deploy"
@@ -194,9 +195,7 @@ class PolicyCapability(StrEnum):
     REORDER_RULE = "reorder_rule"
     MODIFY_OBJECT = "modify_object"
     DELETE_OBJECT = "delete_object"
-    SUBMIT = "submit"
     APPROVE = "approve"
-    DEPLOY = "deploy"
 
 
 class AuthorizationReason(StrEnum):

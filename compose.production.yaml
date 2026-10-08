@@ -1,0 +1,301 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
+name: firewall-manager-production
+
+x-logging: &production-logging
+  driver: json-file
+  options: {max-size: "10m", max-file: "5"}
+
+x-backend-environment: &backend-environment
+  APP_ENVIRONMENT: production
+  APP_LOG_LEVEL: ${APP_LOG_LEVEL:-INFO}
+  DATABASE_HOST: db
+  DATABASE_PORT: "5432"
+  DATABASE_NAME: ${POSTGRES_DB:-firewall_manager}
+  DATABASE_USER: ${POSTGRES_USER:-firewall}
+  DATABASE_PASSWORD_FILE: /run/secrets/postgres_password
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  REDIS_PASSWORD_FILE: /run/secrets/redis_password
+  FMC_BASE_URL: ${FMC_BASE_URL:-https://fmc.invalid}
+  SCC_BASE_URL: ${SCC_BASE_URL:-https://scc.invalid}
+  CORS_ORIGINS: '["${APP_PUBLIC_URL:?Set APP_PUBLIC_URL}"]'
+  DEV_AUTH_ENABLED: "false"
+  SECRET_STORE_KEY_VERSION: ${SECRET_STORE_KEY_VERSION:-1}
+  SECRET_STORE_PROVIDER: environment
+  APP_SECRET_KEY_FILE: /run/secrets/app_secret_key
+  APP_PUBLIC_URL: ${APP_PUBLIC_URL:?Set APP_PUBLIC_URL}
+  ADMINISTRATOR_EMAIL: ${ADMINISTRATOR_EMAIL:-}
+  AUTH_SESSION_IDLE_MINUTES: ${AUTH_SESSION_IDLE_MINUTES:-60}
+  AUTH_SESSION_ABSOLUTE_HOURS: ${AUTH_SESSION_ABSOLUTE_HOURS:-12}
+  AUDIT_RETENTION_MONTHS: ${AUDIT_RETENTION_MONTHS:-6}
+  SCHEDULER_INTERVAL_SECONDS: ${SCHEDULER_INTERVAL_SECONDS:-30}
+  SMTP_HOST: ${SMTP_HOST:-}
+  SMTP_PORT: ${SMTP_PORT:-587}
+  SMTP_USERNAME: ${SMTP_USERNAME:-}
+  SMTP_FROM: ${SMTP_FROM:-}
+  SMTP_USE_STARTTLS: ${SMTP_USE_STARTTLS:-true}
+  SMTP_USE_SSL: ${SMTP_USE_SSL:-false}
+  SMTP_TIMEOUT_SECONDS: ${SMTP_TIMEOUT_SECONDS:-15}
+  API_RATE_LIMIT_REQUESTS: ${API_RATE_LIMIT_REQUESTS:-120}
+  API_RATE_LIMIT_WINDOW_SECONDS: ${API_RATE_LIMIT_WINDOW_SECONDS:-60}
+
+x-backend-service: &backend-service
+  image: firewall-manager-backend:${FIREWALL_MANAGER_IMAGE_TAG:-local}
+  build: {context: ./backend, dockerfile: Dockerfile}
+  environment: *backend-environment
+  secrets: [postgres_password, redis_password, app_secret_key]
+  volumes:
+    - ./config:/app/config:ro
+  networks: [data, egress]
+  restart: unless-stopped
+  init: true
+  security_opt: [no-new-privileges:true]
+  cap_drop: [ALL]
+  tmpfs: ["/tmp:rw,noexec,nosuid,size=64m"]
+  stop_grace_period: 45s
+  logging: *production-logging
+
+services:
+  tls-init:
+    image: firewall-manager-backend:${FIREWALL_MANAGER_IMAGE_TAG:-local}
+    build: {context: ./backend, dockerfile: Dockerfile}
+    command: [python, -m, firewall_manager.tls_init]
+    environment:
+      APP_PUBLIC_HOST: ${APP_PUBLIC_HOST:?Set APP_PUBLIC_HOST}
+      TLS_DIRECTORY: /tls
+    volumes:
+      - type: bind
+        source: ${PRODUCTION_RUNTIME_DIR:?Set PRODUCTION_RUNTIME_DIR}/tls
+        target: /tls
+    user: "0:0"
+    network_mode: none
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=16m"]
+    restart: "no"
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    logging: *production-logging
+
+  db:
+    image: postgres:17.11-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-firewall_manager}
+      POSTGRES_USER: ${POSTGRES_USER:-firewall}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets: [postgres_password]
+    volumes: [postgres-data:/var/lib/postgresql/data]
+    networks: [data]
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    security_opt: [no-new-privileges:true]
+    logging: *production-logging
+
+  redis:
+    image: redis:8.10.2-alpine@sha256:3811787313eba226a2ef38658c6ccb91cd5e110edc89c37767de373120a0e5a0
+    command:
+      - sh
+      - -ec
+      - >-
+        chown -R redis:redis /data &&
+        exec /bin/setpriv --reuid redis --regid redis --clear-groups
+        redis-server --appendonly yes
+        --requirepass "$$(cat /run/secrets/redis_password)"
+    secrets: [redis_password]
+    volumes: [redis-data:/data]
+    networks: [data]
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD-SHELL, 'redis-cli --no-auth-warning -a "$$(cat /run/secrets/redis_password)" ping | grep -q PONG']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    security_opt: [no-new-privileges:true]
+    logging: *production-logging
+
+  migrate:
+    <<: *backend-service
+    profiles: [ops]
+    command: [alembic, upgrade, head]
+    restart: "no"
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+
+  backend:
+    <<: *backend-service
+    command: [uvicorn, firewall_manager.main:app, --host, 0.0.0.0, --port, "8000"]
+    expose: ["8000"]
+    networks: [edge, data, egress, monitoring]
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health/ready', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+
+  worker:
+    <<: *backend-service
+    command: [dramatiq, firewall_manager.worker.tasks, --processes, "1", --threads, "4"]
+    depends_on:
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, python, -m, firewall_manager.worker.health]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 45s
+
+  scheduler:
+    <<: *backend-service
+    command: [python, -m, firewall_manager.scheduler]
+    depends_on:
+      worker: {condition: service_started}
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, python, -m, firewall_manager.scheduler_health]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 20s
+
+  frontend:
+    image: firewall-manager-frontend:${FIREWALL_MANAGER_IMAGE_TAG:-local}
+    build: {context: ./frontend, dockerfile: Dockerfile.production}
+    expose: ["8080"]
+    networks: [edge]
+    restart: unless-stopped
+    init: true
+    read_only: true
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m
+      - /var/cache/nginx:rw,noexec,nosuid,size=32m
+      - /var/run:rw,noexec,nosuid,size=1m
+    healthcheck:
+      test: [CMD, wget, --quiet, --tries=1, --output-document=/dev/null, http://127.0.0.1:8080/healthz]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+    logging: *production-logging
+
+  edge:
+    image: caddy:2.11.7-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f
+    environment: {APP_PUBLIC_HOST: "${APP_PUBLIC_HOST:?Set APP_PUBLIC_HOST}"}
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./ops/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - type: bind
+        source: ${PRODUCTION_RUNTIME_DIR:?Set PRODUCTION_RUNTIME_DIR}/tls
+        target: /etc/caddy/tls
+        read_only: true
+    networks: [edge]
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /config:rw,noexec,nosuid,size=16m
+      - /data:rw,noexec,nosuid,size=16m
+      - /tmp:rw,noexec,nosuid,size=16m
+    security_opt: [no-new-privileges:true]
+    depends_on:
+      tls-init: {condition: service_completed_successfully}
+      frontend: {condition: service_healthy}
+      backend: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, wget, --quiet, --tries=1, --output-document=/dev/null, http://127.0.0.1:2019/healthz]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    logging: *production-logging
+
+  backup:
+    image: postgres:17.11-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+    profiles: [ops]
+    entrypoint: [/usr/local/bin/firewall-manager-postgres]
+    command: [backup]
+    environment:
+      PGHOST: db
+      PGPORT: "5432"
+      PGDATABASE: ${POSTGRES_DB:-firewall_manager}
+      PGUSER: ${POSTGRES_USER:-firewall}
+    secrets: [postgres_password]
+    volumes:
+      - ./ops/postgres/container-backup:/usr/local/bin/firewall-manager-postgres:ro
+      - type: bind
+        source: ${PRODUCTION_BACKUP_DIR:?Set PRODUCTION_BACKUP_DIR}
+        target: /backups
+    networks: [data]
+    depends_on:
+      db: {condition: service_healthy}
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    user: "10001:10001"
+    logging: *production-logging
+
+  prometheus:
+    image: prom/prometheus:v3.14.0@sha256:5ce7540c3c00ef4ab0c9d2c995c6a5b9c421f44b4a115d97a2c7af3b1c21cbb0
+    profiles: [monitoring]
+    command: [--config.file=/etc/prometheus/prometheus.yml, --storage.tsdb.path=/prometheus, "--storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-15d}"]
+    volumes:
+      - ./ops/prometheus/prometheus.production.yml:/etc/prometheus/prometheus.yml:ro
+      - ./ops/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+    networks: [monitoring]
+    restart: unless-stopped
+    user: "65534:65534"
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    logging: *production-logging
+
+  grafana:
+    image: grafana/grafana:13.1.6@sha256:d8276d620291d3aaae3e31dde6d63e6807afee49825f04e8aa7392bbe024216f
+    profiles: [monitoring]
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana_admin_password
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    secrets: [grafana_admin_password]
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./ops/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./ops/grafana/firewall-manager-dashboard.json:/var/lib/grafana/dashboards/firewall-manager.json:ro
+    ports: ["127.0.0.1:${GRAFANA_PORT:-3000}:3000"]
+    networks: [monitoring, admin]
+    restart: unless-stopped
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    depends_on: [prometheus]
+    logging: *production-logging
+
+networks:
+  edge:
+  data: {internal: true}
+  egress:
+  monitoring: {internal: true}
+  admin:
+
+volumes:
+  postgres-data:
+  redis-data:
+  prometheus-data:
+  grafana-data:
+
+secrets:
+  postgres_password:
+    file: ${PRODUCTION_RUNTIME_DIR:?Set PRODUCTION_RUNTIME_DIR}/secrets/postgres_password
+  redis_password:
+    file: ${PRODUCTION_RUNTIME_DIR:?Set PRODUCTION_RUNTIME_DIR}/secrets/redis_password
+  app_secret_key:
+    file: ${PRODUCTION_RUNTIME_DIR:?Set PRODUCTION_RUNTIME_DIR}/secrets/app_secret_key
+  grafana_admin_password:
+    file: ${PRODUCTION_RUNTIME_DIR:?Set PRODUCTION_RUNTIME_DIR}/secrets/grafana_admin_password

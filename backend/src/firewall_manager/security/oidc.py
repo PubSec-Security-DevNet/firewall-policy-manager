@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Small server-side OIDC relying-party implementation.
 
 The application owns the session and user authorization. Providers only authenticate the
@@ -11,7 +13,7 @@ import hmac
 import json
 import secrets
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 import httpx
@@ -19,7 +21,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives.asymmetric.padding import PKCS1v15
 from cryptography.hazmat.primitives.hashes import SHA256
 from fastapi import Response
-from sqlalchemy import func, select, update
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from firewall_manager.application.errors import NotAuthenticatedError, ProviderConfigurationError
@@ -146,7 +148,14 @@ class OidcService:
         state = _b64(secrets.token_bytes(32))
         nonce = _b64(secrets.token_bytes(32))
         state_payload = json.dumps(
-            {"state": state, "nonce": nonce, "test_only": test_only}, separators=(",", ":")
+            {
+                "state": state,
+                "nonce": nonce,
+                "test_only": test_only,
+                "provider": provider.id,
+                "issued_at": datetime.now(UTC).timestamp(),
+            },
+            separators=(",", ":"),
         )
         signed = _sign(_b64(state_payload.encode()), self.settings)
         response.set_cookie(
@@ -209,6 +218,7 @@ class OidcService:
                 durable=True,
             )
             raise NotAuthenticatedError from exc
+        self._validate_state_payload(payload, provider.id)
         metadata = await self._metadata(provider)
         async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
             token_response = await client.post(
@@ -288,8 +298,6 @@ class OidcService:
                         display_name_claim=claims.get(provider.display_name_claim),
                     )
                 )
-            else:
-                user = self._bind_pending_user(provider, organization_id, subject, claims)
         if user is None:
             self._authentication_event(
                 "login_failure",
@@ -335,41 +343,6 @@ class OidcService:
             f"{STATE_COOKIE_PREFIX}{provider.id}", path=f"/api/v1/auth/{provider.id}"
         )
         return False
-
-    def _bind_pending_user(
-        self,
-        provider: OidcProviderConfig,
-        organization_id: UUID,
-        subject: str,
-        claims: dict[str, Any],
-    ) -> User | None:
-        email_value = claims.get(provider.email_claim)
-        if not isinstance(email_value, str) or not email_value.strip():
-            return None
-        pending_user = self.session.scalar(
-            select(User).where(
-                User.organization_id == organization_id,
-                User.identity_subject.like("pending:%"),
-                func.lower(User.email) == email_value.strip().casefold(),
-                User.is_active.is_(True),
-            )
-        )
-        if pending_user is None:
-            return None
-        pending_user.identity_issuer = str(provider.issuer_url)
-        pending_user.identity_subject = subject
-        self.session.add(
-            ExternalIdentity(
-                organization_id=organization_id,
-                user_id=pending_user.id,
-                provider_id=provider.id,
-                issuer=str(provider.issuer_url),
-                subject=subject,
-                email_claim=email_value.strip(),
-                display_name_claim=claims.get(provider.display_name_claim),
-            )
-        )
-        return pending_user
 
     def logout(self, token: str | None, response: Response) -> None:
         if token:
@@ -570,7 +543,15 @@ class OidcService:
     ) -> str:
         metadata = await self._metadata(provider)
         nonce = _b64(secrets.token_bytes(32))
-        state_payload = json.dumps({"nonce": nonce, "draft_id": draft_id}, separators=(",", ":"))
+        state_payload = json.dumps(
+            {
+                "nonce": nonce,
+                "draft_id": draft_id,
+                "provider": provider.id,
+                "issued_at": datetime.now(UTC).timestamp(),
+            },
+            separators=(",", ":"),
+        )
         signed = _sign(_b64(state_payload.encode()), self.settings)
         response.set_cookie(
             "fm_setup_test",
@@ -605,6 +586,7 @@ class OidcService:
         if raw is None:
             raise NotAuthenticatedError
         payload = json.loads(_unb64(raw))
+        self._validate_state_payload(payload, provider.id)
         metadata = await self._metadata(provider)
         async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
             token_response = await client.post(
@@ -625,6 +607,21 @@ class OidcService:
         )
         return {"draft_id": str(payload["draft_id"]), "claims": claims}
 
+    @staticmethod
+    def _validate_state_payload(payload: object, provider_id: str) -> None:
+        if not isinstance(payload, dict):
+            raise NotAuthenticatedError
+        issued_at = payload.get("issued_at")
+        now = datetime.now(UTC).timestamp()
+        if (
+            type(issued_at) not in {int, float}
+            or not 0 <= now - cast("float", issued_at) <= 600
+            or payload.get("provider") != provider_id
+            or not isinstance(payload.get("nonce"), str)
+            or not payload["nonce"]
+        ):
+            raise NotAuthenticatedError
+
     async def _validate_id_token(
         self, token: str, metadata: dict[str, Any], provider: OidcProviderConfig, nonce: str
     ) -> dict[str, Any]:
@@ -634,6 +631,8 @@ class OidcService:
             claims: dict[str, Any] = json.loads(_unb64(claims_b64))
         except (ValueError, TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise NotAuthenticatedError from exc
+        if not isinstance(header, dict) or not isinstance(claims, dict):
+            raise NotAuthenticatedError
         if header.get("alg") != "RS256" or not header.get("kid"):
             raise NotAuthenticatedError
         async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
@@ -659,11 +658,26 @@ class OidcService:
             raise NotAuthenticatedError from exc
         now = datetime.now(UTC).timestamp()
         audience = claims.get("aud")
+        expires = claims.get("exp")
+        issued = claims.get("iat")
+        not_before = claims.get("nbf", 0)
         if (
-            claims.get("iss", "").rstrip("/") != str(provider.issuer_url).rstrip("/")
-            or claims.get("sub") is None
+            claims.get("iss") != str(provider.issuer_url)
+            or not isinstance(claims.get("sub"), str)
+            or not claims.get("sub")
             or claims.get("nonce") != nonce
-            or claims.get("exp", 0) < now
+            or type(expires) not in {int, float}
+            or not cast("float", expires) > now
+            or type(issued) not in {int, float}
+            or not cast("float", issued) <= now
+            or type(not_before) not in {int, float}
+            or not not_before <= now
+            or ("azp" in claims and claims["azp"] != provider.client_id)
+            or (
+                isinstance(audience, list)
+                and len(audience) > 1
+                and claims.get("azp") != provider.client_id
+            )
             or (
                 provider.client_id not in audience
                 if isinstance(audience, list)

@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Application overview behavior."""
 
 from uuid import UUID
@@ -32,7 +34,7 @@ async def test_overview_is_bounded_and_read_only() -> None:
         UUID("30000000-0000-0000-0000-000000000001"),
         UUID("10000000-0000-0000-0000-000000000001"),
         "viewer@example.test",
-        "user",
+        "admin",
     )
     result = await OverviewService(FakeRepository(), (FakeProvider(),)).get(principal)
     assert result["organization"] == "Example Organization"
@@ -46,3 +48,13 @@ async def test_overview_is_bounded_and_read_only() -> None:
             "writable": False,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_unscoped_overview_never_unions_group_inventory() -> None:
+    principal = Principal(UUID(int=1), UUID(int=2), "viewer@example.test", "user")
+    result = await OverviewService(FakeRepository(), (FakeProvider(),)).get(principal)
+    assert result["providers"] == []
+    assert result["counts"] == dict.fromkeys(
+        ("managers", "policies", "rules", "objects", "change_sets"), 0
+    )
