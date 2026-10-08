@@ -204,9 +204,7 @@ class ChangeSetService:
                 if current.get("state") == ChangeSetState.DRAFT.value and not current.get(
                     "operations"
                 ):
-                    self._repository.delete_change_set(
-                        principal, active_group_id, change_set_id
-                    )
+                    self._repository.delete_change_set(principal, active_group_id, change_set_id)
                 raise ChangeSetConflictError(
                     details={
                         "code": (
@@ -1463,9 +1461,7 @@ class ChangeSetService:
         change_set_id: UUID | None = None,
     ) -> dict[str, object]:
         if kind is not ChangeOperationKind.CREATE_OBJECT:
-            return self._evaluate_object_mutation(
-                context, kind, payload, checks, change_set_id
-            )
+            return self._evaluate_object_mutation(context, kind, payload, checks, change_set_id)
         object_type = str(payload.get("object_type", ""))
         requested_name = str(payload.get("name", ""))
         value = str(payload.get("value", ""))
