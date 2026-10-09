@@ -2396,7 +2396,10 @@ class CiscoReadOnlyProvider:
         pin_context = ssl.create_default_context()
         try:
             pin_context.load_verify_locations(cadata=self._custom_ca_certificate)
-            pin_context.check_hostname = False
+            # The uploaded leaf certificate is validated by the custom CA store and
+            # checked again by exact SHA-256 pin below. Hostname identity is unavailable
+            # for provider-generated certificates when the endpoint is an IP address.
+            pin_context.check_hostname = False  # nosemgrep: no-disabled-tls-verification
             _reader, writer = await asyncio.open_connection(
                 hostname,
                 parsed.port or 443,

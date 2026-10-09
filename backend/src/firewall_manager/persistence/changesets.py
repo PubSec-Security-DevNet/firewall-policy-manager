@@ -340,11 +340,7 @@ class SqlChangeSetRepository:
         if policy is None:
             raise ResourceOutOfScopeError
         delete_key = (
-            "object_id"
-            if kind == "DELETE_OBJECT"
-            else "rule_id"
-            if kind == "DELETE_RULE"
-            else None
+            "object_id" if kind == "DELETE_OBJECT" else "rule_id" if kind == "DELETE_RULE" else None
         )
         if delete_key and payload.get(delete_key):
             resource_id = UUID(str(payload[delete_key]))
@@ -1052,9 +1048,7 @@ class SqlChangeSetRepository:
         """Serialize provider writes sharing one connection without holding row locks."""
         self._session.execute(
             text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
-            {
-                "lock_key": f"firewall-manager:provider-mutation:{organization_id}:{provider_key}"
-            },
+            {"lock_key": f"firewall-manager:provider-mutation:{organization_id}:{provider_key}"},
         )
 
     def queue_execution(
@@ -2123,14 +2117,15 @@ class SqlChangeSetRepository:
                     # FMC/SCC may return a successful create response without ordering
                     # metadata.  A missing provider position must never become NULL in the
                     # normalized inventory; use the next local position for append creates.
-                    max_position = self._session.scalar(
-                        select(func.max(AccessRule.position)).where(
-                            AccessRule.organization_id == principal.organization_id,
-                            AccessRule.policy_id == policy.id,
-                            AccessRule.category_id == rule.category_id,
-                            AccessRule.management_state != "MISSING",
+                    with self._session.no_autoflush:
+                        max_position = self._session.scalar(
+                            select(func.max(AccessRule.position)).where(
+                                AccessRule.organization_id == principal.organization_id,
+                                AccessRule.policy_id == policy.id,
+                                AccessRule.category_id == rule.category_id,
+                                AccessRule.management_state != "MISSING",
+                            )
                         )
-                    )
                     rule.position = int(max_position) + 1 if max_position is not None else 1
                 self._session.flush()
                 self._replace_rule_references(rule, payload, principal.organization_id)

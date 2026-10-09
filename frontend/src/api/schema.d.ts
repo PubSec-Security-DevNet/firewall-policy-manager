@@ -1836,8 +1836,6 @@ export interface components {
             failure_info: {
                 [key: string]: unknown;
             };
-            /** Reconciliation Retry Available */
-            reconciliation_retry_available?: boolean;
             /**
              * Id
              * Format: uuid
@@ -1854,6 +1852,11 @@ export interface components {
             provider_revision_snapshot: {
                 [key: string]: unknown;
             };
+            /**
+             * Reconciliation Retry Available
+             * @default false
+             */
+            reconciliation_retry_available: boolean;
             /** Rejected At */
             rejected_at?: string | null;
             /** Rejected By Display Name */

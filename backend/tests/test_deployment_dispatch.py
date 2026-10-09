@@ -435,7 +435,13 @@ async def test_preflight_allows_unattributed_pending_changes(kind, scenario):
         "domain", ["policy"], [target], transport.intents(provider)
     )
     assert result["external_operation_id"] == "domain:job"
-    assert result["preflight"]["devices"][0]["unattributed_pending_changes"]
+    preflight = result["preflight"]
+    assert isinstance(preflight, dict)
+    devices = preflight["devices"]
+    assert isinstance(devices, list)
+    assert devices
+    assert isinstance(devices[0], dict)
+    assert devices[0]["unattributed_pending_changes"]
     assert len(transport.posts) == 1
     await provider.aclose()
 

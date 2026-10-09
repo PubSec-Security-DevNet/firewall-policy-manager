@@ -684,7 +684,8 @@ export function explainDiscrepancy(item: {
   const changed = Object.keys(previous).filter(
     (key) =>
       key in observed &&
-      !ignoredKeys.has(key) && JSON.stringify(previous[key]) !== JSON.stringify(observed[key]),
+      !ignoredKeys.has(key) &&
+      JSON.stringify(previous[key]) !== JSON.stringify(observed[key]),
   );
   if (changed.length) {
     return `This ${resource} exists in both places, but its ${changed

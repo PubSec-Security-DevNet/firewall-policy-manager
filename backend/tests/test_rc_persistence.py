@@ -323,8 +323,9 @@ def test_successful_rule_create_without_provider_position_uses_next_local_positi
 ) -> None:
     session, rows = database
     repo = SqlChangeSetRepository(session)
+    sync = SqlSyncRepository(session)
     org, manager, policy, run = (rows[k].id for k in ("org", "manager", "policy", "run"))
-    category = repo.upsert_category(
+    category = sync.upsert_category(
         org,
         manager,
         policy,
@@ -338,7 +339,7 @@ def test_successful_rule_create_without_provider_position_uses_next_local_positi
             position=1,
         ),
     )
-    repo.upsert_rule(
+    sync.upsert_rule(
         org,
         manager,
         policy,
@@ -358,6 +359,7 @@ def test_successful_rule_create_without_provider_position_uses_next_local_positi
     intrusion = IntrusionPolicy(
         organization_id=org,
         manager_id=manager,
+        domain_id=rows["domain"].id,
         native_id="intrusion-position",
         name="Intrusion position",
         provider_fingerprint="intrusion-position",
@@ -408,8 +410,9 @@ def test_successful_rule_create_without_provider_position_uses_next_local_positi
 def test_successful_rule_insert_shifts_following_application_baselines(database) -> None:
     session, rows = database
     repo = SqlChangeSetRepository(session)
+    sync = SqlSyncRepository(session)
     org, manager, policy, run = (rows[k].id for k in ("org", "manager", "policy", "run"))
-    category = repo.upsert_category(
+    category = sync.upsert_category(
         org,
         manager,
         policy,
@@ -423,7 +426,7 @@ def test_successful_rule_insert_shifts_following_application_baselines(database)
             position=1,
         ),
     )
-    repo.upsert_rule(
+    sync.upsert_rule(
         org,
         manager,
         policy,
@@ -439,7 +442,7 @@ def test_successful_rule_insert_shifts_following_application_baselines(database)
             action="ALLOW",
         ),
     )
-    following_id = repo.upsert_rule(
+    following_id = sync.upsert_rule(
         org,
         manager,
         policy,
@@ -499,8 +502,9 @@ def test_successful_rule_insert_shifts_following_application_baselines(database)
 def test_successful_rule_delete_shifts_following_application_baselines(database) -> None:
     session, rows = database
     repo = SqlChangeSetRepository(session)
+    sync = SqlSyncRepository(session)
     org, manager, policy, run = (rows[k].id for k in ("org", "manager", "policy", "run"))
-    category = repo.upsert_category(
+    category = sync.upsert_category(
         org,
         manager,
         policy,
@@ -514,7 +518,7 @@ def test_successful_rule_delete_shifts_following_application_baselines(database)
             position=1,
         ),
     )
-    repo.upsert_rule(
+    sync.upsert_rule(
         org,
         manager,
         policy,
@@ -530,7 +534,7 @@ def test_successful_rule_delete_shifts_following_application_baselines(database)
             action="ALLOW",
         ),
     )
-    deleted_id = repo.upsert_rule(
+    deleted_id = sync.upsert_rule(
         org,
         manager,
         policy,
@@ -546,7 +550,7 @@ def test_successful_rule_delete_shifts_following_application_baselines(database)
             action="ALLOW",
         ),
     )
-    following_id = repo.upsert_rule(
+    following_id = sync.upsert_rule(
         org,
         manager,
         policy,
@@ -596,8 +600,9 @@ def test_successful_rule_delete_shifts_following_application_baselines(database)
 def test_successful_rule_move_shifts_sibling_application_baselines(database) -> None:
     session, rows = database
     repo = SqlChangeSetRepository(session)
+    sync = SqlSyncRepository(session)
     org, manager, policy, run = (rows[k].id for k in ("org", "manager", "policy", "run"))
-    category = repo.upsert_category(
+    category = sync.upsert_category(
         org,
         manager,
         policy,
@@ -611,7 +616,7 @@ def test_successful_rule_move_shifts_sibling_application_baselines(database) -> 
             position=1,
         ),
     )
-    moved_id = repo.upsert_rule(
+    moved_id = sync.upsert_rule(
         org,
         manager,
         policy,
@@ -627,7 +632,7 @@ def test_successful_rule_move_shifts_sibling_application_baselines(database) -> 
             action="ALLOW",
         ),
     )
-    following_id = repo.upsert_rule(
+    following_id = sync.upsert_rule(
         org,
         manager,
         policy,
