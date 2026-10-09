@@ -38,9 +38,11 @@ done
 
 overview="$(curl --fail --silent -H 'X-Dev-User: viewer@example.test' "${base_url}/api/v1/overview")"
 session="$(curl --fail --silent -H 'X-Dev-User: viewer@example.test' "${base_url}/api/v1/session")"
-isolated_managers="$(curl --fail --silent -H 'X-Dev-User: other-viewer@example.test' "${base_url}/api/v1/firewall-managers")"
+isolated_managers="$(curl --fail --silent -H 'X-Dev-User: other-admin@example.test' "${base_url}/api/v1/firewall-managers")"
 finance_policies="$(curl --fail --silent -H 'X-Dev-User: viewer@example.test' "${base_url}/api/v1/delegated/policies?active_group_id=20000000-0000-0000-0000-000000000001")"
-delegated_policy_id="$(printf '%s' "$finance_policies" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
+# Select the deterministic Local SCC policy rather than whichever synchronized policy happens
+# to sort first.  The same policy is delegated to both smoke-test groups.
+delegated_policy_id="$(printf '%s' "$finance_policies" | sed 's/},{/}\n{/g' | sed -n 's/.*"id":"\([^"]*\)","manager_id":"40000000-0000-0000-0000-000000000002".*/\1/p' | head -n 1)"
 test -n "$delegated_policy_id"
 finance_context="$(curl --fail --silent -H 'X-Dev-User: viewer@example.test' "${base_url}/api/v1/delegated/context?active_group_id=20000000-0000-0000-0000-000000000001&policy_id=${delegated_policy_id}")"
 engineering_context="$(curl --fail --silent -H 'X-Dev-User: viewer@example.test' "${base_url}/api/v1/delegated/context?active_group_id=20000000-0000-0000-0000-000000000002&policy_id=${delegated_policy_id}")"
