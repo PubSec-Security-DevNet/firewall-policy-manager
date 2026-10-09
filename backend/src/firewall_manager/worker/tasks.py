@@ -896,8 +896,7 @@ async def _execute_deployment_batch(deployment_id: UUID) -> None:  # noqa: PLR09
                 failure_info = _deployment_start_failure_info(exc)
                 deployment.failure_info = failure_info
                 if (
-                    not deployment.mutation_intent
-                    and not deployment.external_operation_id
+                    not deployment.mutation_intent and not deployment.external_operation_id
                 ) or is_definitive_provider_rejection(failure_info):
                     # Preflight/authorization refused, or the provider definitively rejected
                     # the deployment request before accepting a job.
