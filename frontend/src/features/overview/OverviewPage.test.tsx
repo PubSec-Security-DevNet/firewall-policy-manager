@@ -340,13 +340,13 @@ describe('OverviewPage', () => {
     const groupDialog = await screen.findByRole('dialog', { name: 'Manage Groups' });
     await waitFor(() => expect(groupDialog).toBeVisible());
     expect(within(groupDialog).getByRole('button', { name: 'Remove' })).toBeVisible();
-    await user.click(within(groupDialog).getByRole('textbox', { name: 'Filter memberships' }));
+    await user.click(within(groupDialog).getByRole('combobox', { name: 'Filter memberships' }));
     await user.keyboard('{ArrowDown}{ArrowDown}{Enter}');
     expect(within(groupDialog).getByText('Datacenter')).toBeVisible();
     expect(within(groupDialog).queryByText('Finance')).not.toBeInTheDocument();
-    await user.click(within(groupDialog).getByRole('textbox', { name: 'Filter memberships' }));
+    await user.click(within(groupDialog).getByRole('combobox', { name: 'Filter memberships' }));
     await user.keyboard('{ArrowUp}{ArrowUp}{Enter}');
-    await user.click(within(groupDialog).getByRole('textbox', { name: 'Sort memberships' }));
+    await user.click(within(groupDialog).getByRole('combobox', { name: 'Sort memberships' }));
     await user.keyboard('{ArrowDown}{ArrowDown}{Enter}');
     expect(groupDialog.querySelector('.fm-membership-row')).toHaveTextContent('Datacenter');
     await user.click(within(groupDialog).getByRole('button', { name: 'Close' }));
@@ -354,7 +354,7 @@ describe('OverviewPage', () => {
     await user.click(navigation.getByRole('button', { name: 'Access grants' }));
     const addGrant = await screen.findByRole('button', { name: 'Add group policy grant' });
     expect(screen.getByRole('textbox', { name: 'Search access grants' })).toBeVisible();
-    expect(screen.getByRole('textbox', { name: 'Sort access grants' })).toHaveValue('Sort: A–Z');
+    expect(screen.getByRole('combobox', { name: 'Sort access grants' })).toHaveValue('Sort: A–Z');
     expect(screen.getByRole('tab', { name: 'Policy access' })).toBeVisible();
     expect(screen.queryByRole('button', { name: 'Create User' })).not.toBeInTheDocument();
     expect(addGrant).toBeEnabled();
@@ -366,7 +366,7 @@ describe('OverviewPage', () => {
       name: 'Add network object access',
     });
     expect(
-      within(networkGrantDialog).getByRole('textbox', { name: 'Authorization record' }),
+      within(networkGrantDialog).getByRole('combobox', { name: 'Authorization record' }),
     ).toHaveValue('Object access');
     await user.click(within(networkGrantDialog).getByRole('button', { name: 'Close' }));
     await user.click(screen.getByRole('tab', { name: 'Ports' }));

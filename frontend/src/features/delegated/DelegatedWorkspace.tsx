@@ -1726,7 +1726,7 @@ function CreateRuleDialog({
                 <Select
                   label="Logging"
                   value={logging}
-                  onChange={(value) => setLogging((value ?? 'NONE') as PendingRule['logging'])}
+                  onChange={(value) => setLogging(value ?? 'NONE')}
                   data={
                     action === 'BLOCK'
                       ? [
@@ -2371,7 +2371,7 @@ function EditRuleDialog({
                 <Select
                   label="Logging"
                   value={logging}
-                  onChange={(value) => setLogging((value ?? 'NONE') as PendingRule['logging'])}
+                  onChange={(value) => setLogging(value ?? 'NONE')}
                   data={
                     action === 'BLOCK'
                       ? [
