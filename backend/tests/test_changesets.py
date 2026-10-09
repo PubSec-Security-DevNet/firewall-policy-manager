@@ -355,10 +355,9 @@ class MemoryChangeSetRepository:
             if row["state"] in {"SUCCEEDED", "CANCELLED", "REJECTED", "ROLLED_BACK"}:
                 continue
             for operation in row["operations"]:  # type: ignore[union-attr]
-                if (
-                    operation["kind"] == "DELETE_OBJECT"
-                    and str(operation["payload"].get("object_id")) == str(object_id)
-                ):
+                if operation["kind"] == "DELETE_OBJECT" and str(
+                    operation["payload"].get("object_id")
+                ) == str(object_id):
                     return True
         return False
 
@@ -377,10 +376,9 @@ class MemoryChangeSetRepository:
             if row["state"] in {"SUCCEEDED", "CANCELLED", "REJECTED", "ROLLED_BACK"}:
                 continue
             for operation in row["operations"]:  # type: ignore[union-attr]
-                if (
-                    operation["kind"] == "DELETE_RULE"
-                    and str(operation["payload"].get("rule_id")) == str(rule_id)
-                ):
+                if operation["kind"] == "DELETE_RULE" and str(
+                    operation["payload"].get("rule_id")
+                ) == str(rule_id):
                     return True
         return False
 
@@ -677,9 +675,7 @@ class MemoryChangeSetRepository:
     def cancel_change_set(self, *args: object) -> dict[str, object]:
         raise NotImplementedError
 
-    def delete_change_set(
-        self, actor: Principal, group_id: UUID, change_set_id: UUID
-    ) -> None:
+    def delete_change_set(self, actor: Principal, group_id: UUID, change_set_id: UUID) -> None:
         del actor, group_id
         self.change_sets.pop(change_set_id, None)
 
@@ -1206,9 +1202,7 @@ def test_second_object_delete_is_rejected_while_first_changeset_is_pending() -> 
     )
     assert first["state"] == "READY"
 
-    second_change_set = service.create(
-        principal(), FINANCE, POLICY, "Duplicate deletion", ""
-    )
+    second_change_set = service.create(principal(), FINANCE, POLICY, "Duplicate deletion", "")
     with pytest.raises(ChangeSetConflictError) as raised:
         service.add_operation(
             principal(),
@@ -1234,9 +1228,7 @@ def test_second_rule_delete_is_rejected_while_first_changeset_is_pending() -> No
     )
     assert first["state"] == "READY"
 
-    second_change_set = service.create(
-        principal(), FINANCE, POLICY, "Duplicate rule deletion", ""
-    )
+    second_change_set = service.create(principal(), FINANCE, POLICY, "Duplicate rule deletion", "")
     with pytest.raises(ChangeSetConflictError) as raised:
         service.add_operation(
             principal(),

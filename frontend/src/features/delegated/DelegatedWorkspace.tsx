@@ -1351,8 +1351,7 @@ function ResourceStateNotice({
     Boolean(firewallState) &&
     (firewallState !== 'UNKNOWN' || policyDeviceAssignment === 'ASSIGNED');
   const unverified = deploymentStatus === 'NOT_AVAILABLE' && !firewallStateVisible;
-  const confirmedDeployed =
-    !pending && firewallStateVisible && firewallState === 'DEPLOYED';
+  const confirmedDeployed = !pending && firewallStateVisible && firewallState === 'DEPLOYED';
   const label = pending
     ? 'Deployment pending: this resource has an unexecuted or in-progress Changeset.'
     : firewallStateVisible && firewallState
@@ -3689,7 +3688,7 @@ function ObjectsWorkspace({
                               ? 'Cannot delete: this object is used by a policy rule.'
                               : objectDeletePending
                                 ? 'Deletion is already pending for this object.'
-                              : 'Delete object'
+                                : 'Delete object'
                           }
                           onClick={() => setDeleting(object)}
                           aria-label={`Delete ${object.name}`}

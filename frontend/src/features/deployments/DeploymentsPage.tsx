@@ -328,15 +328,15 @@ export function DeploymentsPage({
                             View details
                           </AppActionButton>
                           {deploymentCanRetry(item) && (
-                              <AppActionButton
-                                intent="secondary"
-                                leftSection={<IconRefresh size={13} />}
-                                loading={retryingId === item.id}
-                                onClick={() => retry(item.id)}
-                              >
-                                Retry
-                              </AppActionButton>
-                            )}
+                            <AppActionButton
+                              intent="secondary"
+                              leftSection={<IconRefresh size={13} />}
+                              loading={retryingId === item.id}
+                              onClick={() => retry(item.id)}
+                            >
+                              Retry
+                            </AppActionButton>
+                          )}
                           {item.rollback_eligible && !item.rollback_state && (
                             <AppActionButton
                               intent="secondary"
@@ -593,15 +593,15 @@ function DeploymentDetails({ item }: { item: Deployment }) {
       {item.state === 'RECONCILIATION_REQUIRED' &&
         !deploymentStartPending(item) &&
         !isDefinitiveProviderRejection(item) && (
-        <AppText size="sm" mb="md">
-          The provider outcome is uncertain. Review provider state before starting another
-          deployment. FPM will not automatically repeat this request.
-        </AppText>
-      )}
+          <AppText size="sm" mb="md">
+            The provider outcome is uncertain. Review provider state before starting another
+            deployment. FPM will not automatically repeat this request.
+          </AppText>
+        )}
       {item.failure_info.code === 'DEPLOYMENT_SCOPE_UNPROVEN' && (
         <AppText size="sm" mb="md">
-          This older deployment record was blocked by a previous scope rule. New deployments
-          include pending provider changes made outside FPM and record them in preflight evidence.
+          This older deployment record was blocked by a previous scope rule. New deployments include
+          pending provider changes made outside FPM and record them in preflight evidence.
         </AppText>
       )}
       {typeof item.failure_info.code === 'string' && (

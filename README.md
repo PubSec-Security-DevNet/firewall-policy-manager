@@ -5,6 +5,11 @@ Firewall Policy Manager is a delegated control plane for Cisco Secure Firewall M
 inventory synchronization, approval-backed ChangeSets, provider deployment controls, audit
 evidence, and reconciliation workflows.
 
+[![Quality gate](https://github.com/PubSec-Security-DevNet/firewall-policy-manager/actions/workflows/quality.yml/badge.svg?branch=main)](https://github.com/PubSec-Security-DevNet/firewall-policy-manager/actions/workflows/quality.yml)
+[![Documentation](https://github.com/PubSec-Security-DevNet/firewall-policy-manager/actions/workflows/docs-pages.yml/badge.svg?branch=main)](https://github.com/PubSec-Security-DevNet/firewall-policy-manager/actions/workflows/docs-pages.yml)
+[![License](https://img.shields.io/github/license/PubSec-Security-DevNet/firewall-policy-manager)](LICENSE)
+[![Latest release](https://img.shields.io/github/v/release/PubSec-Security-DevNet/firewall-policy-manager?sort=semver)](https://github.com/PubSec-Security-DevNet/firewall-policy-manager/releases)
+
 ## Why Firewall Policy Manager
 
 Many organizations need application teams, business units, or regional operators to manage their
