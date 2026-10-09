@@ -1024,6 +1024,11 @@
             "title": "Provider Revision Snapshot",
             "type": "object"
           },
+          "reconciliation_retry_available": {
+            "default": false,
+            "title": "Reconciliation Retry Available",
+            "type": "boolean"
+          },
           "rejected_at": {
             "anyOf": [
               {

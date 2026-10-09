@@ -11,10 +11,7 @@ function stringValue(value: unknown): string {
 }
 
 export function retryableChangeSet(item: ChangeSet) {
-  if (
-    item.reconciliation_retry_available &&
-    !['QUEUED', 'EXECUTING'].includes(item.state)
-  )
+  if (item.reconciliation_retry_available && !['QUEUED', 'EXECUTING'].includes(item.state))
     return true;
   const operationKinds = new Map(
     item.operations.map((operation) => [operation.id, operation.kind]),

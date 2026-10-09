@@ -297,7 +297,9 @@ async def test_real_fmc_already_deployed_device_completes_without_starting_a_job
         result = await provider.start_deployment("domain-1", ["policy-1"], ["device-1"])
         assert result["state"] == "DEPLOYED"
         assert result["external_operation_id"] is None
-        assert result["preflight"]["already_deployed"] is True
+        preflight = result["preflight"]
+        assert isinstance(preflight, dict)
+        assert preflight["already_deployed"] is True
     finally:
         await provider.aclose()
 
@@ -670,6 +672,7 @@ async def test_parallel_mutation_rejection_is_non_mutating_and_retryable() -> No
     assert result.operation_results[0]["status"] == "CONFLICT"
     assert result.operation_results[0]["mutated"] is False
     failure = result.operation_results[0]["failure"]
+    assert isinstance(failure, dict)
     assert failure["code"] == "PROVIDER_RATE_LIMITED"
     assert failure["retry_safe"] is True
     assert failure["provider_status"] == 429
