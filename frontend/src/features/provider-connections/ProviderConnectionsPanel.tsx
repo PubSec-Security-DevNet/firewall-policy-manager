@@ -274,7 +274,7 @@ function ConnectionWizard({
         <Select
           label="Provider"
           value={provider}
-          onChange={(value) => setProvider((value as Provider | null) ?? 'fmc')}
+          onChange={(value) => setProvider(value ?? 'fmc')}
           data={[
             { value: 'fmc', label: 'Cisco FMC' },
             { value: 'scc', label: 'Cisco Security Cloud Control' },

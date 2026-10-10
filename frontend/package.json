@@ -23,8 +23,8 @@
     "api:generate": "openapi-typescript ../openapi.json -o src/api/schema.d.ts"
   },
   "dependencies": {
-    "@mantine/core": "8.3.1",
-    "@mantine/hooks": "8.3.1",
+    "@mantine/core": "9.7.0",
+    "@mantine/hooks": "9.7.0",
     "@tabler/icons-react": "^3.48.0",
     "react": "19.3.0",
     "react-dom": "19.3.0"

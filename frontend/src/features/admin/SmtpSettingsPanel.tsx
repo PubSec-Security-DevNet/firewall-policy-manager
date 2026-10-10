@@ -142,9 +142,7 @@ export function SmtpSettingsPanel() {
                 { value: 'SSL_TLS', label: 'SSL/TLS' },
               ]}
               value={draft.encryption}
-              onChange={(value) =>
-                update('encryption', (value ?? 'STARTTLS') as Draft['encryption'])
-              }
+              onChange={(value) => update('encryption', value ?? 'STARTTLS')}
             />
             <AppCheckbox
               label="SMTP server requires authentication"
