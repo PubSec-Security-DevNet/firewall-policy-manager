@@ -39,7 +39,9 @@ import { AdaptivePagination, useAdaptivePageSize } from '../shared/AdaptivePagin
 
 type ResourceState = { status: 'loading' } | { status: 'ready'; inventory: Inventory } | ErrorState;
 type AuditState =
-  { status: 'loading' } | { status: 'ready'; snapshot: AdministrationSnapshot } | ErrorState;
+  | { status: 'loading' }
+  | { status: 'ready'; snapshot: AdministrationSnapshot }
+  | ErrorState;
 type ErrorState = { status: 'error'; message: string; correlationId?: string };
 
 interface AuditEvent {
