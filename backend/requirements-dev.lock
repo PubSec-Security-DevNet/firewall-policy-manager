@@ -128,7 +128,7 @@ pytest-asyncio==1.4.0
     # via firewall-manager (pyproject.toml)
 python-dotenv==1.2.3
     # via pydantic-settings
-python-json-logger==3.3.0
+python-json-logger==4.2.0
     # via firewall-manager (pyproject.toml)
 redis==8.1.0
     # via
