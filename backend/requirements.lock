@@ -26,7 +26,7 @@ cryptography==50.0.2
     # via firewall-manager (pyproject.toml)
 dramatiq==2.2.1
     # via firewall-manager (pyproject.toml)
-fastapi==0.147.0
+fastapi==0.150.0
     # via firewall-manager (pyproject.toml)
 h11==0.16.0
     # via

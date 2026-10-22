@@ -41,7 +41,7 @@ defusedxml==0.7.1
     # via py-serializable
 dramatiq==2.2.1
     # via firewall-manager (pyproject.toml)
-fastapi==0.147.0
+fastapi==0.150.0
     # via firewall-manager (pyproject.toml)
 filelock==4.0.1
     # via cachecontrol
