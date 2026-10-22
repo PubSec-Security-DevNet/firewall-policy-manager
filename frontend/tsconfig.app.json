@@ -18,7 +18,7 @@
     "noFallthroughCasesInSwitch": true,
     "noUncheckedIndexedAccess": true,
     "noImplicitOverride": true,
-    "types": ["vitest/globals", "@testing-library/jest-dom/vitest"]
+    "types": ["vitest/globals"]
   },
   "include": ["src"]
 }

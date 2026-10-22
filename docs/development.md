@@ -15,6 +15,11 @@ make smoke
 
 Open <http://localhost:5173>. API documentation is available at <http://localhost:8000/docs>.
 
+For frontend checks outside Docker, use Node.js 22.22.2 or later in the 22.x line,
+24.15.0 or later in the 24.x line, or 26+. Run `npm ci` in `frontend` before
+`make frontend-check`. TypeScript remains on 5.9.x until the API generator and
+type-aware ESLint tooling support the TypeScript 7 compiler API.
+
 Common commands:
 
 ```sh
