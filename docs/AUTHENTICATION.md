@@ -42,6 +42,15 @@ maintenance task; the scheduler now runs that cleanup automatically. Production 
 HTTPS-only configuration, adds security response headers, and applies a bounded API request rate
 limit. Interactive Swagger, ReDoc, and OpenAPI endpoints are disabled outside development and test.
 
+If a browser API request returns HTTP 401 or `NOT_AUTHENTICATED`, the frontend discards the
+authenticated application shell and returns to the sign-in screen at the existing application
+location. This applies to navigation, background refreshes, and state-changing actions, including
+401 responses without a JSON error body. The browser's cached Group/policy context is cleared;
+server-side saved defaults remain unchanged. Users choose their identity provider to sign in again,
+and rejected actions are never automatically replayed. Navigation currently lives in application
+memory, so sign-in resumes at Home rather than restoring an expired editor or unsaved action.
+Permission denials, conflicts, and unrelated service failures remain on the current page.
+
 ## API integrations
 
 Platform Admins can create a scoped token for an application User with

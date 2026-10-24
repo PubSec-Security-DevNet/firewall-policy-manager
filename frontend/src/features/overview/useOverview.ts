@@ -2,12 +2,18 @@
 // SPDX-License-Identifier: Apache-2.0
 import { useEffect, useState } from 'react';
 
-import { ApiError, loadInitialOverview, type Overview, type Session } from '../../api/client';
+import {
+  ApiError,
+  authenticationRequiredEvent,
+  loadInitialOverview,
+  type Overview,
+  type Session,
+} from '../../api/client';
 
 type OverviewState =
   | { status: 'loading' }
   | { status: 'ready'; overview: Overview; session: Session }
-  | { status: 'unauthenticated' }
+  | { status: 'unauthenticated'; sessionExpired: boolean }
   | { status: 'error'; message: string; correlationId?: string };
 
 export function useOverview(): OverviewState {
@@ -15,6 +21,16 @@ export function useOverview(): OverviewState {
 
   useEffect(() => {
     let active = true;
+    const requireAuthentication = () => {
+      if (!active) return;
+      // Discard the authenticated tree and ignore late results from this session.
+      active = false;
+      setState((current) => ({
+        status: 'unauthenticated',
+        sessionExpired: current.status === 'ready',
+      }));
+    };
+    window.addEventListener(authenticationRequiredEvent, requireAuthentication);
     void loadInitialOverview()
       .then(({ overview, session }) => {
         if (active) setState({ status: 'ready', overview, session });
@@ -23,7 +39,7 @@ export function useOverview(): OverviewState {
         if (!active) return;
         if (error instanceof ApiError) {
           if (error.code === 'NOT_AUTHENTICATED') {
-            setState({ status: 'unauthenticated' });
+            requireAuthentication();
             return;
           }
           setState({
@@ -37,6 +53,7 @@ export function useOverview(): OverviewState {
       });
     return () => {
       active = false;
+      window.removeEventListener(authenticationRequiredEvent, requireAuthentication);
     };
   }, []);
 

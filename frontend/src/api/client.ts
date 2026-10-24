@@ -81,6 +81,7 @@ const developmentUserKey = 'firewall-manager.dev-user';
 const defaultDevelopmentUser = import.meta.env.VITE_DEV_AUTH_USER ?? 'viewer@example.test';
 const csrfCookieName = 'fm_csrf';
 export const developmentIdentitiesChangedEvent = 'firewall-manager:development-identities-changed';
+export const authenticationRequiredEvent = 'firewall-manager:authentication-required';
 
 export interface DevelopmentIdentity {
   email: string;
@@ -304,11 +305,19 @@ export function getDevelopmentUser(): string {
 
 export function switchDevelopmentUser(email: string): void {
   window.sessionStorage.setItem(developmentUserKey, email);
-  Object.keys(window.sessionStorage)
-    .filter((key) => key.startsWith('firewall-manager.active-context.'))
-    .forEach((key) => window.sessionStorage.removeItem(key));
+  clearActiveContext();
   // A navigation is the cache boundary: Group selection and all user-specific React state die here.
   window.location.reload();
+}
+
+function clearActiveContext(): void {
+  try {
+    Object.keys(window.sessionStorage)
+      .filter((key) => key.startsWith('firewall-manager.active-context.'))
+      .forEach((key) => window.sessionStorage.removeItem(key));
+  } catch {
+    // Unavailable browser storage must not prevent returning to sign-in.
+  }
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -328,12 +337,21 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     credentials: 'same-origin',
   });
   if (!response.ok) {
-    const payload = (await response.json()) as ErrorEnvelope;
+    const payload = (await response.json().catch(() => null)) as ErrorEnvelope | null;
+    const authenticationRequired =
+      response.status === 401 || payload?.error?.code === 'NOT_AUTHENTICATED';
+    if (authenticationRequired) {
+      clearActiveContext();
+      window.dispatchEvent(new Event(authenticationRequiredEvent));
+    }
     throw new ApiError(
-      payload.error.message,
-      payload.error.code,
-      payload.error.correlation_id,
-      payload.error.details,
+      payload?.error?.message ??
+        (authenticationRequired
+          ? 'Authentication is required.'
+          : 'The application API request failed.'),
+      payload?.error?.code ?? (authenticationRequired ? 'NOT_AUTHENTICATED' : 'API_ERROR'),
+      payload?.error?.correlation_id ?? response.headers.get('X-Correlation-ID') ?? '',
+      payload?.error?.details,
     );
   }
   if (response.status === 204) return undefined as T;

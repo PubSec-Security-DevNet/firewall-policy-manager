@@ -129,6 +129,7 @@ function AuthenticatedOverviewPage({ authError }: { authError: string | null }) 
   if (state.status === 'unauthenticated') {
     return (
       <LoginPage
+        sessionExpired={state.sessionExpired}
         initialError={
           authError
             ? 'Authentication could not be completed. Try again or contact an administrator.'

@@ -26,7 +26,10 @@ import {
   FirewallPolicyWordmark,
 } from '../../ui';
 
-export function LoginPage({ initialError }: { initialError?: string } = {}) {
+export function LoginPage({
+  initialError,
+  sessionExpired = false,
+}: { initialError?: string; sessionExpired?: boolean } = {}) {
   const [providers, setProviders] = useState<OidcLoginProvider[]>([]);
   const [administratorEmail, setAdministratorEmail] = useState<string | null>(null);
   const [setupAvailable, setSetupAvailable] = useState(false);
@@ -72,6 +75,11 @@ export function LoginPage({ initialError }: { initialError?: string } = {}) {
             <div className="fm-login-brand fm-login-panel-brand">
               <FirewallPolicyWordmark />
             </div>
+            {sessionExpired && (
+              <AppAlert color="yellow" mb="lg" title="Session expired">
+                Your session has expired. Sign in again to continue.
+              </AppAlert>
+            )}
             {error ? (
               <>
                 <AppTitle id="login-title" order={2}>
