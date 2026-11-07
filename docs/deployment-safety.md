@@ -5,6 +5,21 @@ writes do not mean that a firewall has deployed them. Normal deployment is permi
 provider evidence and current authorization satisfy the checks below. Unexplained, unavailable or
 malformed evidence stops deployment before its mutation intent is committed.
 
+## Scheduled work after a restart
+
+The scheduler reconstructs pending work from PostgreSQL. If a connection still reports `RUNNING`
+but only an unstarted `SCHEDULED` batch remains, it repairs the connection summary to `QUEUED`
+(or `PAUSED` during a maintenance pause).
+A future batch keeps its scheduled time; an overdue batch is promoted and dispatched using the
+same deployment ID and included ChangeSets. Concurrent scheduler deliveries lock the connection,
+and duplicate worker messages reuse the existing execution lease and provider-job evidence.
+
+Recovery does not resume a batch with execution evidence or bypass another active deployment,
+rollback, or unresolved provider outcome. Maintenance pauses, disabled schedules, connection write
+authority, and execution-time authorization still apply. Expired workers continue through the
+separate reconciliation path described below. Operators should inspect active or uncertain jobs
+rather than resetting their database state to force another start.
+
 ## FMC contract
 
 **Documented provider behavior.** The deployable-device API supplies target readiness, policy status

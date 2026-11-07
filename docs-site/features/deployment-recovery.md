@@ -21,6 +21,17 @@ A successful provider configuration transaction can become `STAGED` while it wai
 - partial, failed, unknown, and expired-lease outcomes remain explicit;
 - ambiguous provider calls reconcile before retry.
 
+## Scheduled batches after a restart
+
+Scheduled work survives container restarts. The scheduler repairs a stale connection `RUNNING`
+summary when its persisted batch has not started and no active or uncertain deployment blocks it.
+Future batches keep their scheduled time; overdue batches resume with the same deployment ID.
+Maintenance pauses, disabled schedules, and current deployment authority still apply.
+
+Recovery preserves existing provider jobs and reconciliation requirements. See
+[scheduled-work recovery](../installation/deployment-safety.md#scheduled-work-after-a-restart)
+for the safety checks and operator guidance.
+
 ## Compensating ChangeSet rollback
 
 Rollback is safe recovery, not magic undo. Eligibility depends on retained snapshots, supported original operations, current revisions, and absence of incompatible dependent changes. When eligible, the application constructs a new compensating ChangeSet and sends it through validation, approval where required, provider execution, and a subsequent deployment.

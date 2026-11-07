@@ -5,7 +5,7 @@
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from firewall_manager.application.authorization import AuthorizationService, require_action
@@ -321,6 +321,54 @@ class DeploymentService:
         )
         self._session.flush()
         return self._view(row)
+
+    def recover_scheduled_connections(self) -> None:
+        """Repair stale summaries without taking over active or uncertain provider work."""
+        scheduled = select(Deployment.id).where(
+            Deployment.provider_connection_id == ProviderConnection.id,
+            Deployment.state == DeploymentState.SCHEDULED.value,
+        )
+        connections = list(
+            self._session.scalars(
+                select(ProviderConnection)
+                .where(ProviderConnection.deployment_status == "RUNNING", scheduled.exists())
+                .order_by(ProviderConnection.id)
+                .with_for_update(skip_locked=True)
+            )
+        )
+        for connection in connections:
+            # Re-read after locking the connection: queueing/promoting a batch uses
+            # this same lock. A connection summary alone is never execution evidence.
+            blocked = self._session.scalar(
+                select(Deployment.id)
+                .where(
+                    Deployment.provider_connection_id == connection.id,
+                    or_(
+                        Deployment.state.in_(
+                            ("READY", "DEPLOYING", "UNKNOWN", "RECONCILIATION_REQUIRED")
+                        ),
+                        Deployment.rollback_state.in_(
+                            ("READY", "ROLLING_BACK", "UNKNOWN", "RECONCILIATION_REQUIRED")
+                        ),
+                        Deployment.lease_owner.is_not(None),
+                        Deployment.lease_until.is_not(None),
+                        and_(
+                            Deployment.state == DeploymentState.SCHEDULED.value,
+                            or_(
+                                Deployment.external_operation_id.is_not(None),
+                                Deployment.mutation_intent != {},
+                                Deployment.plan_snapshot["start_intent"].as_boolean().is_(True),
+                            ),
+                        ),
+                    ),
+                )
+                .limit(1)
+            )
+            if blocked is None:
+                connection.deployment_status = (
+                    "PAUSED" if connection.deployment_paused else "QUEUED"
+                )
+        self._session.flush()
 
     def queue_connector(
         self, principal: Principal, connection_id: UUID, force: bool = False

@@ -493,6 +493,7 @@ def enqueue_scheduled_deployments() -> None:
     """Batch due staged changes per connector; the deployment worker handles provider jobs."""
     now = datetime.now(UTC)
     with new_session() as session:
+        DeploymentService(session).recover_scheduled_connections()
         active_batch_ids = list(
             session.scalars(
                 select(Deployment.id)
@@ -508,7 +509,8 @@ def enqueue_scheduled_deployments() -> None:
         )
         connections = list(
             session.scalars(
-                select(ProviderConnection).where(
+                select(ProviderConnection)
+                .where(
                     ProviderConnection.lifecycle == "ACTIVE",
                     ProviderConnection.write_enabled.is_(True),
                     ProviderConnection.deployment_schedule_enabled.is_(True),
@@ -517,6 +519,8 @@ def enqueue_scheduled_deployments() -> None:
                     # RUNNING suppresses creation of another batch for this connector.
                     | ProviderConnection.deployment_status.notin_(("RUNNING", "NOT_APPLICABLE")),
                 )
+                .order_by(ProviderConnection.id)
+                .with_for_update(skip_locked=True)
             )
         )
         # READY batches can be left behind if the worker restarts after the batch is
