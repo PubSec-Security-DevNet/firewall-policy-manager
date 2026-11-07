@@ -22,6 +22,16 @@ IdP groups do not automatically become Firewall Policy Manager Groups. Login doe
 
 Discovery, issuer, audience, expiry, RS256 signature, state, and nonce are validated server-side. Client secrets are encrypted and write-only in the UI.
 
+## When a browser session expires
+
+If a navigation request, action, or background refresh detects an expired session, the application
+clears its cached working context and shows the sign-in screen. Sign in again to return to Home
+and select your working context. Unsaved edits from the expired session are discarded; rejected
+actions are not automatically retried. Review the current state before submitting an action again.
+
+Permission errors and other API failures that do not indicate session expiry keep the current
+screen and draft available.
+
 ## API tokens
 
 Administrators can issue scoped, expiring tokens for an existing User. The plaintext is returned once; only a hash is retained. Tokens inherit the User's current enabled state and grants, so revocation or authorization changes take effect without rotating provider credentials.
