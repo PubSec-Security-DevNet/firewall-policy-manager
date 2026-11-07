@@ -4,7 +4,7 @@
 #
 #    pip-compile --extra=dev --output-file=requirements-dev.lock --strip-extras pyproject.toml
 #
-alembic==1.20.0
+alembic==1.20.1
     # via firewall-manager (pyproject.toml)
 annotated-doc==0.0.5
     # via fastapi
@@ -41,9 +41,9 @@ defusedxml==0.7.1
     # via py-serializable
 dramatiq==2.2.1
     # via firewall-manager (pyproject.toml)
-fastapi==0.150.0
+fastapi==0.162.0
     # via firewall-manager (pyproject.toml)
-filelock==4.0.1
+filelock==4.2.1
     # via cachecontrol
 grimp==3.17
     # via import-linter
@@ -74,7 +74,7 @@ markupsafe==3.0.3
     # via mako
 mdurl==0.1.2
     # via markdown-it-py
-msgpack==1.2.2
+msgpack==1.2.3
     # via cachecontrol
 nodeenv==1.10.0
     # via pyright
@@ -103,14 +103,14 @@ py-serializable==2.1.0
     # via cyclonedx-python-lib
 pycparser==3.0
     # via cffi
-pydantic==2.14.1
+pydantic==2.14.2
     # via
     #   fastapi
     #   firewall-manager (pyproject.toml)
     #   pydantic-settings
-pydantic-core==2.50.1
+pydantic-core==2.50.2
     # via pydantic
-pydantic-settings==2.16.0
+pydantic-settings==2.16.2
     # via firewall-manager (pyproject.toml)
 pygments==2.21.0
     # via
@@ -120,11 +120,11 @@ pyparsing==3.3.2
     # via pip-requirements-parser
 pyright==1.1.414
     # via firewall-manager (pyproject.toml)
-pytest==9.1.1
+pytest==9.2.0
     # via
     #   firewall-manager (pyproject.toml)
     #   pytest-asyncio
-pytest-asyncio==1.4.0
+pytest-asyncio==1.4.1.post1
     # via firewall-manager (pyproject.toml)
 python-dotenv==1.2.3
     # via pydantic-settings
@@ -142,11 +142,11 @@ rich==15.0.0
     # via
     #   import-linter
     #   pip-audit
-ruff==0.17.1
+ruff==0.17.3
     # via firewall-manager (pyproject.toml)
 sortedcontainers==2.4.0
     # via cyclonedx-python-lib
-sqlalchemy==2.1.5
+sqlalchemy==2.1.6
     # via
     #   alembic
     #   firewall-manager (pyproject.toml)
