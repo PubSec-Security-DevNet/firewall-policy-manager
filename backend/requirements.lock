@@ -46,7 +46,7 @@ markupsafe==3.0.3
     # via mako
 opentelemetry-api==1.45.1
     # via fastapi
-psycopg==3.3.6
+psycopg==3.3.7
     # via firewall-manager (pyproject.toml)
 pycparser==3.0
     # via cffi
@@ -67,7 +67,7 @@ redis==8.1.0
     # via
     #   dramatiq
     #   firewall-manager (pyproject.toml)
-sqlalchemy==2.1.6
+sqlalchemy==2.1.7
     # via
     #   alembic
     #   firewall-manager (pyproject.toml)
