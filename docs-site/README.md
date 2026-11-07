@@ -7,6 +7,13 @@ This directory is the versioned public documentation site for Firewall Policy Ma
 VitePress produces a fully static build, keeps Markdown first-class, and provides local search and
 navigation without adding documentation dependencies to the application runtime image.
 
+## Installation documentation
+
+`docs/production-installation.md` is the canonical script-based guide and is included by
+`installation/production.md`. Keep the installation landing page and root README aligned with
+that workflow. Runtime secrets and TLS pages explain script-managed configuration; recovery
+procedures belong under operations. Do not add a parallel manual Compose installation path.
+
 ## Local development
 
 ```sh

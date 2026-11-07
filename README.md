@@ -29,64 +29,44 @@ This delegated model complements rather than replaces separate instances. Where 
 failure-domain, or network-isolation requirements demand a hard infrastructure boundary, use the
 appropriate provider and platform isolation controls.
 
-## Production deployment
+## Installation
 
-**For every real installation, use the production container stack.** It runs the reverse proxy,
-production frontend, API, worker, singleton scheduler, PostgreSQL, authenticated Redis, and optional
-Prometheus/Grafana entirely in containers. The host needs Docker Engine, Docker Compose, Git, DNS,
-and network access—not Python, Node.js, PostgreSQL, Redis, or a web server. A trusted certificate is
-recommended; the stack creates a self-signed certificate when no PEM pair is supplied.
-
-The canonical command is:
+Use the production setup script for every real installation. It runs the frontend, API, worker,
+scheduler, PostgreSQL, Redis, and HTTPS proxy in containers. Prepare a Linux host with Docker
+Engine, Compose v2, Git, `curl`, a stable hostname, and inbound HTTPS access. Plan for 4 CPU cores,
+8 GiB RAM, and 50 GiB persistent disk for a small production deployment; a 1 GiB host is too small
+for the frontend build.
 
 ```sh
-docker compose --env-file /opt/firewall-manager/runtime/.env.production \
-  -f compose.production.yaml up -d
+git clone https://github.com/PubSec-Security-DevNet/firewall-policy-manager.git
+cd firewall-policy-manager
+git checkout --detach '<release-tag-or-commit>'
+./scripts/production.sh setup
 ```
 
-For a guided installation and day-two commands, use the optional production helper:
+Replace the checkout placeholder with a reviewed release tag or commit. Setup prompts for the
+public hostname and optional operator email, creates protected configuration and secrets, builds
+images, migrates the database, starts services, and validates HTTPS. It preserves existing data
+and configuration when rerun. When setup returns successfully, open the printed HTTPS URL to
+complete OIDC and create the first Platform Admin. There is no default production password.
+
+Setup creates a self-signed certificate if no certificate pair exists. Clients must trust it;
+install a CA-issued certificate before broad user access. See the
+[installation guide](docs/production-installation.md) for prerequisites, certificate management,
+setup troubleshooting, and the script command reference.
+
+For routine operations, run from the repository directory:
 
 ```sh
-./scripts/production.sh setup
 ./scripts/production.sh status
 ./scripts/production.sh stop
 ./scripts/production.sh start
-./scripts/production.sh cert-refresh
+./scripts/production.sh backup
+./scripts/production.sh help
 ```
 
-It prompts for the public hostname and operator email, creates protected configuration and secret
-files, builds images, migrates the database, starts the stack, and validates HTTPS. It never has a
-command that deletes production volumes or secret files. `cert-refresh` safely replaces only a
-self-signed certificate; use `cert-reload` after installing a renewed CA-issued PEM pair. The
-production guide includes a table explaining the effect and persistence behavior of every command.
-
-Use the helper, or complete the guide's configuration, secret, TLS, and migration sequence before
-treating the raw Compose command as a production start. Complete OIDC setup in the browser after
-the services are healthy. Use the copy/paste production sequence in the
-[full production installation guide](docs/production-installation.md).
-
-Production quick start:
-
-1. Provision Linux with Docker Engine, the Compose plugin, Git, DNS, and TCP 443.
-2. Check out an immutable release and create protected runtime, certificate, secret, and backup
-   directories outside the repository.
-3. Copy [.env.production.example](.env.production.example), generate the PostgreSQL, Redis,
-   Grafana, and protected application-key secret files, and optionally install a trusted HTTPS
-   certificate.
-4. Build the application images and start PostgreSQL and Redis.
-5. Run the containerized Alembic migration and start the API, worker, singleton scheduler,
-   production frontend, and Caddy edge.
-6. Use the one-time setup screen to test OIDC and create the first organization, provider, and
-   Platform Admin; the client secret is stored through the encrypted application SecretStore.
-7. Onboard FMC/SCC read-only, validate sync and capabilities, then configure authorization,
-   approvals, backups, monitoring, and write gates.
-8. Complete the guide's health, HTTPS, persistence, restart, restore, and security checks.
-
-The production stack publishes only TCP 80/443. Grafana is optional and binds to host loopback;
-PostgreSQL, Redis, Prometheus, API, worker, and scheduler have no public host bindings.
-
-> `compose.yaml` is not a production shortcut. It deliberately enables mock FMC/SCC providers,
-> development authentication, fixture users/data, Vite, source mounts, and API reload mode.
+The script manages the production Compose configuration. The separate development environment
+below is for contributors and tests.
 
 ## Development setup — not for production
 

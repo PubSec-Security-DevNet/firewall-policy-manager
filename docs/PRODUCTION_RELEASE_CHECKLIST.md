@@ -4,7 +4,7 @@
 
 - [ ] Approved non-production target and change window recorded.
 - [ ] PostgreSQL backup completed and copied to encrypted, access-controlled storage.
-- [ ] A restore rehearsal passed against the backup using the production installation procedure.
+- [ ] A restore rehearsal passed using the [backup and recovery runbook](backup-restore.md).
 - [ ] Protected `app_secret_key` file or approved external secret provider is configured.
 - [ ] `make secret-check` passed with the production key source.
 - [ ] Current encryption key version and recovery material recorded separately from PostgreSQL.

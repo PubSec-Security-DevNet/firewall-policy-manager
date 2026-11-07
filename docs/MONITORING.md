@@ -4,8 +4,7 @@ The canonical single-host deployment includes Prometheus and Grafana behind the 
 `monitoring` Compose profile:
 
 ```sh
-docker compose --env-file /opt/firewall-manager/runtime/.env.production \
-  -f compose.production.yaml --profile monitoring up -d prometheus grafana
+./scripts/production.sh monitoring-start
 ```
 
 Prometheus is container-private. Grafana binds to host loopback only, requires the generated admin

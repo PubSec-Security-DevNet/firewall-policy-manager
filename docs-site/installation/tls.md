@@ -1,6 +1,11 @@
 # TLS and certificates
 
-Public HTTPS is the production ingress boundary. Install a trusted `fullchain.pem` and matching unencrypted `privkey.pem` under the protected runtime TLS directory before setup. The certificate SAN must contain `APP_PUBLIC_HOST` exactly.
+`./scripts/production.sh setup` creates a self-signed certificate for the public hostname when
+no PEM pair exists. Clients must explicitly trust that certificate. Install a CA-issued pair
+before broad user access.
+
+After setup has created the runtime directories, install your trusted certificate and matching
+unencrypted key, then reload HTTPS:
 
 ```sh
 sudo install -o root -g root -m 0644 /secure/source/fullchain.pem \
@@ -10,8 +15,15 @@ sudo install -o root -g root -m 0600 /secure/source/privkey.pem \
 ./scripts/production.sh cert-reload
 ```
 
-If both PEM files are absent, the production stack can generate a hostname-correct self-signed pair. This provides encryption for installation and controlled environments, but clients must explicitly trust the new certificate. A partial pair fails closed.
+The certificate SAN must cover `APP_PUBLIC_HOST`. The full chain includes required intermediates.
+Coordinate replacement of both files so the proxy is not restarted with a partial pair.
 
-`cert-refresh` replaces only a self-signed pair and refuses to overwrite a CA-issued certificate. Installing a renewed trusted pair should be atomic, followed by `cert-reload` and an HTTPS readiness check.
+For a generated self-signed pair, use `./scripts/production.sh cert-refresh`. It refuses to replace
+a CA-issued certificate, and clients must trust the replacement. No image rebuild is needed.
 
-Provider TLS is independent from public ingress TLS. FMC/SCC trust remains verified through system trust or configured private CA material, with hostname verification required. Never disable certificate verification to resolve a connection problem.
+Setup preserves existing hostname settings and certificates. If your public hostname changes,
+follow [the hostname-change procedure](./production#if-the-public-hostname-changes) and update
+OIDC callback URLs as well.
+
+Provider TLS is independent from browser HTTPS. Keep FMC/SCC certificate verification enabled
+and configure provider trust through the connection settings.

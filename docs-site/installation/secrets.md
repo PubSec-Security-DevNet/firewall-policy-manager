@@ -1,22 +1,24 @@
-# Vault and secrets
+# Runtime secrets
 
-Production secrets must not appear in Git, container images, Compose output pasted into issues, logs, or shell history. The application supports protected deployment injection and HashiCorp Vault KV v2 through the same secret-provider boundary.
+`./scripts/production.sh setup` generates the PostgreSQL, Redis, Grafana, and application encryption
+secrets automatically. No separate secrets service or manual password-generation step is required.
+Rerunning setup preserves existing values.
 
-## What requires custody
+The default secret directory is `/opt/firewall-manager/runtime/secrets/`. Files are root-owned,
+restricted to the required container group, and mounted read-only into the services that need them.
+The non-secret settings file is separate; edit it with `./scripts/production.sh config`.
 
-- the application secret key used for sessions and encrypted application records;
-- PostgreSQL and Redis credentials;
-- the optional Grafana administrator credential;
-- OIDC client secrets;
-- FMC credentials and SCC API tokens;
-- public and private-CA private key material.
+## Protect recovery material
 
-The application key must remain stable across API, worker, and scheduler containers. Escrow it separately from PostgreSQL backups: a database dump without the key cannot decrypt stored provider or OIDC credentials.
+- Escrow the stable application encryption key separately from database backups. Both are needed
+  to recover encrypted OIDC, provider, and SMTP credentials.
+- Protect PostgreSQL, Redis, and optional Grafana credentials under your credential-custody policy.
+- Keep TLS private keys under your certificate-management policy.
+- Never put secret contents in Git, images, logs, screenshots, shell transcripts, or issues.
 
-## Validate and rotate
+Configure OIDC during browser setup and provider/SMTP credentials in the administrator UI. These
+credentials are encrypted in PostgreSQL using the file-mounted application key.
 
-Use the packaged secret check to prove that configured references can be resolved and encrypted records can be decrypted without printing values. Rotation is a transactional operator procedure: take a verified backup, retain the old key for the recovery window, rotate, validate every service, and only then retire the old material.
-
-For Vault, use a narrowly scoped workload identity and policy granting only required KV v2 paths. Protect Vault's own TLS identity and availability; readiness should fail visibly when required secrets cannot be resolved.
-
-See the [full production guide](./production#production-configuration-and-runtime-secrets) for exact file ownership and commands.
+Changing the application key file alone makes existing encrypted records unreadable. Key rotation
+requires a planned migration and recovery procedure; it is not part of routine installation.
+See [backups and restore](../operations/backup-restore) for recovery requirements.

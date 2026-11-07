@@ -1,38 +1,83 @@
 # Production installation and operations
 
-This is the canonical single-host production deployment for Firewall Policy Manager. Follow it
-from a clean Linux host. Every application runtime and infrastructure dependency runs in a
-container: Caddy, the built React frontend, FastAPI, Dramatiq worker, singleton scheduler,
-PostgreSQL, authenticated Redis, and optional Prometheus/Grafana. The host does not need Python,
-Node.js, PostgreSQL clients, Redis, or a web server. The guided helper and readiness checks use
-standard Linux utilities plus `curl`.
+Install Firewall Policy Manager with `./scripts/production.sh setup`. This is the single
+installation workflow for the supported Linux host deployment. The script creates protected
+configuration and secrets, builds the images, runs database migrations, starts the services,
+and validates HTTPS. You do not need to run Compose commands or generate secrets manually.
 
-The preferred ingress identity is an administrator-provided trusted certificate. If neither PEM
-file exists, a one-shot container automatically creates a hostname-correct self-signed certificate
-so clean installations and reboots do not require certificate intervention.
+Caddy, the production frontend, API, worker, scheduler, PostgreSQL, Redis, and optional monitoring
+run in containers. Python, Node.js, database clients, and a web server are not required on the host.
+The development environment is for contributors and tests only.
 
-`compose.yaml` is development-only. It contains mocks, development authentication, fixtures, hot
-reload, source mounts, and known local passwords. Production uses only
-`compose.production.yaml`.
+## Host and network prerequisites
 
-## Optional guided helper
+Prepare the host before running setup:
 
-Administrators who prefer a guarded workflow can use one script instead of entering the Compose
-commands individually:
+- A supported 64-bit Linux distribution with Docker Engine and the Compose v2 plugin installed
+  using the [Docker installation guide](https://docs.docker.com/engine/install/).
+- Git, Bash, `curl`, standard Linux utilities, Docker daemon access, and root or `sudo` access
+  to create protected host files. Treat Docker administration as root-equivalent access.
+- A stable hostname such as `firewall.example.com`, resolving to this server from both the host
+  and client browsers. Use a persistent public IP/DNS arrangement for cloud deployments.
+- Inbound TCP 443 for HTTPS and optionally TCP 80 for redirects. Keep database, queue, and
+  application container ports private.
+- Outbound access for image/package downloads, OIDC, FMC/SCC, and your SMTP service, plus
+  working DNS and time synchronization.
+- An OIDC confidential client in Entra ID, Duo SSO, or a compatible provider, and an approved
+  destination for encrypted off-host backups.
+
+For a small production installation, plan for **4 CPU cores, 8 GiB RAM, and 50 GiB of fast
+persistent disk**, plus backup capacity. These are planning figures, not a capacity guarantee.
+The frontend build has exhausted a 1 GiB host with no swap; use at least 4 GiB RAM for build
+headroom. Monitor actual usage and allow additional capacity for inventories, audit retention,
+backups, and optional monitoring.
+
+Check the host:
 
 ```sh
-cd /opt/firewall-manager/repository
+docker version
+docker compose version
+git --version
+curl --version
+free -h
+df -h
+```
+
+## Check out the release and run setup
+
+Clone the repository into your chosen code directory and select a reviewed release tag or commit.
+Replace `<release-tag-or-commit>` before running the checkout command:
+
+```sh
+git clone https://github.com/PubSec-Security-DevNet/firewall-policy-manager.git
+cd firewall-policy-manager
+git checkout --detach '<release-tag-or-commit>'
 ./scripts/production.sh setup
 ```
 
-The helper checks Docker, prompts for the public hostname and optional operator email, creates the
-runtime directories, generates protected PostgreSQL/Redis/Grafana/application secrets without
-printing them, builds the application images, starts infrastructure, applies migrations, starts the
-complete stack, and validates HTTPS/API readiness. It requests `sudo` only while creating or
-protecting host files. If the TLS directory is empty, the normal self-signed certificate initializer
-runs automatically. The browser-based OIDC setup remains an intentional interactive step.
+Run subsequent script commands from this repository directory. When prompted, enter:
 
-For automation, supply the prompts without placing secrets in the environment:
+1. **Public hostname:** the exact hostname you will open in the browser, without `https://`,
+   a port, or a path.
+2. **Operator contact email:** optional contact information; it does not create an administrator.
+
+Setup creates the runtime and backup directories automatically. It generates PostgreSQL, Redis,
+Grafana, and application encryption secrets without printing their values. When no certificate
+pair exists, it also creates a self-signed certificate for the configured hostname.
+
+The image build is followed by database startup, migrations, application startup, health checks,
+and HTTPS validation. **Build completion is not setup completion.** A successful run prints:
+
+```text
+Production validation passed: https://your-configured-hostname
+Open the configured HTTPS URL to complete the one-time OIDC setup.
+```
+
+Setup then returns to the shell prompt. If it fails, correct the reported issue and rerun `setup`.
+Existing configuration, secrets, certificates, and database volumes are preserved. If setup is
+already running, use a second terminal for `status` rather than starting another setup process.
+
+For unattended setup, provide the same non-secret answers:
 
 ```sh
 FM_PUBLIC_HOST=firewall.example.com \
@@ -40,293 +85,78 @@ FM_ADMIN_EMAIL=firewall-operations@example.com \
 ./scripts/production.sh setup
 ```
 
-The operation commands and their effects are:
+These variables initialize a new configuration; they do not overwrite an existing one.
 
-| Command | Purpose and effect |
-| --- | --- |
-| `setup` | First-time configuration: create protected files, build, migrate, start, and validate. Existing configuration and secrets are preserved. |
-| `start` | Start or recreate the core stack and wait for health checks. Data and secrets remain unchanged. |
-| `stop` | Stop containers so they can be restarted later. Containers, volumes, data, and secrets remain. |
-| `restart` | Stop and start the core stack, then wait for health checks. Expect a short outage. |
-| `down` | Remove production containers and networks. Named data volumes, backups, certificates, and secret files remain. |
-| `status` | Show all production containers, including stopped containers and health state. |
-| `logs [SERVICE ...]` | Follow the latest 200 log lines for everything or selected services; press Ctrl-C to exit. |
-| `migrate` | Stop the API, worker and scheduler, apply pending migrations, and print the revision. Services stay stopped; review the upgrade result before `start`. |
-| `backup` | Create a timestamped PostgreSQL dump and verify that PostgreSQL can read it. It does not copy the dump off-host. |
-| `cert-refresh` | Generate a new 365-day self-signed certificate, restart the edge proxy, and validate HTTPS. It refuses to overwrite a CA-issued certificate. Clients must trust the new certificate. |
-| `cert-reload` | Validate and reload the edge proxy after an administrator or PKI tool installs a renewed trusted PEM pair. No image rebuild is performed. |
-| `monitoring-start` | Start the optional Prometheus and Grafana services and wait for health checks. |
-| `monitoring-stop` | Stop Prometheus and Grafana while preserving their data. |
-| `validate` | Render-check Compose, show service state, and test the HTTPS API readiness endpoint. |
-| `config` | Open the non-secret production environment file in `$EDITOR` (default `vi`). Restart affected services afterward. |
-| `help` | Print the command list and unattended-setup environment variables. |
+## HTTPS and configuration
 
-For example:
+Open the exact URL printed by setup. A generated self-signed certificate requires explicit client
+trust. Install a certificate issued by your organization's CA or a public CA before broad user
+access. Browser certificate trust is separate from FMC/SCC provider trust.
 
-```sh
-./scripts/production.sh status
-./scripts/production.sh logs backend worker scheduler
-./scripts/production.sh backup
-./scripts/production.sh cert-refresh
-./scripts/production.sh monitoring-start
-```
+Default locations created by setup:
 
-Run `./scripts/production.sh help` for the complete command list. The helper deliberately provides
-no volume/secret deletion or restore shortcut. Restore, key rotation, upgrades, and decommissioning
-remain explicit procedures later in this guide because they require operator judgment. The manual
-sections below remain the authoritative explanation of every action performed by `setup`.
+| Location                                        | Contents                                                          |
+| ----------------------------------------------- | ----------------------------------------------------------------- |
+| `/opt/firewall-manager/runtime/.env.production` | Non-secret application settings and public hostname               |
+| `/opt/firewall-manager/runtime/secrets/`        | Protected service passwords and stable application encryption key |
+| `/opt/firewall-manager/runtime/tls/`            | `fullchain.pem` and matching `privkey.pem`                        |
+| `/opt/firewall-manager/backups/`                | Local database backup staging directory                           |
 
-## 1. Architecture and security boundary
+If you use `FM_RUNTIME_DIR` or `FM_BACKUP_DIR`, supply the same values on subsequent script calls.
+Keep these paths outside the repository. Back up the application key separately from the database;
+losing it makes stored OIDC, provider, and SMTP credentials unrecoverable.
 
-```text
-browser -- HTTPS :443 --> Caddy -- edge network --> frontend:8080
-                              |
-                              +-------------------> backend:8000
-                                                       |
-                          data network (internal) -----+--> PostgreSQL
-                              |                        +--> Redis
-                              +--> worker / scheduler -+
-
-backend / worker / scheduler -- egress network --> OIDC, SMTP, FMC, SCC
-Prometheus / Grafana -------- monitoring network --> backend metrics
-```
-
-Only TCP 80 and 443 are published on all host interfaces. Port 80 exists only for HTTPS redirect;
-close it if the redirect is not wanted. Grafana's optional admin network publishes only to
-`127.0.0.1`. PostgreSQL,
-Redis, Prometheus, API, frontend, worker, and scheduler have no public host bindings. The data and
-monitoring networks are Docker-internal. The worker and scheduler are separate processes; the
-scheduler also holds a PostgreSQL advisory lock so a second instance exits instead of running
-duplicate schedules.
-
-## 2. Host and network prerequisites
-
-Use a supported 64-bit Linux distribution and a current Docker Engine/Compose plugin from the
-[official Docker installation instructions](https://docs.docker.com/engine/install/). The commands
-below assume Ubuntu 24.04 or a comparably maintained server, systemd, and an administrator who can
-use `sudo`. Install Docker from Docker's repository—not an unmaintained distribution package—and
-verify it:
+Edit non-secret settings with:
 
 ```sh
-sudo systemctl enable --now docker
-sudo docker version
-sudo docker compose version
-sudo docker run --rm hello-world
-git --version
-curl --version
+./scripts/production.sh config
+./scripts/production.sh start
+./scripts/production.sh validate
 ```
 
-Use rootful Docker or protect membership in the `docker` group as root-equivalent access. Configure
-the Docker daemon and host filesystem according to local hardening standards.
+`start` applies environment changes by recreating affected services. Routine setup does not
+regenerate existing secrets or certificates. Do not change the application key as a configuration edit.
 
-Baseline planning for a small installation is 4 CPU cores, 8 GiB RAM, 50 GiB fast persistent disk
-plus backup capacity. This is starting guidance, not a capacity guarantee. Inventory size,
-ChangeSet/audit retention, PostgreSQL, Prometheus retention, container logs, and database dumps
-determine actual growth. Monitor them and resize before exhaustion; do not impose arbitrary limits
-without workload measurements.
+### Install or renew a trusted certificate
 
-Prerequisites:
-
-- one stable DNS name, for example `firewall.example.com`, resolving to the host or its load
-  balancer;
-- preferably, an administrator-provided server certificate whose SAN contains that exact name,
-  its full intermediate chain, and the matching unencrypted PEM private key; otherwise the stack
-  creates a self-signed certificate that clients must explicitly trust;
-- inbound TCP 443, and optionally TCP 80 for redirect;
-- outbound HTTPS from application containers to the OIDC discovery/token/JWKS endpoints and FMC/
-  SCC APIs, plus the selected SMTP port;
-- correct time synchronization and an organization-approved backup destination;
-- an OIDC confidential client in Microsoft Entra ID, Cisco Duo SSO, or a standards-compliant OIDC
-  provider.
-
-Internal container traffic is API→PostgreSQL/Redis, worker and scheduler→PostgreSQL/Redis,
-Prometheus→API metrics, and Grafana→Prometheus. Do not add host port mappings for those services.
-
-## 3. Filesystem layout and release checkout
-
-Use an immutable release tag or reviewed commit, never an unreviewed moving branch:
-
-```sh
-sudo install -d -m 0750 -o "$USER" -g "$USER" /opt/firewall-manager
-cd /opt/firewall-manager
-git clone https://github.com/PubSec-Security-DevNet/firewall-policy-manager.git repository
-cd repository
-git fetch --tags --force
-git checkout --detach '<release-tag>'
-
-sudo install -d -m 0750 -o "$USER" -g "$USER" \
-  /opt/firewall-manager/runtime \
-  /opt/firewall-manager/runtime/tls \
-  /opt/firewall-manager/runtime/secrets \
-  /opt/firewall-manager/backups
-sudo chown root:root /opt/firewall-manager/runtime/tls
-sudo chmod 0750 /opt/firewall-manager/runtime/tls
-```
-
-The `repository/` directory is Git-tracked code and non-secret policy/configuration.
-`runtime/` contains the environment, Docker secret sources, and certificates. `backups/` contains
-local staging copies of database dumps; copy them off-host. `production/runtime/`, PEM keys,
-secrets, and backups are ignored by the repository, but `/opt/firewall-manager/runtime` is preferred
-so an accidental `git add` cannot reach them.
-
-## 4. Production configuration and runtime secrets
-
-```sh
-cd /opt/firewall-manager/repository
-cp .env.production.example /opt/firewall-manager/runtime/.env.production
-chmod 0600 /opt/firewall-manager/runtime/.env.production
-```
-
-Edit it and set `APP_PUBLIC_HOST`, `APP_PUBLIC_URL`, operator email, retention, and the two absolute
-directory paths. It contains no passwords. Compose forces `APP_ENVIRONMENT=production`,
-`DEV_AUTH_ENABLED=false`, file-mounted SecretStore key injection, HTTPS CORS, and non-mock default
-provider URLs.
-
-Generate unique secrets with container tools. The random values are never printed:
-
-```sh
-umask 027
-docker run --rm alpine:3.22 sh -c 'head -c 48 /dev/urandom | base64' \
-  > /opt/firewall-manager/runtime/secrets/postgres_password
-docker run --rm alpine:3.22 sh -c 'head -c 48 /dev/urandom | base64' \
-  > /opt/firewall-manager/runtime/secrets/redis_password
-docker run --rm alpine:3.22 sh -c 'head -c 48 /dev/urandom | base64' \
-  > /opt/firewall-manager/runtime/secrets/grafana_admin_password
-docker run --rm alpine:3.22 sh -c 'head -c 32 /dev/urandom | base64' \
-  > /opt/firewall-manager/runtime/secrets/app_secret_key
-```
-
-Grant the fixed application container group read access while keeping host access restricted:
-
-```sh
-sudo chown -R root:10001 /opt/firewall-manager/runtime/secrets
-sudo chmod 0750 /opt/firewall-manager/runtime/secrets
-sudo chmod 0640 /opt/firewall-manager/runtime/secrets/*
-sudo chown root:10001 /opt/firewall-manager/backups
-sudo chmod 0770 /opt/firewall-manager/backups
-```
-
-The PostgreSQL password bootstraps both PostgreSQL and the application connection. The Redis
-password protects the private broker. The 32-byte base64 `app_secret_key` signs sessions and
-encrypts application secrets; it must remain stable and must be escrowed separately from database
-backups. The Grafana password is required only when the monitoring profile runs. OIDC is configured
-later through the one-time setup screen; no OIDC secret file is needed. Never paste `docker compose
-config` output from locally customized secret-bearing environment values into an issue.
-
-## 5. Configure the HTTPS certificate
-
-For a trusted production identity, copy the CA-issued files without committing or baking them into
-an image:
+After setup has created the runtime directories, install your matching PEM files and reload HTTPS:
 
 ```sh
 sudo install -o root -g root -m 0644 /secure/source/fullchain.pem \
   /opt/firewall-manager/runtime/tls/fullchain.pem
 sudo install -o root -g root -m 0600 /secure/source/privkey.pem \
   /opt/firewall-manager/runtime/tls/privkey.pem
-```
-
-`fullchain.pem` must contain the leaf server certificate followed by required intermediate
-certificates. `privkey.pem` must match it and must not be password-encrypted because Caddy starts
-unattended. The certificate SAN must contain `APP_PUBLIC_HOST`. With an enterprise CA, browsers and
-managed clients must trust the issuing root/intermediates; that browser trust is separate from FMC
-or SCC provider trust.
-
-The primary path uses supplied PEM files and does not require public ACME. Certificate renewal is
-an atomic file replacement followed by a proxy reload. After installing the replacement pair, the
-helper performs the validation, reload, and readiness check:
-
-```sh
-sudo install -o root -g root -m 0644 /secure/source/fullchain.pem.new \
-  /opt/firewall-manager/runtime/tls/fullchain.pem.new
-sudo install -o root -g root -m 0600 /secure/source/privkey.pem.new \
-  /opt/firewall-manager/runtime/tls/privkey.pem.new
-sudo mv /opt/firewall-manager/runtime/tls/fullchain.pem.new \
-  /opt/firewall-manager/runtime/tls/fullchain.pem
-sudo mv /opt/firewall-manager/runtime/tls/privkey.pem.new \
-  /opt/firewall-manager/runtime/tls/privkey.pem
 ./scripts/production.sh cert-reload
 ```
 
-Verify the renewed expiry and chain with your enterprise TLS scanner or
-`openssl s_client` from an approved administration workstation. No image rebuild is needed.
+The full chain must include the server certificate and required intermediates. The unencrypted
+private key must match, and the certificate SAN must cover `APP_PUBLIC_HOST`. Coordinate replacement
+of both files so no proxy restart occurs between them. A partial pair fails initialization.
 
-If both `fullchain.pem` and `privkey.pem` are absent, leave the TLS directory empty. When the edge
-service starts, the `tls-init` one-shot container generates a P-256 self-signed certificate valid
-for 365 days with `APP_PUBLIC_HOST` in its SAN. It writes the key with mode `0600`, then Caddy starts
-normally. It never overwrites an existing pair. If only one PEM file exists, initialization fails
-instead of replacing or mismatching administrator material.
-
-A self-signed certificate encrypts traffic but does not establish a publicly trusted server
-identity. Browsers will warn until administrators distribute `fullchain.pem` as an approved trust
-anchor. Replace it with an enterprise/public CA certificate before broad user access. After placing
-both replacement files, run `./scripts/production.sh cert-reload`; no application image rebuild is
-required.
-
-Run `./scripts/production.sh cert-refresh` to replace the generated self-signed certificate with a
-new 365-day pair. The command validates that the existing certificate is self-signed, refuses a
-CA-issued certificate, restarts only the edge proxy, and checks readiness. Because a newly generated
-self-signed certificate is a new trust anchor, clients must explicitly trust the replacement. The
-helper cannot renew a CA-issued certificate because issuance and authorization vary by PKI; automate
-your approved PKI client to install both PEM files atomically and then invoke `cert-reload`.
-
-## 6. Render, build, and start infrastructure
-
-Use this exact Compose prefix for all remaining commands:
+To renew the setup-generated self-signed pair instead:
 
 ```sh
-cd /opt/firewall-manager/repository
-docker compose --env-file /opt/firewall-manager/runtime/.env.production \
-  -f compose.production.yaml config --quiet
-docker compose --env-file /opt/firewall-manager/runtime/.env.production \
-  -f compose.production.yaml build backend frontend
-docker compose --env-file /opt/firewall-manager/runtime/.env.production \
-  -f compose.production.yaml up -d db redis
+./scripts/production.sh cert-refresh
 ```
 
-PostgreSQL and Redis must become healthy. The Compose render contains secret file *paths*, not
-their values. Treat rendered output as operational configuration anyway; inspect it locally and do
-not attach it blindly to tickets.
+This command refuses to replace a CA-issued certificate. Clients must trust the new self-signed
+certificate. Neither certificate command rebuilds the application images.
 
-The `tls-init` service runs automatically when `edge` is requested. Inspect its result with:
+### If the public hostname changes
+
+Rerunning setup keeps the old hostname and certificate. Use `config` to update both `APP_PUBLIC_HOST`
+and `APP_PUBLIC_URL`. For a setup-generated self-signed certificate, then run:
 
 ```sh
-docker compose --env-file /opt/firewall-manager/runtime/.env.production \
-  -f compose.production.yaml logs tls-init
+./scripts/production.sh cert-refresh
+./scripts/production.sh start
+./scripts/production.sh validate
 ```
 
-Verify the master-key file can be loaded without printing it:
+For a CA-issued certificate, install a replacement covering the new hostname and use `cert-reload`
+in place of `cert-refresh`. Update the OIDC client's registered callback URLs to the new hostname.
 
-```sh
-docker compose --env-file /opt/firewall-manager/runtime/.env.production \
-  -f compose.production.yaml run --rm --no-deps backend python -c \
-  'from firewall_manager.config import get_settings; assert get_settings().secret_store_master_key; print("Application secret key: ok")'
-```
-
-The key remains a plaintext host file protected by ownership and filesystem permissions. Docker
-Compose bind-mounts it read-only only into application containers that need it. It is not stored in
-an environment variable, image, Compose interpolation output, or database. Host root and Docker
-administrators can read it, so restrict that access and use full-disk encryption where required.
-Keep a separately encrypted escrow copy: losing this key makes encrypted OIDC, provider, and SMTP
-credentials unrecoverable even when the PostgreSQL backup is intact.
-
-## 7. Migrate and start the application
-
-Migrations are an explicit administrator step; the API never races another replica to migrate:
-
-```sh
-docker compose --env-file /opt/firewall-manager/runtime/.env.production \
-  -f compose.production.yaml run --rm migrate
-docker compose --env-file /opt/firewall-manager/runtime/.env.production \
-  -f compose.production.yaml run --rm migrate alembic current
-docker compose --env-file /opt/firewall-manager/runtime/.env.production \
-  -f compose.production.yaml up -d backend worker scheduler frontend edge
-```
-
-An Alembic failure exits nonzero; do not start or upgrade application containers until it is
-resolved. `alembic upgrade head` is idempotent. Production images contain Alembic and Python, so
-the host does not.
-
-## 8. Complete first-time OIDC setup
+## Complete first-time OIDC setup
 
 There is no default account, password login, development identity header, or file-based bootstrap
 provider. On a genuinely empty database, the login page presents a one-time setup screen. Before
@@ -368,25 +198,9 @@ Provider requirements:
 Issuer + subject controls identity mapping. Email/display-name claims are metadata and do not
 authorize or auto-link users.
 
-## 9. SMTP and application secrets
+## Connect FMC or SCC
 
-The production secret model is:
-
-| Secret | Location | Backup requirement |
-| --- | --- | --- |
-| PostgreSQL password | protected Docker secret source file | credential escrow |
-| Redis password | protected Docker secret source file | rotate/recreate if lost |
-| application/session encryption key | protected Docker secret source file | separate encrypted escrow is mandatory |
-| OIDC/provider/SMTP credentials | AES-256-GCM ciphertext in PostgreSQL | DB plus application key required |
-| Grafana admin password | protected Docker secret source file | rotate if lost |
-| public TLS private key | protected runtime certificate path | enterprise PKI process |
-
-Configure SMTP after login through the administration UI whenever possible. Set host, port, sender,
-STARTTLS or implicit TLS, username/password, and an optional custom SMTP CA. The password is
-write-only encrypted storage. If SMTP is unavailable, notifications retry through the worker;
-in-application approval queues remain authoritative and usable. Do not bundle a mail server.
-
-## 10. FMC onboarding
+### FMC onboarding
 
 FMC and SCC trust are unrelated to the browser certificate. A container may not trust an internal
 FMC CA by default. For FMC, choose `CUSTOM_CA` and paste the PEM CA chain into the connection form;
@@ -412,7 +226,7 @@ application write gate. Cisco role names and permissions vary by FMC release; va
 working read set first, then add only the exact configuration/deployment permissions proven by the
 target version.
 
-## 11. SCC onboarding
+### SCC onboarding
 
 SCC uses a selected Cisco region and an API bearer token rather than an FMC URL and username/
 password. As Platform Admin:
@@ -428,7 +242,10 @@ password. As Platform Admin:
 Do not paste an FMC CA into SCC or copy FMC permission labels to SCC; SCC uses Cisco-managed regional
 TLS and token scopes.
 
-## 12. Initial application checklist
+### Before enabling provider writes
+
+Configure SMTP through the administrator UI if notifications are required. SMTP credentials are
+encrypted with the application key; in-app approval queues remain available if delivery fails.
 
 Complete in order after the first login:
 
@@ -444,172 +261,106 @@ Complete in order after the first login:
 - [ ] monitoring alerts loaded
 - [ ] database backup created, copied off-host, and restore-tested
 
-## 13. Monitoring and logging
+## Routine operations
 
-Monitoring is optional because Prometheus/Grafana consume additional memory and disk:
+All commands below use `./scripts/production.sh COMMAND` from the repository directory.
 
-```sh
-docker compose --env-file /opt/firewall-manager/runtime/.env.production \
-  -f compose.production.yaml --profile monitoring up -d prometheus grafana
-```
+| Command              | Purpose and effect                                                                                                                                                                   |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `setup`              | First-time configuration: create protected files, build, migrate, start, and validate. Existing configuration and secrets are preserved.                                             |
+| `start`              | Start or recreate the core stack and wait for health checks. Data and secrets remain unchanged.                                                                                      |
+| `stop`               | Stop containers so they can be restarted later. Containers, volumes, data, and secrets remain.                                                                                       |
+| `restart`            | Stop and start the core stack, then wait for health checks. Expect a short outage.                                                                                                   |
+| `down`               | Remove production containers and networks. Named data volumes, backups, certificates, and secret files remain.                                                                       |
+| `status`             | Show all production containers, including stopped containers and health state.                                                                                                       |
+| `logs [SERVICE ...]` | Follow the latest 200 log lines for everything or selected services; press Ctrl-C to exit.                                                                                           |
+| `migrate`            | Stop the API, worker and scheduler, apply pending migrations, and print the revision. Services stay stopped; review the upgrade result before `start`.                               |
+| `backup`             | Create a timestamped PostgreSQL dump and verify that PostgreSQL can read it. It does not copy the dump off-host.                                                                     |
+| `cert-refresh`       | Generate a new 365-day self-signed certificate, restart the edge proxy, and validate HTTPS. It refuses to overwrite a CA-issued certificate. Clients must trust the new certificate. |
+| `cert-reload`        | Validate and reload the edge proxy after an administrator or PKI tool installs a renewed trusted PEM pair. No image rebuild is performed.                                            |
+| `monitoring-start`   | Start the optional Prometheus and Grafana services and wait for health checks.                                                                                                       |
+| `monitoring-stop`    | Stop Prometheus and Grafana while preserving their data.                                                                                                                             |
+| `validate`           | Render-check Compose, show service state, and test the HTTPS API readiness endpoint.                                                                                                 |
+| `config`             | Open the non-secret production environment file in `$EDITOR` (default `vi`). Run `start` to apply environment changes.                                                               |
+| `help`               | Print the command list and unattended-setup environment variables.                                                                                                                   |
 
-Prometheus has no host port. Grafana binds only to `127.0.0.1:${GRAFANA_PORT}` and disallows
-anonymous access/sign-up; reach it through an SSH tunnel or approved authenticated reverse proxy.
-Use the generated admin password, then rotate it according to policy. The provisioned datasource
-and dashboard load automatically. Alerts cover API availability, errors/rate limits, worker
-heartbeat, and reconciliation state.
+`logs` intentionally follows output until you press Ctrl+C; this exits log viewing without stopping
+services. `setup`, `start`, and `validate` should complete and return to the prompt.
 
-Application logs are structured JSON with correlation IDs and redaction filters:
-
-```sh
-docker compose --env-file /opt/firewall-manager/runtime/.env.production \
-  -f compose.production.yaml logs --since=30m backend worker scheduler edge
-```
-
-Compose uses Docker's `json-file` driver with five 10 MiB files per container to prevent unbounded
-local growth. Forward logs to the enterprise aggregation platform with access controls and
-retention; never enable permanent DEBUG logging or collect cookies, authorization headers, OIDC
-codes, provider payloads, or secret-bearing request bodies.
-
-## 14. Readiness verification
-
-`docker ps` is insufficient. Run all relevant checks:
+Start optional monitoring and inspect service health with:
 
 ```sh
-docker compose --env-file /opt/firewall-manager/runtime/.env.production \
-  -f compose.production.yaml ps
-curl --fail --silent https://firewall.example.com/healthz
-curl --fail --silent https://firewall.example.com/api/v1/health/live
-curl --fail --silent https://firewall.example.com/api/v1/health/ready
-test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
-  https://firewall.example.com/api/v1/metrics)" = 404
-
-docker compose --env-file /opt/firewall-manager/runtime/.env.production \
-  -f compose.production.yaml exec db sh -c 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
-docker compose --env-file /opt/firewall-manager/runtime/.env.production \
-  -f compose.production.yaml exec redis sh -c \
-  'redis-cli --no-auth-warning -a "$(cat /run/secrets/redis_password)" ping'
-docker compose --env-file /opt/firewall-manager/runtime/.env.production \
-  -f compose.production.yaml exec worker python -m firewall_manager.worker.health
-docker compose --env-file /opt/firewall-manager/runtime/.env.production \
-  -f compose.production.yaml exec scheduler python -m firewall_manager.scheduler_health
-docker compose --env-file /opt/firewall-manager/runtime/.env.production \
-  -f compose.production.yaml run --rm migrate alembic current
+./scripts/production.sh monitoring-start
+./scripts/production.sh status
+./scripts/production.sh validate
+./scripts/production.sh logs backend worker scheduler edge
 ```
 
-Also verify browser login, secure/HttpOnly session cookies, CSRF rejection, HSTS/security headers,
-the certificate hostname/chain/expiry, one provider test, one full sync, one in-app approval, and
-monitoring targets/alerts when enabled.
+Prometheus remains private. Grafana binds to host loopback; use an approved SSH tunnel or
+administrative ingress. Keep alerts, finite log retention, and off-host backups operational.
 
-For the generated self-signed certificate, add
-`--cacert /opt/firewall-manager/runtime/tls/fullchain.pem` to the host-side `curl` commands. Do not
-use `--insecure`; client trust should remain explicit.
-
-## 15. Back up and restore through containers
-
-Create and validate a PostgreSQL custom-format dump without host PostgreSQL tools:
+## Backups and recovery
 
 ```sh
-docker compose --env-file /opt/firewall-manager/runtime/.env.production \
-  -f compose.production.yaml --profile ops run --rm backup backup
-docker compose --env-file /opt/firewall-manager/runtime/.env.production \
-  -f compose.production.yaml --profile ops run --rm backup \
-  verify /backups/firewall-manager-YYYYMMDDTHHMMSSZ.dump
+./scripts/production.sh backup
 ```
 
-Copy verified dumps off-host, encrypt them in transit/at rest, enforce retention, and record restore
-tests. Local dumps are not disaster recovery. Escrow `app_secret_key` separately under equivalent
-or stronger protection; do not place it beside the database dump. A PostgreSQL dump without that
-key cannot decrypt stored credentials.
+This creates a timestamped PostgreSQL dump and checks that PostgreSQL can read it. Copy the dump to
+encrypted off-host storage and retain the matching application key separately. Archive verification
+does not replace an isolated restore test. A database restore does not roll back firewall state.
 
-Restore during an approved maintenance window:
+The script has no restore or volume-deletion command. Restore requires an explicit maintenance plan
+and provider reconciliation; follow the
+[backup and recovery runbook](https://github.com/PubSec-Security-DevNet/firewall-policy-manager/blob/main/docs/backup-restore.md).
+
+## Upgrade and rollback
+
+Use a maintenance window. Pause provider schedules/writes and reconcile active operations. Review
+release-specific migration and recovery instructions, take a backup, and confirm key custody.
+Then stop services before switching to the reviewed release and rerun setup:
 
 ```sh
-docker compose --env-file /opt/firewall-manager/runtime/.env.production \
-  -f compose.production.yaml stop edge frontend backend worker scheduler
-docker compose --env-file /opt/firewall-manager/runtime/.env.production \
-  -f compose.production.yaml --profile ops run --rm \
-  -e CONFIRM_RESTORE=restore backup restore /backups/firewall-manager-YYYYMMDDTHHMMSSZ.dump
-docker compose --env-file /opt/firewall-manager/runtime/.env.production \
-  -f compose.production.yaml run --rm migrate
-docker compose --env-file /opt/firewall-manager/runtime/.env.production \
-  -f compose.production.yaml up -d backend worker scheduler frontend edge
+./scripts/production.sh backup
+./scripts/production.sh stop
+git fetch --tags
+git checkout --detach '<new-release-tag-or-commit>'
+./scripts/production.sh setup
 ```
 
-Then run readiness checks, inspect pending/deploying ChangeSets, compare FMC/SCC actual state, mark
-uncertain operations for reconciliation, and only then resume schedules/writes. A database restore
-does **not** roll back FMC or SCC. Use a compensating ChangeSet/provider rollback procedure based
-on observed provider state.
+Setup rebuilds the images, starts the database and queue, migrates, starts the application, and
+validates HTTPS while retaining configuration and data. If it fails, resolve the error before
+resuming service. Verify login, provider reads, full synchronization, worker/scheduler health,
+and monitoring before reopening write gates. If monitoring was enabled, run `monitoring-start`
+after setup to bring that optional stack up as well.
 
-Never run `docker compose down -v` in production: `-v` destroys PostgreSQL, Redis, Prometheus, and
-Grafana named volumes. Normal `docker compose down`, container recreation, image upgrade, and host
-reboot preserve them. The separately mounted secret files are not Compose volumes and are not
-removed by either command.
+An older application image does not reverse database migrations or firewall changes. Use the
+release-specific recovery procedure; prefer a forward fix unless a tested rollback is documented.
 
-## 16. Host restart and persistence test
+## Restart and persistence verification
 
-During commissioning, record a maintenance window and test:
+During commissioning, test `restart` and a planned host reboot. Verify that Users, provider records,
+worker/scheduler heartbeats, and queued work survive. Reconcile provider state before resuming writes.
+Docker must start at boot; services use `restart: unless-stopped`. Services explicitly stopped with
+`stop` require `start` to resume.
 
-```sh
-docker compose --env-file /opt/firewall-manager/runtime/.env.production \
-  -f compose.production.yaml down
-docker compose --env-file /opt/firewall-manager/runtime/.env.production \
-  -f compose.production.yaml up -d
-```
+## Installation troubleshooting
 
-No operator action is required after Docker starts: every required secret is available from its
-protected host file and services start under `restart: unless-stopped`. Confirm the same users and
-provider records exist, Redis AOF state is accepted, the worker heartbeat returns, only one
-scheduler owns its advisory lock, queued work resumes, and provider state is reconciled before
-writes. During commissioning, also perform a real host reboot and repeat these checks.
+| Symptom                                              | Check and next action                                                                                                                                                                 |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `./scripts/production.sh: No such file or directory` | Change into the cloned `firewall-policy-manager` directory.                                                                                                                           |
+| Build stalls at `tsc -b` or exits unexpectedly       | Check `free -h` and kernel OOM logs. Increase host memory if the kernel killed build processes, then rerun setup.                                                                     |
+| Images finish building but setup has not returned    | Run `status` in another terminal and inspect `logs backend worker scheduler edge tls-init`. Setup still has migrations, health checks, and HTTPS validation to complete.              |
+| Services are healthy but setup/validate waits        | Check configured hostname, DNS, routing, and TCP 443 from the host. The current final HTTPS check has no explicit timeout.                                                            |
+| Browser reports `ERR_SSL_PROTOCOL_ERROR`             | Compare the browser hostname with `APP_PUBLIC_HOST`, `APP_PUBLIC_URL`, and the certificate SAN; inspect `logs edge tls-init`. Use the hostname-change procedure above if they differ. |
+| Browser reports an untrusted certificate             | Trust the generated certificate through your approved process or install a CA-issued pair; do not disable certificate verification.                                                   |
+| Logs never return to the prompt                      | `logs` follows output by design. Press Ctrl+C to stop viewing.                                                                                                                        |
 
-## 17. Upgrade and rollback
+Setup retains the original hostname and certificate even if the server's public address changes.
+Prefer a stable hostname and IP arrangement to avoid repeated certificate and OIDC callback changes.
 
-There is no claimed zero-downtime upgrade for this single-host reference architecture.
+## Final security checklist
 
-1. Pause deployment schedules and leave provider write gates closed where practical.
-2. Review release notes and Compose/image changes.
-3. Create and verify a PostgreSQL dump; confirm separate encrypted custody of `app_secret_key`.
-4. Fetch and detach at the new immutable tag.
-5. Render Compose locally and build/pull images.
-6. Stop edge/API/worker/scheduler, run the explicit migration, then recreate them.
-7. Run all readiness, login, provider connectivity, sync, queue, and monitoring checks.
-8. Reconcile any operation that was active at shutdown, then resume schedules/write gates.
-
-Example:
-
-```sh
-git fetch --tags --force
-git checkout --detach '<new-release-tag>'
-docker compose --env-file /opt/firewall-manager/runtime/.env.production \
-  -f compose.production.yaml config --quiet
-docker compose --env-file /opt/firewall-manager/runtime/.env.production \
-  -f compose.production.yaml build backend frontend
-docker compose --env-file /opt/firewall-manager/runtime/.env.production \
-  -f compose.production.yaml stop edge backend worker scheduler
-docker compose --env-file /opt/firewall-manager/runtime/.env.production \
-  -f compose.production.yaml run --rm migrate
-docker compose --env-file /opt/firewall-manager/runtime/.env.production \
-  -f compose.production.yaml up -d backend worker scheduler frontend edge
-```
-
-Application image rollback, Alembic downgrade, database restore, compensating ChangeSet, and FMC/
-SCC deployment rollback are five different operations. Never imply that recreating an older Docker
-image reverses a provider configuration. Prefer a forward fix; use an Alembic downgrade only when
-the specific migration documents and tests it.
-
-## 18. Decommission
-
-Pause schedules and writes, finish/reconcile active deployments, export required audit evidence,
-take final PostgreSQL and application-key backups, and record retention ownership. Stop the stack
-without volumes. Revoke the OIDC client, FMC/SCC credentials, SMTP credential, and operator access.
-Remove DNS and certificates when the retention window permits. Only after an
-authorized owner confirms recoverability/retention may you remove named volumes and securely
-destroy backups and host keys. Volume removal is destructive and normally unrecoverable.
-
-## 19. Final production security checklist
-
-- [ ] `compose.production.yaml` is used; development Compose, mocks, fixtures, and dev auth are absent
+- [ ] `scripts/production.sh setup` completed successfully; development Compose, mocks, fixtures, and dev auth are absent
 - [ ] only TCP 443 (and optional redirect port 80) is externally reachable
 - [ ] valid hostname certificate/full chain installed; private key is outside Git/images
 - [ ] generated self-signed certificate is explicitly trusted only by intended clients or replaced
@@ -628,14 +379,6 @@ destroy backups and host keys. Volume removal is destructive and normally unreco
 - [ ] backups are encrypted/off-host and a containerized restore was tested
 - [ ] monitoring and finite Docker log rotation are active
 - [ ] `docker compose down -v` is prohibited by the operations runbook
-
-## 20. External managed substitutions
-
-Advanced installations may replace the reference PostgreSQL, Redis, ingress, or file-mounted key
-with managed services or an external KMS-backed secret manager if they preserve the same driver/API
-behavior, TLS, persistence, least privilege, and availability assumptions. That is not the primary
-walkthrough and requires a deployment-specific Compose override and validation. Do not weaken
-production defaults merely to make a managed service fit.
 
 ## Deployment safety and existing installations
 
@@ -656,14 +399,6 @@ Creating and editing a Changeset requires the corresponding policy operation gra
 automatic in the application workflow and does not require a separate grant. Delegated approvers
 require the Approve ChangeSets grant as well as the approver role; self-approval is refused. Edits
 and revalidation invalidate approval, and execution rechecks the approver's current authority.
-
-The shipped stack injects a file-backed encryption key and does not deploy Vault. External Vault
-AppRole support is an alternative integration requiring operator-managed TLS, credentials, policy,
-availability, and recovery validation. It is not part of the bundled installation.
-
-The canonical application version is `backend/src/firewall_manager/version.py`. Python package
-metadata and the API derive their version from it. `/api/v1/health/live` also exposes a build SHA;
-pass `--build-arg APP_GIT_SHA=$(git rev-parse --short HEAD)` when building the backend to populate it.
 
 ## Deployment authorization and change windows
 

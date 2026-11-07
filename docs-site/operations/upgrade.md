@@ -1,16 +1,26 @@
 # Upgrade
 
-Upgrade from an immutable reviewed release, not a moving branch.
+Use a maintenance window and a reviewed release tag or commit. Review the release's migration,
+configuration, and recovery notes, pause provider schedules/writes, and reconcile active operations.
+Confirm encrypted off-host backup storage and separate custody of the application key.
 
-1. Read the release notes and identify schema, configuration, provider-capability, and rollback considerations.
-2. Create and verify a database backup; confirm separate custody of the application key.
-3. Validate available disk space and the new production configuration.
-4. Build or pull the release images.
-5. Stop application traffic for the documented maintenance window.
-6. Run `./scripts/production.sh migrate` once.
-7. Start the full stack and wait for every health check.
-8. Run `./scripts/production.sh validate` and inspect logs, worker/scheduler heartbeats, OIDC, provider reads, and metrics.
-9. Keep provider writes paused until synchronization and version evidence are healthy.
-10. Retain the prior images and backup until the validation window closes.
+From the repository directory, replace the checkout placeholder before running:
 
-Database migrations are forward changes. A container image rollback does not reverse a schema change. If validation fails, follow the release-specific recovery procedure and restore only from a verified backup with a deliberate reconciliation plan.
+```sh
+./scripts/production.sh backup
+./scripts/production.sh stop
+git fetch --tags
+git checkout --detach '<new-release-tag-or-commit>'
+./scripts/production.sh setup
+```
+
+Setup preserves configuration, secrets, certificates, and database volumes. It builds the new
+images, starts the database and queue, runs migrations while the application is stopped, starts
+the application, and validates HTTPS. Resolve any failure before resuming service.
+
+Verify login, provider reads and synchronization, worker/scheduler health, and monitoring before
+resuming writes. If monitoring was previously enabled, run `./scripts/production.sh monitoring-start`
+after setup. Retain the prior release and backup through the validation window.
+
+An application rollback does not reverse database migrations or firewall changes. Follow the
+release-specific recovery procedure and [backup and restore guidance](./backup-restore).

@@ -43,6 +43,6 @@ generate the base64-encoded 32-byte key described in `.env.example`, store it on
 mock URLs, or its authentication mode into production.
 
 For a real installation, return to [the production installation guide](production-installation.md)
-and use only `compose.production.yaml`.
+and run `./scripts/production.sh setup`.
 
 The organization-wide overview and legacy inventory endpoints require a platform administrator. Delegated users select one Group and policy in the workspace; the dashboard does not aggregate permissions or inventory across memberships.

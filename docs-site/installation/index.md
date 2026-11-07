@@ -1,42 +1,56 @@
-# Production quick start
+# Install Firewall Policy Manager
 
-The supported single-host production topology runs Caddy, the built frontend, FastAPI, workers, the singleton scheduler, PostgreSQL, authenticated Redis, and optional Prometheus/Grafana as hardened containers. Only HTTPS is exposed publicly.
+Use `./scripts/production.sh setup` for the supported single-host installation. The script creates
+protected configuration and secrets, builds the images, migrates the database, starts services,
+and validates HTTPS.
 
-> This sequence is an orientation, not a substitute for the [complete production guide](./production). Read each linked section before operating the corresponding step.
+## Prepare the host
 
-## Installation sequence
+Use Linux with Docker Engine, Compose v2, Git, `curl`, and root or `sudo` access. Choose a stable
+hostname that resolves to the server and allow inbound TCP 443. Plan for 4 CPU cores, 8 GiB RAM,
+and 50 GiB persistent disk for a small production deployment. A 1 GiB host can run out of memory
+during the frontend build.
 
-<div class="lifecycle-grid"><div class="lifecycle-step"><b>01</b><strong>Prepare</strong><span>Current Docker Engine and Compose v2, DNS, storage, time sync, and outbound provider access.</span></div><div class="lifecycle-step"><b>02</b><strong>Configure</strong><span>Check out an immutable release and create the protected runtime layout.</span></div><div class="lifecycle-step"><b>03</b><strong>Secure</strong><span>Install TLS, create runtime secrets, and choose deployment injection or Vault.</span></div><div class="lifecycle-step"><b>04</b><strong>Start</strong><span>Start infrastructure, migrate PostgreSQL, then start API, workers, scheduler, frontend, and edge.</span></div></div>
+See [host and network prerequisites](./production#host-and-network-prerequisites) before starting.
 
-1. [Prepare the host and release checkout](./production#host-and-network-prerequisites).
-2. [Configure production environment and protected files](./production#production-configuration-and-runtime-secrets).
-3. [Install the trusted certificate and private key](./tls).
-4. Start the infrastructure services.
-5. [Initialize the chosen secret provider](./secrets).
-6. Apply the complete Alembic schema.
-7. Start the application services and validate readiness.
-8. [Configure and test OIDC](../security/authentication).
-9. Bootstrap the first Platform Admin through the guarded first-run workflow.
-10. Add [FMC](../providers/fmc) or [SCC](../providers/scc) with writes disabled.
-11. Configure [backups](../operations/backup-restore) and [monitoring](../operations/monitoring) before production enablement.
+## Run setup
 
-## Guided setup
-
-From an immutable release checkout:
+Replace `<release-tag-or-commit>` with a reviewed release tag or commit:
 
 ```sh
-cd /opt/firewall-manager/repository
+git clone https://github.com/PubSec-Security-DevNet/firewall-policy-manager.git
+cd firewall-policy-manager
+git checkout --detach '<release-tag-or-commit>'
 ./scripts/production.sh setup
 ```
 
-The helper checks prerequisites, creates protected files, builds images, starts infrastructure, applies migrations, starts the stack, waits for health checks, and validates HTTPS. It preserves existing configuration and secrets.
+Enter the exact browser hostname when prompted, without `https://` or a path. Setup creates
+runtime files automatically; you do not need to generate passwords or run Compose manually.
 
-After setup, open the configured HTTPS URL to complete OIDC and organization bootstrap. There is no default production username or password.
+Wait for `Production validation passed` and the final instruction to open the HTTPS URL. Setup
+then returns to the prompt. A completed image build is only part of setup. If it fails, correct
+the reported problem and rerun it; existing configuration, secrets, and data are preserved.
 
-## Before enabling provider writes
+## Complete browser setup
 
-- complete a full provider synchronization and review capability/version evidence;
-- configure Groups, policy mappings, resource grants, authorized ranges, and approval requirements;
-- validate backup restore, alerts, worker/scheduler recovery, deployment, and compensating rollback procedures;
-- exercise real mutations only against an approved non-production FMC or SCC target;
-- review the [production release checklist](./production#final-security-checklist).
+Open the configured HTTPS URL. The generated self-signed certificate requires client trust;
+[install a trusted certificate](./tls) before broad user access. Complete the one-time OIDC setup
+to create the organization and first Platform Admin. There is no default production password.
+
+Connect [FMC](../providers/fmc) or [SCC](../providers/scc) with writes disabled. Complete provider
+synchronization, authorization, approvals, [backups](../operations/backup-restore), and
+[monitoring](../operations/monitoring) before enabling provider writes.
+
+## Manage the installation
+
+Run these commands from the repository directory:
+
+```sh
+./scripts/production.sh status
+./scripts/production.sh logs backend worker scheduler edge
+./scripts/production.sh help
+```
+
+`logs` follows output until Ctrl+C; it does not stop services. Continue with the
+[setup and command reference](./production), [troubleshooting](./production#installation-troubleshooting),
+and [final security checklist](./production#final-security-checklist).

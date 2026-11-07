@@ -127,11 +127,14 @@ export default defineConfig({
         {
           text: "Installation",
           items: [
-            { text: "Production quick start", link: "/installation/" },
-            { text: "Full production guide", link: "/installation/production" },
+            { text: "Install with the script", link: "/installation/" },
+            {
+              text: "Setup & command reference",
+              link: "/installation/production",
+            },
             { text: "Production configuration", link: "/guide/configuration" },
             { text: "TLS & certificates", link: "/installation/tls" },
-            { text: "Vault & secrets", link: "/installation/secrets" },
+            { text: "Runtime secrets", link: "/installation/secrets" },
             { text: "Authentication", link: "/security/authentication" },
             { text: "FMC", link: "/providers/fmc" },
             { text: "SCC", link: "/providers/scc" },

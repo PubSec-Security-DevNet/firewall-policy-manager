@@ -15,3 +15,6 @@ Perform restores into an isolated PostgreSQL instance. Verify the archive, resto
 Document recovery point and recovery time evidence. A backup job exit code is not a restore test.
 
 The production helper intentionally provides no one-command restore or volume deletion shortcut. Restoring production requires an explicit outage plan, verified target, retained pre-restore copy, migration decision, and post-restore provider reconciliation.
+
+For the containerized recovery commands, see the
+[production backup and recovery runbook](https://github.com/PubSec-Security-DevNet/firewall-policy-manager/blob/main/docs/backup-restore.md).
