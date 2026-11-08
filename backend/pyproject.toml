@@ -19,7 +19,7 @@ dependencies = [
   "pydantic-settings==2.16.2",
   "python-json-logger==4.2.0",
   "redis==8.1.0",
-  "sqlalchemy==2.1.7",
+  "sqlalchemy==2.1.8",
   "uvicorn==0.54.0",
 ]
 
